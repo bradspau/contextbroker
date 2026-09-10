@@ -40,6 +40,75 @@ flowchart TB
 `seed_graph.py` and `telemetry_simulator.py` are one-off/background setup
 scripts that populate the two data stores; they never touch the LLM.
 
+### `broker.py`
+
+The tool-calling agent — the only script that talks to an LLM.
+
+- **`query_intent_state_requirements(intent_id)`** — runs a SPARQL `SELECT`
+  against Fuseki for a given intent (e.g. `intent-core-health-01`) and
+  returns its declared target metric, operator, target value, and the
+  `device`/`interface` pairs it applies to. Raises `ValueError` if the
+  intent doesn't exist.
+- **`query_tsdb_metrics(device, interface, metric_type, time_window)`** —
+  runs a PromQL `max_over_time(...)` query against VictoriaMetrics for one
+  interface and returns the observed value over that window, or `None` if
+  there's no data.
+- Both functions validate every argument against a strict allow-list regex
+  (`_validate_token` / `_SAFE_WINDOW`) before it reaches the SPARQL/PromQL
+  string, and reject any tool-call argument the tool's own JSON schema
+  doesn't declare (`_execute_tool`) — this is what stops the LLM from
+  injecting query syntax or redirecting a query to an attacker-controlled
+  endpoint.
+- **`run_agent(user_prompt)`** drives the tool-calling loop: it sends the
+  prompt and `SYSTEM_PROMPT` to Claude (`_run_claude`), executes whatever
+  tools Claude asks for via `_execute_tool`, feeds the results back, and
+  repeats (up to `MAX_ITERATIONS`) until Claude returns a final text
+  answer. If Claude's API is unreachable (`anthropic.APIConnectionError`),
+  it restarts the whole conversation against a local LM Studio server
+  instead (`_run_lmstudio`) — see [Optional: local LM Studio
+  fallback](#optional-local-lm-studio-fallback).
+- Run directly: `python broker.py "<question>"` (or with no argument, it
+  prompts interactively).
+
+### `seed_graph.py`
+
+One-off setup script — loads the topology/intent ontology into Fuseki so
+`broker.py` has something to query.
+
+- **`load_ttl_to_fuseki(ttl_path, data_endpoint, auth)`** reads a Turtle
+  (`.ttl`) file and `POST`s its raw bytes to Fuseki's Graph Store Protocol
+  endpoint (`/network-dataset/data`) with HTTP basic auth (`admin`/`admin`
+  by default — matches the `ADMIN_PASSWORD` in `docker-compose.yml`).
+- Run directly: `python seed_graph.py` loads
+  `ontology/topology.ttl` (the `intent-core-health-01` requirement) into
+  the default endpoint. Both the file path and the endpoint can be
+  overridden as positional CLI args if you want to load a different
+  ontology or target a different dataset.
+
+### `telemetry_simulator.py`
+
+Background script — generates synthetic interface telemetry and writes it
+to VictoriaMetrics, standing in for a real network monitoring feed.
+
+- **`generate_metrics(rng, inject_drops)`** produces one sample of
+  `in_octets`, `out_octets`, and `input_drops` for one interface.
+  `input_drops` is always `0` unless `inject_drops=True`, in which case
+  there's a ~5% chance per sample of a nonzero value (1–20) — this is what
+  drives the compliant-vs-non-compliant demo.
+- **`format_line_protocol(...)`** / **`build_payload(...)`** format one
+  sample per router (`Router-A`/`GigabitEthernet0/0/0`,
+  `Router-B`/`GigabitEthernet0/0/1`) as InfluxDB line protocol, all tagged
+  under the `interface_metrics` measurement.
+- **`post_metrics(write_endpoint, payload)`** `POST`s that payload to
+  VictoriaMetrics's InfluxDB-compatible write endpoint (`/write`).
+- **`run(...)`** loops forever, posting a fresh batch every
+  `POST_INTERVAL_SECONDS` (5s), unless `--once` is passed.
+- Run directly: `python telemetry_simulator.py` (continuous) or
+  `python telemetry_simulator.py --once` (single batch, for manual
+  verification). Add `--inject-drops` to exercise the non-compliant path.
+  `MEASUREMENT_NAME` (`"interface_metrics"`) is imported by `broker.py` so
+  the two scripts can never disagree on the metric name prefix.
+
 ## Prerequisites
 
 - Docker and Docker Compose
