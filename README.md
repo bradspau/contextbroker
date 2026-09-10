@@ -14,7 +14,7 @@ flowchart TB
     User -->|"browses, click to expand"| LodLive["LodLive :8888<br/>graph explorer UI"]
 
     LodLive -->|"SPARQL via JSONP"| Proxy["lodlive-proxy :8081<br/>JSONP-wrapping proxy"]
-    Proxy -->|"forwards query,<br/>wraps _jqjsp()"| Fuseki
+    Proxy -->|"forwards query,<br/>wraps callback()"| Fuseki
 
     subgraph LLM["LLM providers"]
         Claude["Claude API<br/>(Anthropic, primary)"]
@@ -126,9 +126,13 @@ A small stdlib-only HTTP proxy that sits in front of Fuseki so the
   this proxy the browser silently fails to execute the response.
 - **`JsonpProxyHandler.do_GET`** reads the `query` parameter off the
   incoming request, forwards it to Fuseki's query endpoint, and wraps the
-  JSON response as `_jqjsp(<json>);` — `_jqjsp` is `jquery.jsonp`'s fixed
-  default callback name (confirmed by reading the plugin source; LodLive
-  doesn't pass an explicit callback name in our configuration).
+  JSON response as `<callback>(<json>);`. The callback name isn't fixed —
+  `lodlive.core.js` calls `$.jsonp.setup({callback: 'lodlive'})` globally,
+  so real requests carry an explicit `callback=lodlive` parameter, which
+  the proxy honors; it falls back to `jquery.jsonp`'s own undeclared
+  default (`_jqjsp`) only if a request omits the parameter. The callback
+  name is validated against a JS-identifier allow-list before being
+  embedded in the response, since it's executed as code.
 - Runs as its own container (see `docker-compose.yml`); not meant to be run
   standalone outside Docker.
 
