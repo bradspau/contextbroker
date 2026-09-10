@@ -9,8 +9,12 @@ tool-calling loop (via the Anthropic SDK) to answer questions like
 
 ```mermaid
 flowchart TB
-    User(["User (CLI)"]) -->|"prompt"| Broker["broker.py<br/>tool-calling agent"]
+    User(["User"]) -->|"CLI prompt"| Broker["broker.py<br/>tool-calling agent"]
     Broker -->|"compliance answer"| User
+    User -->|"browses, click to expand"| LodLive["LodLive :8888<br/>graph explorer UI"]
+
+    LodLive -->|"SPARQL via JSONP"| Proxy["lodlive-proxy :8081<br/>JSONP-wrapping proxy"]
+    Proxy -->|"forwards query,<br/>wraps _jqjsp()"| Fuseki
 
     subgraph LLM["LLM providers"]
         Claude["Claude API<br/>(Anthropic, primary)"]
@@ -109,6 +113,25 @@ to VictoriaMetrics, standing in for a real network monitoring feed.
   `MEASUREMENT_NAME` (`"interface_metrics"`) is imported by `broker.py` so
   the two scripts can never disagree on the metric name prefix.
 
+### `lodlive-proxy/jsonp_proxy.py`
+
+A small stdlib-only HTTP proxy that sits in front of Fuseki so the
+[LodLive](http://lodlive.it/) graph explorer can query it — see
+[Optional: explore the graph visually](#optional-explore-the-graph-visually-lodlive).
+
+- LodLive's SPARQL requests go through jQuery's `jquery.jsonp` plugin, which
+  loads results via a `<script src="...">` tag and expects the response
+  body to be JavaScript invoking a callback function — not raw JSON. Fuseki
+  only ever returns plain `application/sparql-results+json`, so without
+  this proxy the browser silently fails to execute the response.
+- **`JsonpProxyHandler.do_GET`** reads the `query` parameter off the
+  incoming request, forwards it to Fuseki's query endpoint, and wraps the
+  JSON response as `_jqjsp(<json>);` — `_jqjsp` is `jquery.jsonp`'s fixed
+  default callback name (confirmed by reading the plugin source; LodLive
+  doesn't pass an explicit callback name in our configuration).
+- Runs as its own container (see `docker-compose.yml`); not meant to be run
+  standalone outside Docker.
+
 ## Prerequisites
 
 - Docker and Docker Compose
@@ -197,6 +220,27 @@ python seed_graph.py
 Loads `ontology/topology.ttl` — the `intent-core-health-01` requirement
 (zero input drops) on the link between `Router-A`/`GigabitEthernet0/0/0`
 and `Router-B`/`GigabitEthernet0/0/1`.
+
+### Optional: explore the graph visually (LodLive)
+
+`docker compose up -d` (step 3) also starts [LodLive](http://lodlive.it/), an
+interactive click-to-expand RDF graph browser — similar in spirit to
+Stardog's Explorer. Once the ontology is seeded, open:
+
+```
+http://localhost:8888/app_en.html
+```
+
+and click one of the pre-configured examples in the sidebar
+(`intent-core-health-01`, the Router-A↔Router-B link, or the Router-A
+interface) to start exploring. Clicking a node expands it to show its
+connected neighbors.
+
+Fuseki's SPARQL endpoint only returns plain JSON, but LodLive requires a
+JSONP-wrapped response — `lodlive-proxy` (port 8081) sits between them to
+translate, so LodLive is configured to query it rather than Fuseki
+directly (see `lodlive/lodlive.profile.js` and
+[`lodlive-proxy/jsonp_proxy.py`](#lodlive-proxyjsonp_proxypy)).
 
 ## 5. Start the telemetry simulator
 

@@ -18,5 +18,28 @@ services:
     command: ["java", "-cp", "*:/javalibs/*", "org.apache.jena.fuseki.main.cmds.FusekiServerCmd", "--update", "--mem", "/network-dataset"]
     restart: unless-stopped
 
+  lodlive-proxy:
+    build: ./lodlive-proxy
+    container_name: lodlive-proxy
+    ports:
+      - "8081:8081"
+    environment:
+      - FUSEKI_QUERY_ENDPOINT=http://fuseki:3030/network-dataset/query
+    depends_on:
+      - fuseki
+    restart: unless-stopped
+
+  lodlive:
+    build:
+      context: https://github.com/LodLive/LodLive.git#327fcbbc4e03400ea5bdc5661fbb022c40bae28a
+    container_name: lodlive
+    ports:
+      - "8888:80"
+    volumes:
+      - ./lodlive/lodlive.profile.js:/usr/share/nginx/html/js/lodlive.profile.js:ro
+    depends_on:
+      - lodlive-proxy
+    restart: unless-stopped
+
 volumes:
   vm-data:
