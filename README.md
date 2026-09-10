@@ -39,6 +39,32 @@ MODEL_NAME=claude-opus-5
 
 `MODEL_NAME` is optional — it defaults to `claude-opus-5` if unset.
 
+### Optional: local LM Studio fallback
+
+If Claude's API is unreachable (e.g. no network), `broker.py` falls back to a
+local model served by [LM Studio](https://lmstudio.ai/). Add to `.env`:
+
+```
+LMSTUDIO_BASE_URL=http://<lm-studio-host>:1234/v1
+LMSTUDIO_MODEL=<model-name-as-shown-in-lm-studio>
+```
+
+`LMSTUDIO_BASE_URL` defaults to `http://localhost:1234/v1` if unset.
+`LMSTUDIO_MODEL` has no default — the fallback raises a clear error if it's
+unset when Claude is unreachable, rather than guessing a model name.
+
+If you're running this inside a VM (e.g. Ubuntu on VMware Fusion on a Mac)
+and LM Studio runs on the host:
+1. In LM Studio, enable **Serve on Local Network** (it only binds to
+   `127.0.0.1` by default, which the VM can't reach).
+2. Set the VM's network adapter to **Bridged** rather than NAT, so it shares
+   the host's LAN and can reach the host's LAN IP directly.
+3. Set `LMSTUDIO_BASE_URL` to `http://<mac-lan-ip>:1234/v1`.
+
+The fallback only triggers on connection/network errors (timeout, DNS
+failure, connection refused) — authentication and rate-limit errors from
+Claude's API still fail loudly rather than being silently masked.
+
 ## 3. Start the data stores
 
 ```bash

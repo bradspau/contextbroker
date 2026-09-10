@@ -7,6 +7,7 @@ import sys
 import anthropic
 import requests
 from dotenv import load_dotenv
+from openai import OpenAI
 
 from telemetry_simulator import MEASUREMENT_NAME
 
@@ -149,20 +150,65 @@ _TOOL_ALLOWED_ARGS = {
     for tool in TOOLS
 }
 
+
+def _to_openai_tool(tool: dict) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["input_schema"],
+        },
+    }
+
+
+# LM Studio speaks the OpenAI tool-calling wire format, so derive its tool list
+# from the same TOOLS declarations Claude uses — one schema, no drift.
+TOOLS_OPENAI = [_to_openai_tool(tool) for tool in TOOLS]
+
+
+def _execute_tool(name: str, arguments: dict) -> tuple[str, bool]:
+    """Run one tool call. Shared by both the Claude and LM Studio loops so the
+    allow-list, SSRF guard, and no_data handling can't drift between them.
+    Returns (json content string, is_error)."""
+    try:
+        # Restrict tool dispatch to the allow-list (derived from TOOLS,
+        # so it can never drift from the declared schema)
+        if name not in _TOOL_ALLOWED_ARGS:
+            raise ValueError(f"Unknown tool: {name!r}")
+        # Reject any argument key the tool's own schema doesn't declare
+        # (prevents e.g. an LLM-supplied query_endpoint override / SSRF).
+        allowed_keys = _TOOL_ALLOWED_ARGS[name]
+        extra_keys = set(arguments) - allowed_keys
+        if extra_keys:
+            raise ValueError(f"Unexpected argument(s) for tool {name!r}: {sorted(extra_keys)}")
+        # Look up the function dynamically from globals so patches work
+        func = globals()[name]
+        result = func(**arguments)
+        # query_tsdb_metrics returns None for "no data in this window" —
+        # surface that as an explicit status rather than a bare null, so
+        # the model can't mistake missing telemetry for an observed zero.
+        if result is None:
+            result = {"status": "no_data"}
+        return json.dumps(result), False
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}), True
+
+
 def _build_client() -> anthropic.Anthropic:
     load_dotenv()
     return anthropic.Anthropic()
 
 
-def run_agent(
-    user_prompt: str, client: anthropic.Anthropic | None = None, model: str | None = None
-) -> str:
-    if client is None:
-        client = _build_client()
-    if model is None:
-        load_dotenv()
-        model = os.environ.get("MODEL_NAME", "claude-opus-5")
+def _build_lmstudio_client() -> OpenAI:
+    load_dotenv()
+    return OpenAI(
+        base_url=os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1"),
+        api_key="lm-studio",  # unused by LM Studio, but the OpenAI client requires a value
+    )
 
+
+def _run_claude(user_prompt: str, client: anthropic.Anthropic, model: str) -> str:
     messages = [{"role": "user", "content": user_prompt}]
 
     for _ in range(MAX_ITERATIONS):
@@ -181,34 +227,7 @@ def run_agent(
 
         tool_results = []
         for block in tool_use_blocks:
-            try:
-                name = block.name
-                arguments = block.input
-                # Restrict tool dispatch to the allow-list (derived from TOOLS,
-                # so it can never drift from the declared schema)
-                if name not in _TOOL_ALLOWED_ARGS:
-                    raise ValueError(f"Unknown tool: {name!r}")
-                # Reject any argument key the tool's own schema doesn't declare
-                # (prevents e.g. an LLM-supplied query_endpoint override / SSRF).
-                allowed_keys = _TOOL_ALLOWED_ARGS[name]
-                extra_keys = set(arguments) - allowed_keys
-                if extra_keys:
-                    raise ValueError(
-                        f"Unexpected argument(s) for tool {name!r}: {sorted(extra_keys)}"
-                    )
-                # Look up the function dynamically from globals so patches work
-                func = globals()[name]
-                result = func(**arguments)
-                # query_tsdb_metrics returns None for "no data in this window" —
-                # surface that as an explicit status rather than a bare null, so
-                # the model can't mistake missing telemetry for an observed zero.
-                if result is None:
-                    result = {"status": "no_data"}
-                content = json.dumps(result)
-                is_error = False
-            except Exception as exc:
-                content = json.dumps({"error": str(exc)})
-                is_error = True
+            content, is_error = _execute_tool(block.name, block.input)
             tool_results.append(
                 {
                     "type": "tool_result",
@@ -220,6 +239,74 @@ def run_agent(
         messages.append({"role": "user", "content": tool_results})
 
     return f"Unable to reach a final answer after {MAX_ITERATIONS} tool-calling iterations."
+
+
+def _run_lmstudio(user_prompt: str, client: OpenAI, model: str) -> str:
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    for _ in range(MAX_ITERATIONS):
+        response = client.chat.completions.create(
+            model=model, messages=messages, tools=TOOLS_OPENAI
+        )
+        message = response.choices[0].message
+
+        if not message.tool_calls:
+            return message.content
+
+        messages.append(
+            {"role": "assistant", "content": message.content, "tool_calls": message.tool_calls}
+        )
+        for tool_call in message.tool_calls:
+            try:
+                arguments = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError as exc:
+                content = json.dumps({"error": f"Invalid tool arguments JSON: {exc}"})
+            else:
+                content, _is_error = _execute_tool(tool_call.function.name, arguments)
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": content,
+                }
+            )
+
+    return f"Unable to reach a final answer after {MAX_ITERATIONS} tool-calling iterations."
+
+
+def run_agent(
+    user_prompt: str,
+    client: anthropic.Anthropic | None = None,
+    model: str | None = None,
+    fallback_client: OpenAI | None = None,
+    fallback_model: str | None = None,
+) -> str:
+    if client is None:
+        client = _build_client()
+    if model is None:
+        load_dotenv()
+        model = os.environ.get("MODEL_NAME", "claude-opus-5")
+
+    try:
+        return _run_claude(user_prompt, client, model)
+    except anthropic.APIConnectionError:
+        # Claude's API is unreachable (network/DNS/timeout) — fall back to a
+        # local LM Studio server. Auth and rate-limit errors are NOT caught
+        # here, so a misconfigured API key still fails loudly.
+        if fallback_client is None:
+            fallback_client = _build_lmstudio_client()
+        if fallback_model is None:
+            load_dotenv()
+            fallback_model = os.environ.get("LMSTUDIO_MODEL")
+            if not fallback_model:
+                raise RuntimeError(
+                    "Claude API is unreachable and LMSTUDIO_MODEL is not set in .env — "
+                    "cannot fall back to LM Studio."
+                ) from None
+        return _run_lmstudio(user_prompt, fallback_client, fallback_model)
 
 
 if __name__ == "__main__":

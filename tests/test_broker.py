@@ -3,6 +3,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import anthropic
+import httpx2
 import pytest
 import rdflib
 
@@ -307,6 +309,119 @@ def test_run_agent_stops_after_max_iterations_without_raising():
         f"Unable to reach a final answer after {broker.MAX_ITERATIONS} tool-calling iterations."
     )
     assert fake_client.messages.create.call_count == broker.MAX_ITERATIONS
+
+
+def _connection_error() -> anthropic.APIConnectionError:
+    req = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    return anthropic.APIConnectionError(request=req)
+
+
+def _openai_tool_call(call_id, name, arguments_json):
+    return SimpleNamespace(
+        id=call_id,
+        function=SimpleNamespace(name=name, arguments=arguments_json),
+    )
+
+
+def test_run_agent_falls_back_to_lmstudio_on_connection_error():
+    """When Claude's API is unreachable, run_agent must fall back to the
+    LM Studio client and still return an answer."""
+    fake_claude_client = Mock()
+    fake_claude_client.messages.create.side_effect = _connection_error()
+
+    lmstudio_final = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="From LM Studio.", tool_calls=None))]
+    )
+    fake_lmstudio_client = Mock()
+    fake_lmstudio_client.chat.completions.create.return_value = lmstudio_final
+
+    result = broker.run_agent(
+        "Is intent-core-health-01 compliant right now?",
+        client=fake_claude_client,
+        model="test-model",
+        fallback_client=fake_lmstudio_client,
+        fallback_model="local-model",
+    )
+
+    assert result == "From LM Studio."
+    fake_claude_client.messages.create.assert_called_once()
+    fake_lmstudio_client.chat.completions.create.assert_called_once()
+
+
+def test_run_agent_does_not_fallback_on_non_connection_error():
+    """Auth/rate-limit errors must propagate, not silently fall back — a
+    misconfigured API key should fail loudly, not be masked by LM Studio."""
+    req = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    resp = httpx2.Response(401, request=req)
+    fake_claude_client = Mock()
+    fake_claude_client.messages.create.side_effect = anthropic.AuthenticationError(
+        "invalid x-api-key", response=resp, body=None
+    )
+    fake_lmstudio_client = Mock()
+
+    with pytest.raises(anthropic.AuthenticationError):
+        broker.run_agent(
+            "Is intent-core-health-01 compliant right now?",
+            client=fake_claude_client,
+            model="test-model",
+            fallback_client=fake_lmstudio_client,
+            fallback_model="local-model",
+        )
+
+    fake_lmstudio_client.chat.completions.create.assert_not_called()
+
+
+def test_run_agent_lmstudio_fallback_executes_tool_call():
+    """The LM Studio fallback path must run the same tool-dispatch logic
+    (allow-list, no_data handling) as the Claude path."""
+    fake_claude_client = Mock()
+    fake_claude_client.messages.create.side_effect = _connection_error()
+
+    first_message = SimpleNamespace(
+        content=None,
+        tool_calls=[
+            _openai_tool_call(
+                "call_1", "query_intent_state_requirements", '{"intent_id": "intent-core-health-01"}'
+            )
+        ],
+    )
+    final_message = SimpleNamespace(content="Compliant via LM Studio.", tool_calls=None)
+    fake_lmstudio_client = Mock()
+    fake_lmstudio_client.chat.completions.create.side_effect = [
+        SimpleNamespace(choices=[SimpleNamespace(message=first_message)]),
+        SimpleNamespace(choices=[SimpleNamespace(message=final_message)]),
+    ]
+
+    with patch(
+        "broker.query_intent_state_requirements",
+        return_value={"metric": "input_drops", "operator": "==", "target_value": 0.0, "interfaces": []},
+    ) as mock_tool:
+        result = broker.run_agent(
+            "Is intent-core-health-01 compliant right now?",
+            client=fake_claude_client,
+            model="test-model",
+            fallback_client=fake_lmstudio_client,
+            fallback_model="local-model",
+        )
+
+    mock_tool.assert_called_once_with(intent_id="intent-core-health-01")
+    assert result == "Compliant via LM Studio."
+    assert fake_lmstudio_client.chat.completions.create.call_count == 2
+
+
+def test_run_agent_fallback_requires_lmstudio_model_env_var(monkeypatch):
+    """If Claude is unreachable and LMSTUDIO_MODEL isn't configured, fail with
+    a clear error instead of guessing a model name."""
+    monkeypatch.delenv("LMSTUDIO_MODEL", raising=False)
+    fake_claude_client = Mock()
+    fake_claude_client.messages.create.side_effect = _connection_error()
+
+    with pytest.raises(RuntimeError, match="LMSTUDIO_MODEL"):
+        broker.run_agent(
+            "Is intent-core-health-01 compliant right now?",
+            client=fake_claude_client,
+            model="test-model",
+        )
 
 
 def test_measurement_name_constant_matches_telemetry_simulator():
