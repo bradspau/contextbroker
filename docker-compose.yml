@@ -1,0 +1,22 @@
+services:
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.102.0
+    container_name: victoriametrics
+    ports:
+      - "8428:8428"
+    volumes:
+      - vm-data:/victoria-metrics-data
+    restart: unless-stopped
+
+  fuseki:
+    image: secoresearch/fuseki:6.1.0
+    container_name: fuseki
+    ports:
+      - "3030:3030"
+    environment:
+      - ADMIN_PASSWORD=admin
+    command: ["java", "-cp", "*:/javalibs/*", "org.apache.jena.fuseki.main.cmds.FusekiServerCmd", "--update", "--mem", "/network-dataset"]
+    restart: unless-stopped
+
+volumes:
+  vm-data:

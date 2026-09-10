@@ -1,0 +1,67 @@
+@prefix : <http://example.org/network-ontology#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+### Classes ###
+
+:OperationalIntent a owl:Class ;
+    rdfs:label "Operational Intent" .
+
+:TopologicalLink a owl:Class ;
+    rdfs:label "Topological Link" .
+
+:Interface a owl:Class ;
+    rdfs:label "Interface" .
+
+### Properties ###
+
+:hasTargetMetric a owl:DatatypeProperty ;
+    rdfs:domain :OperationalIntent ;
+    rdfs:range xsd:string .
+
+:hasOperator a owl:DatatypeProperty ;
+    rdfs:domain :OperationalIntent ;
+    rdfs:range xsd:string .
+
+:hasTargetValue a owl:DatatypeProperty ;
+    rdfs:domain :OperationalIntent ;
+    rdfs:range xsd:double .
+
+:appliesToLink a owl:ObjectProperty ;
+    rdfs:domain :OperationalIntent ;
+    rdfs:range :TopologicalLink .
+
+:hasInterface a owl:ObjectProperty ;
+    rdfs:domain :TopologicalLink ;
+    rdfs:range :Interface .
+
+:onDevice a owl:DatatypeProperty ;
+    rdfs:domain :Interface ;
+    rdfs:range xsd:string .
+
+:interfaceName a owl:DatatypeProperty ;
+    rdfs:domain :Interface ;
+    rdfs:range xsd:string .
+
+### Individuals ###
+
+:if-router-a-ge000 a :Interface ;
+    :onDevice "Router-A" ;
+    :interfaceName "GigabitEthernet0/0/0" .
+
+:if-router-b-ge001 a :Interface ;
+    :onDevice "Router-B" ;
+    :interfaceName "GigabitEthernet0/0/1" .
+
+:link-router-a-router-b a :TopologicalLink ;
+    rdfs:label "Router-A <-> Router-B core link" ;
+    :hasInterface :if-router-a-ge000 , :if-router-b-ge001 .
+
+:intent-core-health-01 a :OperationalIntent ;
+    rdfs:label "Core Health: Zero Input Drops" ;
+    :hasTargetMetric "input_drops" ;
+    :hasOperator "==" ;
+    :hasTargetValue 0.0 ;
+    :appliesToLink :link-router-a-router-b .
