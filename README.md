@@ -5,6 +5,41 @@ requirements (an OWL/RDFS graph in Apache Jena Fuseki), using Claude's
 tool-calling loop (via the Anthropic SDK) to answer questions like
 *"Is intent-core-health-01 compliant right now?"*
 
+## Architecture
+
+```mermaid
+flowchart TB
+    User(["User (CLI)"]) -->|"prompt"| Broker["broker.py<br/>tool-calling agent"]
+    Broker -->|"compliance answer"| User
+
+    subgraph LLM["LLM providers"]
+        Claude["Claude API<br/>(Anthropic, primary)"]
+        LMStudio["LM Studio<br/>(local, fallback)"]
+    end
+
+    Broker -->|"messages.create()"| Claude
+    Broker -.->|"on APIConnectionError"| LMStudio
+    Claude -->|"tool_use / final answer"| Broker
+    LMStudio -->|"tool_use / final answer"| Broker
+
+    subgraph Data["Data stores (Docker)"]
+        Fuseki["Fuseki :3030<br/>intent/topology graph"]
+        VM["VictoriaMetrics :8428<br/>telemetry"]
+    end
+
+    Broker -->|"query_intent_state_requirements<br/>(SPARQL)"| Fuseki
+    Broker -->|"query_tsdb_metrics<br/>(PromQL)"| VM
+
+    SeedGraph["seed_graph.py"] -->|"loads ontology/topology.ttl"| Fuseki
+    TelemetrySim["telemetry_simulator.py"] -->|"writes every 5s"| VM
+```
+
+`broker.py` is the only component that talks to an LLM. It calls two tools —
+`query_intent_state_requirements` (Fuseki) and `query_tsdb_metrics`
+(VictoriaMetrics) — and hands their results to Claude to compare and answer.
+`seed_graph.py` and `telemetry_simulator.py` are one-off/background setup
+scripts that populate the two data stores; they never touch the LLM.
+
 ## Prerequisites
 
 - Docker and Docker Compose
