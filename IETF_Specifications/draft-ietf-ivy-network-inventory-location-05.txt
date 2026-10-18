@@ -1,0 +1,1456 @@
+
+
+
+
+Network Inventory YANG                                             B. Wu
+Internet-Draft                                                    Huawei
+Intended status: Standards Track                              S. Belotti
+Expires: 1 September 2026                                          Nokia
+                                                          J.-F. Bouquier
+                                                                Vodafone
+                                                            F. Peruzzini
+                                                                FiberCop
+                                                               P. Bedard
+                                                                   Cisco
+                                                        28 February 2026
+
+
+            A YANG Data Model for Network Inventory Location
+              draft-ietf-ivy-network-inventory-location-05
+
+Abstract
+
+   This document defines a YANG data model for Network Inventory
+   location (e.g., site, room, rack, geo-location data), which provides
+   location information with different granularity levels for
+   inventoried network elements.
+
+   Accurate location information is useful for network planning,
+   deployment, and maintenance.  However, such information cannot be
+   obtained or verified from the Network Elements themselves.  This
+   document defines a location model for network inventory that extends
+   the base inventory with comprehensive location data.
+
+Discussion Venues
+
+   This note is to be removed before publishing as an RFC.
+
+   Discussion of this document takes place on the Network Inventory YANG
+   Working Group mailing list (inventory-yang@ietf.org), which is
+   archived at https://mailarchive.ietf.org/arch/browse/inventory-yang/.
+
+   Source for this draft and an issue tracker can be found at
+   https://github.com/ietf-ivy-wg/network-inventory-location.
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+
+
+
+
+
+
+Wu, et al.              Expires 1 September 2026                [Page 1]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at https://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on 1 September 2026.
+
+Copyright Notice
+
+   Copyright (c) 2026 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents (https://trustee.ietf.org/
+   license-info) in effect on the date of publication of this document.
+   Please review these documents carefully, as they describe your rights
+   and restrictions with respect to this document.  Code Components
+   extracted from this document must include Revised BSD License text as
+   described in Section 4.e of the Trust Legal Provisions and are
+   provided without warranty as described in the Revised BSD License.
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . .   3
+     1.1.  Editorial Note (To be removed by RFC Editor)  . . . . . .   3
+     1.2.  Terminology and Notations . . . . . . . . . . . . . . . .   4
+   2.  Hierarchical Locations of Network Inventory . . . . . . . . .   4
+   3.  Rack  . . . . . . . . . . . . . . . . . . . . . . . . . . . .   5
+   4.  Network Inventory Location Tree . . . . . . . . . . . . . . .   7
+   5.  YANG Data model for Network Inventory Location  . . . . . . .   9
+   6.  Operational Considerations  . . . . . . . . . . . . . . . . .  16
+   7.  Security Considerations . . . . . . . . . . . . . . . . . . .  17
+   8.  IANA Considerations . . . . . . . . . . . . . . . . . . . . .  18
+   9.  References  . . . . . . . . . . . . . . . . . . . . . . . . .  18
+     9.1.  Normative References  . . . . . . . . . . . . . . . . . .  18
+     9.2.  Informative References  . . . . . . . . . . . . . . . . .  19
+   Appendix A.  Examples . . . . . . . . . . . . . . . . . . . . . .  20
+     A.1.  Non-Rack Deployment: Access Point . . . . . . . . . . . .  20
+     A.2.  Distributed Multi-Chassis Network Element . . . . . . . .  22
+   Acknowledgments . . . . . . . . . . . . . . . . . . . . . . . . .  25
+   Contributors  . . . . . . . . . . . . . . . . . . . . . . . . . .  25
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  25
+
+
+
+
+Wu, et al.              Expires 1 September 2026                [Page 2]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+1.  Introduction
+
+   NEs can be grouped by location to provide more information for
+   network planning, deployment, and maintenance (e.g., easily locate
+   problematic NEs, optimize network resources, or help planning
+   forecasts).  The location can reflect outdoor or indoor information.
+   An indoor location may be represented as a building, room, or other
+   similar organizational structures.  Outdoor locations can be walls,
+   poles, or other mount places.
+
+   The information about sites, equipment rooms, and other more precise
+   locations is critical, but it cannot be automatically populated and
+   retrieved from network elements (NEs).  Instead, it is usually
+   configured manually.
+
+   The Network Inventory location model is to record physical locations,
+   such as sites, building, equipment rooms, racks, and so on.
+   Additionally, it includes provisions for physical addresses or geo-
+   location data (geographic coordinates).  The location model augments
+   the base network inventory [I-D.ietf-ivy-network-inventory-yang] to
+   enrich NEs with location information.
+
+   The Network Inventory location model is classified as a network model
+   (Section 3.5.1 of [I-D.ietf-netmod-rfc8407bis]).
+
+   The YANG data model in this document conforms to the Network
+   Management Datastore Architecture (NMDA) defined in [RFC8342].
+
+   Note: The NMDA design needs to be revisited once the module is stable
+   per (Section 4.23.2 of [I-D.ietf-netmod-rfc8407bis]).
+
+1.1.  Editorial Note (To be removed by RFC Editor)
+
+   Note to the RFC Editor: This section is to be removed prior to
+   publication.
+
+   This document contains placeholder values that need to be replaced
+   with finalized values at the time of publication.  This note
+   summarizes all of the substitutions that are needed.
+
+   Please apply the following replacements:
+
+   *  XXXX --> the assigned RFC number for this document
+
+   *  AAAA --> the assigned RFC number for
+      [I-D.ietf-ivy-network-inventory-yang]
+
+
+
+
+
+Wu, et al.              Expires 1 September 2026                [Page 3]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+1.2.  Terminology and Notations
+
+   The following terms are defined in [RFC7950] and are not redefined
+   here:
+
+   *  client
+
+   *  server
+
+   *  augment
+
+   *  data model
+
+   *  data node The following terms are defined in [RFC6241] and are not
+      redefined here:
+
+   *  configuration data
+
+   *  state data The tree diagram used in this document follows the
+      notation defined in [RFC8340].
+
+   Also, this document uses terms defined in
+   [I-D.ietf-ivy-network-inventory-yang].
+
+2.  Hierarchical Locations of Network Inventory
+
+   The "location" list is generalized to support a variety of geographic
+   location, such as sites, rooms, buildings.
+
+   A site represents a general geographic location to group a set of NEs
+   and corresponding inventory components.  NEs, racks, equipment rooms,
+   and buildings can be grouped within a site.
+
+   A room is a facility, a space for network elements and other
+   equipment (such as servers, storage) with power supply systems, air
+   conditioning system, etc.
+
+   Locations can be nested to form a hierarchy.  For example, buildings
+   may be within a site, and a room may be within a building.
+
+   The "location-type" is defined as a YANG identity to identify the
+   type of an inventory location, which may be site, equipment room,
+   building, etc.
+
+
+
+
+
+
+
+
+Wu, et al.              Expires 1 September 2026                [Page 4]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+   +--ro locations
+      +--ro location* [id]
+      |  +--ro id                   string
+      |  +--ro uuid?                yang:uuid
+      |  +--ro name?                string
+      |  +--ro alias?               string
+      |  +--ro description?         string
+      |  +--ro type?                string
+      |  +--ro parent?              -> ../../location/id
+      |  +--ro timestamp?           yang:date-and-time
+      |  +--ro valid-until?         yang:date-and-time
+      |  +--ro physical-address
+      |  |     ...
+      |  +--ro geo-location
+      |  |     ...
+      |  +--ro contained-chassis* [chassis-id]
+      |        ...
+
+                     Figure 1: YANG Subtree of Location
+
+3.  Rack
+
+   "racks" represent physical equipment racks in which NEs can be
+   installed, which facilitate device maintenance.  Through "rack-
+   location", each rack can be assigned to a site or a specific location
+   within a site, such as an equipment room.
+
+   Each rack is assigned a unique ID and a name in the context of a
+   facility, e.g. a site.  A rack may have some specific attributes,
+   such as appearance-related attributes and electricity-related
+   attributes.  The height, depth and width are described by Figure 2
+   (please consider that the door of the rack is facing the user).
+
+   Note: Further discussion is needed to decide whether to separate
+   "racks" from the list of "location".
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Wu, et al.              Expires 1 September 2026                [Page 5]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+                                    ----------------      ---
+                                    /|              /|      |
+                                   / |             / |      |
+                                  /  |            /  |      |
+                                 ----|-----------|   |      |
+                                 |   |           |   |      |
+                                 |   |           |   |      |
+                                 |   |           |   |      |
+                                 |   |           |   |      |
+                                 |   |           |   |      |
+                                 |   |           |   |    height
+                                 |   |           |   |      |
+                                 |   |           |   |      |
+                                 |   |           |   |      |
+                                 |   | Door    Q |   |      |
+                                 |   |         Q |   |      |
+                                 |   |           |   |      |
+                                 |   |           |   |      |
+                                 |   |           |   |      |
+                                 |   |           |   |      |
+                                 |   |           |   |      |
+                                 |   |           |   |      |
+                                 |   |           |   |      |
+                                 |   /-----------|----     ---
+                                 |  /            |   /      /
+                                 | /             |  /      depth
+                                 |/              | /      /
+                                 -----------------      ---
+                                 |______width____|
+                                 |               |
+
+                 Figure 2: Height, Width and Depth of Rack
+
+   The rack attributes include:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Wu, et al.              Expires 1 September 2026                [Page 6]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+           +--ro racks
+              +--ro rack* [id]
+                 +--ro id                     string
+                 +--ro uuid?                  yang:uuid
+                 +--ro name?                  string
+                 +--ro alias?                 string
+                 +--ro description?           string
+                 +--ro rack-location
+                 |     ...
+                 +--ro height?                uint16
+                 +--ro width?                 uint16
+                 +--ro depth?                 uint16
+                 +--ro max-voltage?           uint16
+                 +--ro max-allocated-power?   uint16
+                 +--ro contained-chassis* [relative-position]
+                 |     ...
+                 +--ro timestamp?             yang:date-and-time
+                 +--ro valid-until?           yang:date-and-time
+
+                       Figure 3: YANG Subtree of Rack
+
+   Max-voltage: the maximum voltage supported by the rack.
+
+4.  Network Inventory Location Tree
+
+   Figure 4 provides an overview of the data model for "ietf-ni-
+   location" module.
+
+       module: ietf-ni-location
+
+         augment /nwi:network-inventory:
+           +--ro locations
+              +--ro location* [id]
+              |  +--ro id                   string
+              |  +--ro uuid?                yang:uuid
+              |  +--ro name?                string
+              |  +--ro alias?               string
+              |  +--ro description?         string
+              |  +--ro type?                string
+              |  +--ro parent?              -> ../../location/id
+              |  +--ro timestamp?           yang:date-and-time
+              |  +--ro valid-until?         yang:date-and-time
+              |  +--ro physical-address
+              |  |  +--ro address?        string
+              |  |  +--ro postal-code?    string
+              |  |  +--ro state?          string
+              |  |  +--ro city?           string
+              |  |  +--ro country-code?   string
+
+
+
+Wu, et al.              Expires 1 September 2026                [Page 7]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+              |  +--ro geo-location
+              |  |  +--ro reference-frame
+              |  |  |  +--ro alternate-system?    string
+              |  |  |  |       {alternate-systems}?
+              |  |  |  +--ro astronomical-body?   string
+              |  |  |  +--ro geodetic-system
+              |  |  |     +--ro geodetic-datum?    string
+              |  |  |     +--ro coord-accuracy?    decimal64
+              |  |  |     +--ro height-accuracy?   decimal64
+              |  |  +--ro (location)?
+              |  |  |  +--:(ellipsoid)
+              |  |  |  |  +--ro latitude?    decimal64
+              |  |  |  |  +--ro longitude?   decimal64
+              |  |  |  |  +--ro height?      decimal64
+              |  |  |  +--:(cartesian)
+              |  |  |     +--ro x?           decimal64
+              |  |  |     +--ro y?           decimal64
+              |  |  |     +--ro z?           decimal64
+              |  |  +--ro velocity
+              |  |  |  +--ro v-north?   decimal64
+              |  |  |  +--ro v-east?    decimal64
+              |  |  |  +--ro v-up?      decimal64
+              |  |  +--ro timestamp?         yang:date-and-time
+              |  |  +--ro valid-until?       yang:date-and-time
+              |  +--ro contained-chassis* [chassis-id]
+              |     +--ro chassis-id       uint32
+              |     +--ro ne-ref?          leafref
+              |     +--ro component-ref?   leafref
+              +--ro racks
+                 +--ro rack* [id]
+                    +--ro id                     string
+                    +--ro uuid?                  yang:uuid
+                    +--ro name?                  string
+                    +--ro alias?                 string
+                    +--ro description?           string
+                    +--ro rack-location
+                    |  +--ro location-ref?    ni-location-ref
+                    |  +--ro row-number?      uint32
+                    |  +--ro column-number?   uint32
+                    +--ro height?                uint16
+                    +--ro width?                 uint16
+                    +--ro depth?                 uint16
+                    +--ro max-voltage?           uint16
+                    +--ro max-allocated-power?   uint16
+                    +--ro contained-chassis* [relative-position]
+                    |  +--ro relative-position    uint8
+                    |  +--ro ne-ref?              leafref
+                    |  +--ro component-ref?       leafref
+
+
+
+Wu, et al.              Expires 1 September 2026                [Page 8]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+                    +--ro timestamp?             yang:date-and-time
+                    +--ro valid-until?           yang:date-and-time
+
+            Figure 4: Network Inventory Location Tree Structure
+
+5.  YANG Data model for Network Inventory Location
+
+   The "ietf-ni-location" module uses types defined in [RFC9179],
+   [I-D.ietf-ivy-network-inventory-yang].
+
+   <CODE BEGINS> file "ietf-ni-location@2026-02-28.yang"
+   module ietf-ni-location {
+     yang-version 1.1;
+     namespace "urn:ietf:params:xml:ns:yang:ietf-ni-location";
+     prefix nil;
+
+     import ietf-yang-types {
+       prefix yang;
+       reference
+         "RFC 6991: Common YANG Data Types";
+     }
+     import ietf-network-inventory {
+       prefix nwi;
+       reference
+         "RFCAAAA: A YANG Data Model for Network Inventory";
+     }
+     import ietf-geo-location {
+       prefix geo;
+       reference
+         "RFC 9179: A YANG Grouping for Geographic Locations";
+     }
+
+     organization
+       "IETF Network Inventory YANG (ivy) Working Group";
+     contact
+       "WG Web:   <https://datatracker.ietf.org/wg/ivy>
+        WG List:  <mailto:inventory-yang@ietf.org>
+
+        Editor: Bo Wu
+             <lana.wubo@huawei.com>
+        Editor: Sergio Belotti
+             <sergio.belotti@nokia.com>
+        Editor: Jean-Francois Bouquier
+             <jeff.bouquier@vodafone.com>
+        Editor: Fabio Peruzzini
+             <fabio.peruzzini@telecomitalia.it>
+        Editor: Phil Bedard
+             <phbedard@cisco.com>";
+
+
+
+Wu, et al.              Expires 1 September 2026                [Page 9]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+     description
+       "This YANG module defines a model for Network Inventory
+        location.
+
+        Copyright (c) 2026 IETF Trust and the persons
+        identified as authors of the code.  All rights reserved.
+
+        Redistribution and use in source and binary forms, with or
+        without modification, is permitted pursuant to, and subject
+        to the license terms contained in, the Revised BSD License
+        set forth in Section 4.c of the IETF Trust's Legal Provisions
+        Relating to IETF Documents
+        (https://trustee.ietf.org/license-info).
+
+        This version of this YANG module is part of RFC XXXX; see
+        the RFC itself for full legal notices.";
+
+     revision 2026-02-28 {
+       description
+         "Initial version";
+       reference
+         "RFC XXXX: A YANG Data Model for Network Inventory location.";
+       //RFC Editor: Please replace XXXX with actual RFC number,
+       //update date information and remove this note
+     }
+
+     /* Identities */
+     /* Typedef */
+
+     typedef ni-location-ref {
+       type leafref {
+         path "/nwi:network-inventory/nil:locations/nil:location"
+            + "/nil:id";
+       }
+       description
+         "This type is used by data models that need to reference
+          network inventory location.";
+     }
+
+     /* Grouping */
+
+     grouping physical-address {
+       description
+         "Grouping for physical address information.";
+       container physical-address {
+         description
+           "Top-level container for the physical address.";
+         leaf address {
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 10]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+           type string;
+           description
+             "Specifies an address (number and street).";
+         }
+         leaf postal-code {
+           type string;
+           description
+             "Specifies a postal code.";
+         }
+         leaf state {
+           type string;
+           description
+             "Specifies a state. This leaf can also be
+              used to describe a region for a country that
+              does not have states.";
+         }
+         leaf city {
+           type string;
+           description
+             "Specifies a city.";
+         }
+         leaf country-code {
+           type string {
+             pattern '[A-Z]{2}';
+           }
+           description
+             "Specifies a country.
+              Expressed as ISO ALPHA-2 code.";
+         }
+       }
+     }
+
+     grouping locations {
+       description
+         "Grouping for locations.";
+       container locations {
+         config false;
+         description
+           "Container for the location information.";
+         list location {
+           key "id";
+           description
+             "List of locations within the network.";
+           leaf id {
+             type string;
+             description
+               "An identifier of the location.";
+           }
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 11]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+           uses nwi:basic-common-entity-attributes;
+           leaf type {
+             type string;
+             description
+               "The type of network inventory location, e.g.
+                equipment room, building, or site.
+                This allows operators to flexibly define custom location
+                types (e.g., 'pole', 'roof', 'floor') based on their
+                specific network scenarios without requiring model
+                extensions. String-based types enable dynamic adaptation
+                to heterogeneous organizational naming conventions.";
+           }
+           leaf parent {
+             type leafref {
+               path "../../location/id";
+             }
+             description
+               "The identifier of the location that physically contains
+                this location.";
+           }
+           leaf timestamp {
+             type yang:date-and-time;
+             description
+               "Timestamp when the location was recorded.";
+           }
+           leaf valid-until {
+             type yang:date-and-time;
+             description
+               "The timestamp for which this location is valid until.
+                If unspecified, the location has no specific
+                expiration time.";
+           }
+           uses physical-address;
+           uses geo:geo-location;
+           list contained-chassis {
+             key "chassis-id";
+             description
+               "Chassis directly deployed in this location without rack.
+                Also used for distributed chassis components that are
+                logically part of a network element but physically
+                located.";
+             leaf chassis-id {
+               type uint32;
+               description
+                 "Unique identifier for this chassis instance in the
+                  location.";
+             }
+             leaf ne-ref {
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 12]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+               type leafref {
+                 path "/nwi:network-inventory/nwi:network-elements"
+                    + "/nwi:network-element/nwi:ne-id";
+               }
+               description
+                 "Reference to the network element this chassis
+                  belongs to. Multiple chassis entries may reference
+                  the same ne-ref for distributed systems.";
+             }
+             leaf component-ref {
+               type leafref {
+                 path
+                   "/nwi:network-inventory/nwi:network-elements"
+                 + "/nwi:network-element[nwi:ne-id=current()/../ne-ref]"
+                 + "/nwi:components/nwi:component/nwi:component-id";
+               }
+               description
+                 "Reference to the specific chassis within the
+                  network element.";
+             }
+           }
+         }
+         uses racks;
+       }
+     }
+
+     grouping racks {
+       description
+         "Grouping for rack attributes.";
+       container racks {
+         description
+           "Top-level container for the list of racks.";
+         list rack {
+           key "id";
+           description
+             "List of racks within the inventory (e.g., in an
+              equipment room).";
+           leaf id {
+             type string;
+             description
+               "An identifier that uniquely identifies the rack.";
+           }
+           uses nwi:basic-common-entity-attributes;
+           container rack-location {
+             description
+               "The location information of the rack, which comprises
+                the location reference, row number, and column number.";
+             leaf location-ref {
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 13]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+               type ni-location-ref;
+               description
+                 "Reference to the location where this rack is placed.";
+             }
+             leaf row-number {
+               type uint32;
+               description
+                 "Identifies the row within the location where
+                  the rack is located.";
+             }
+             leaf column-number {
+               type uint32;
+               description
+                 "Identifies the column within the location where
+                  the rack is located.";
+             }
+           }
+           leaf height {
+             type uint16;
+             units "millimeter";
+             description
+               "Rack height.";
+           }
+           leaf width {
+             type uint16;
+             units "millimeter";
+             description
+               "Rack width.";
+           }
+           leaf depth {
+             type uint16;
+             units "millimeter";
+             description
+               "Rack depth.";
+           }
+           leaf max-voltage {
+             type uint16;
+             units "volt";
+             description
+               "The maximum voltage supported by the rack.";
+           }
+           leaf max-allocated-power {
+             type uint16;
+             units "watts";
+             description
+               "The maximum allocated power for the rack.";
+           }
+           list contained-chassis {
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 14]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+             key "relative-position";
+             description
+               "The list of chassis within a rack.";
+             leaf relative-position {
+               type uint8;
+               description
+                 "Relative position (e.g., U-slot) of chassis within
+                  the rack.";
+             }
+             leaf ne-ref {
+               type leafref {
+                 path "/nwi:network-inventory/nwi:network-elements"
+                    + "/nwi:network-element/nwi:ne-id";
+               }
+               description
+                 "Reference to the network element containing
+                  the chassis component.";
+             }
+             leaf component-ref {
+               type leafref {
+                 path "/nwi:network-inventory/nwi:network-elements"
+                    + "/nwi:network-element[nwi:ne-id=current()/.."
+                    + "/ne-ref]/nwi:components/nwi:component"
+                    + "/nwi:component-id";
+               }
+               description
+                 "The reference to the chassis component within
+                  the network element and contained by the rack.";
+             }
+           }
+           leaf timestamp {
+             type yang:date-and-time;
+             description
+               "Timestamp when the rack information was recorded.";
+           }
+           leaf valid-until {
+             type yang:date-and-time;
+             description
+               "The timestamp for which this rack is valid until.
+                If unspecified, the rack has no specific
+                expiration time.";
+           }
+         }
+       }
+     }
+
+     augment "/nwi:network-inventory" {
+       description
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 15]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+         "Provides location information for network inventory.";
+       uses locations;
+     }
+   }
+   <CODE ENDS>
+
+6.  Operational Considerations
+
+   This model serves as a complement to the base inventory, providing a
+   read-only perspective of network inventory location information known
+   to the controller.  It reports the physical locations of network
+   elements and components installed in the network, enabling queries
+   for site, rack, and other location-related information associated
+   with network elements and components.
+
+   When used in brownfield scenarios, it is worth noting that existing
+   deployments are based on proprietary inventory OSS solutions, and the
+   migration path is highly dependent on the specific proprietary
+   implementation.
+
+   The model is designed based on the controller maintaining
+   authoritative location data through automated tooling, while OSS
+   systems consume this data as read-only operational state.  Sources of
+   controller location data may include RFID tooling, geolocation
+   services, as well as manual entry via controller interfaces.
+
+   As this data is read-only, the controller does not support OSS
+   modification of controller location records.
+
+   OSS systems and other management applications obtain location
+   information via standard YANG retrieval operations (NETCONF,
+   RESTCONF), such as querying network elements associated with a
+   specific site or rack.
+
+   In large-scale inventories containing numerous network elements and
+   components, querying location associations can impose a load on the
+   server.  To optimize retrieval and avoid overwhelming the server,
+   mechanisms such as RESTCONF or NETCONF pagination should be utilized
+   for queries involving large result sets.
+
+   Data quality is indicated through timestamps recording the last
+   update time, as well as an optional expiration time for location
+   validity.
+
+
+
+
+
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 16]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+   Before using a location for field dispatch or planning, verification
+   is required to ensure at least one of physical-address or geo-
+   location is present, and that the valid-until leaf is either not
+   present or indicates a future time.  Once the valid-until time has
+   passed, the location MUST be considered stale and MUST NOT be used
+   for operational purposes.
+
+   A parallel "location-planning" container (read-write) may be
+   introduced in future revisions to support intent-based configuration,
+   where OSS provides planning-level location targets.  This is outside
+   the scope of the current document.
+
+7.  Security Considerations
+
+   This section uses the template described in Section 3.7 of
+   [I-D.ietf-netmod-rfc8407bis].
+
+   The "ietf-ni-location" YANG module defines a data model that is
+   designed to be accessed via YANG-based management protocols, such as
+   NETCONF [RFC6241] or RESTCONF [RFC8040].  These protocols have to use
+   a secure transport layer (e.g., SSH [RFC6242], TLS [RFC8446], and
+   QUIC [RFC9000]) and have to use mutual authentication.
+
+   The Network Configuration Access Control Model (NACM) [RFC8341]
+   provides the means to restrict access for particular NETCONF or
+   RESTCONF users to a preconfigured subset of all available NETCONF or
+   RESTCONF protocol operations and content.
+
+   There are a number of data nodes defined in this YANG module that are
+   writable/creatable/deletable (i.e., config true, which is the
+   default).  All writable data nodes are likely to be reasonably
+   sensitive or vulnerable in some network environments.  Write
+   operations (e.g., edit-config) and delete operations to these data
+   nodes without proper protection or authentication can have a negative
+   effect on network operations.  The following subtrees and data nodes
+   have particular sensitivities/vulnerabilities:
+
+   'locations': The list may be used to track the set of network
+   elements.
+
+   Some of the readable data nodes in this YANG module may be considered
+   sensitive or vulnerable in some network environments.  It is thus
+   important to control read access (e.g., via get, get-config, or
+   notification) to these data nodes.  Specifically, the following
+   subtrees and data nodes have particular sensitivities/
+   vulnerabilities:
+
+
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 17]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+   Since this module identifies locations, authors using this module
+   SHOULD consider any privacy issues that may arise when the data is
+   readable (e.g., customer device locations, etc).
+
+8.  IANA Considerations
+
+   IANA is requested to register the following URI in the "ns"
+   subregistry within the "IETF XML Registry" [RFC3688]:
+
+   URI:  urn:ietf:params:xml:ns:yang:ietf-ni-location
+   Registrant Contact:  The IESG.
+   XML:  N/A; the requested URI is an XML namespace.
+
+   IANA is requested to register the following YANG module in the "YANG
+   Module Names" subregistry [RFC6020] within the "YANG Parameters"
+   registry.
+
+   Name:  ietf-ni-location
+   Maintained by IANA?  N
+   Namespace:  urn:ietf:params:xml:ns:yang:ietf-ni-location
+   Prefix:  nil
+   Reference:  RFC XXXX
+
+9.  References
+
+9.1.  Normative References
+
+   [I-D.ietf-ivy-network-inventory-yang]
+              Yu, C., Belotti, S., Bouquier, J., Peruzzini, F., and P.
+              Bedard, "A Base YANG Data Model for Network Inventory",
+              Work in Progress, Internet-Draft, draft-ietf-ivy-network-
+              inventory-yang-14, 5 February 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-ivy-
+              network-inventory-yang-14>.
+
+   [RFC3688]  Mealling, M., "The IETF XML Registry", BCP 81, RFC 3688,
+              DOI 10.17487/RFC3688, January 2004,
+              <https://www.rfc-editor.org/rfc/rfc3688>.
+
+   [RFC6020]  Bjorklund, M., Ed., "YANG - A Data Modeling Language for
+              the Network Configuration Protocol (NETCONF)", RFC 6020,
+              DOI 10.17487/RFC6020, October 2010,
+              <https://www.rfc-editor.org/rfc/rfc6020>.
+
+   [RFC6241]  Enns, R., Ed., Bjorklund, M., Ed., Schoenwaelder, J., Ed.,
+              and A. Bierman, Ed., "Network Configuration Protocol
+              (NETCONF)", RFC 6241, DOI 10.17487/RFC6241, June 2011,
+              <https://www.rfc-editor.org/rfc/rfc6241>.
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 18]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+   [RFC6242]  Wasserman, M., "Using the NETCONF Protocol over Secure
+              Shell (SSH)", RFC 6242, DOI 10.17487/RFC6242, June 2011,
+              <https://www.rfc-editor.org/rfc/rfc6242>.
+
+   [RFC7950]  Bjorklund, M., Ed., "The YANG 1.1 Data Modeling Language",
+              RFC 7950, DOI 10.17487/RFC7950, August 2016,
+              <https://www.rfc-editor.org/rfc/rfc7950>.
+
+   [RFC8040]  Bierman, A., Bjorklund, M., and K. Watsen, "RESTCONF
+              Protocol", RFC 8040, DOI 10.17487/RFC8040, January 2017,
+              <https://www.rfc-editor.org/rfc/rfc8040>.
+
+   [RFC8341]  Bierman, A. and M. Bjorklund, "Network Configuration
+              Access Control Model", STD 91, RFC 8341,
+              DOI 10.17487/RFC8341, March 2018,
+              <https://www.rfc-editor.org/rfc/rfc8341>.
+
+   [RFC8342]  Bjorklund, M., Schoenwaelder, J., Shafer, P., Watsen, K.,
+              and R. Wilton, "Network Management Datastore Architecture
+              (NMDA)", RFC 8342, DOI 10.17487/RFC8342, March 2018,
+              <https://www.rfc-editor.org/rfc/rfc8342>.
+
+   [RFC8446]  Rescorla, E., "The Transport Layer Security (TLS) Protocol
+              Version 1.3", RFC 8446, DOI 10.17487/RFC8446, August 2018,
+              <https://www.rfc-editor.org/rfc/rfc8446>.
+
+   [RFC9000]  Iyengar, J., Ed. and M. Thomson, Ed., "QUIC: A UDP-Based
+              Multiplexed and Secure Transport", RFC 9000,
+              DOI 10.17487/RFC9000, May 2021,
+              <https://www.rfc-editor.org/rfc/rfc9000>.
+
+   [RFC9179]  Hopps, C., "A YANG Grouping for Geographic Locations",
+              RFC 9179, DOI 10.17487/RFC9179, February 2022,
+              <https://www.rfc-editor.org/rfc/rfc9179>.
+
+9.2.  Informative References
+
+   [I-D.ietf-ccamp-network-inventory-yang]
+              Yu, C., Belotti, S., Bouquier, J., Peruzzini, F., and P.
+              Bedard, "A YANG Data Model for Network Hardware
+              Inventory", Work in Progress, Internet-Draft, draft-ietf-
+              ccamp-network-inventory-yang-02, 9 July 2023,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-ccamp-
+              network-inventory-yang-02>.
+
+   [I-D.ietf-netmod-rfc8407bis]
+              Bierman, A., Boucadair, M., and Q. Wu, "Guidelines for
+              Authors and Reviewers of Documents Containing YANG Data
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 19]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+              Models", Work in Progress, Internet-Draft, draft-ietf-
+              netmod-rfc8407bis-28, 5 June 2025,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-netmod-
+              rfc8407bis-28>.
+
+   [RFC8340]  Bjorklund, M. and L. Berger, Ed., "YANG Tree Diagrams",
+              BCP 215, RFC 8340, DOI 10.17487/RFC8340, March 2018,
+              <https://www.rfc-editor.org/rfc/rfc8340>.
+
+Appendix A.  Examples
+
+   This section provides example usages of the Network Inventory
+   Location model for two common deployment scenarios: a non-rack-
+   mounted Access Point and a distributed multi-chassis network element.
+
+A.1.  Non-Rack Deployment: Access Point
+
+   This example illustrates a typical edge deployment scenario where a
+   Wi-Fi Access Point (AP) is mounted directly to a ceiling without a
+   rack enclosure.
+
+   The location hierarchy is as follows:
+
+   Site: Foo-Enterprise-Campus
+   └── Building: Building-A
+       └── Floor: Floor-2
+           └── Room: Corridor-East (corridor area)
+               └── AP directly ceiling-mounted (no rack)
+
+   The following shows the location data instance:
+
+  {
+    "ietf-ni-location:locations": {
+      "location": [
+        {
+          "id": "Foo-Enterprise-Campus",
+          "uuid": "550e8400-e29b-41d4-a716-446655440000",
+          "name": "Foo Enterprise Campus",
+          "type": "site",
+          "timestamp": "2026-01-15T08:30:00Z"
+        },
+        {
+          "id": "Building-A",
+          "uuid": "550e8400-e29b-41d4-a716-446655440001",
+          "name": "Building A",
+          "type": "building",
+          "parent": "Foo-Enterprise-Campus",
+          "timestamp": "2026-01-15T08:30:00Z"
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 20]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+        },
+        {
+          "id": "Floor-2",
+          "uuid": "550e8400-e29b-41d4-a716-446655440002",
+          "name": "Floor 2",
+          "type": "floor",
+          "parent": "Building-A",
+          "timestamp": "2026-01-15T08:30:00Z"
+        },
+        {
+          "id": "Corridor-East",
+          "uuid": "550e8400-e29b-41d4-a716-446655440003",
+          "name": "East Corridor",
+          "alias": "Corridor-2F-East",
+          "description": "East corridor on Floor 2, AP deployment area",
+          "type": "corridor",
+          "parent": "Floor-2",
+          "timestamp": "2026-01-15T08:30:00Z",
+          "valid-until": "2030-12-31T23:59:59Z",
+          "physical-address": {
+            "address": "123 Foo Street, Floor 2 East Corridor",
+            "postal-code": "12345",
+            "state": "Foo-State",
+            "city": "Foo-City",
+            "country-code": "ZZ"
+          },
+          "geo-location": {
+            "reference-frame": {
+              "astronomical-body": "earth",
+              "geodetic-system": {
+                "geodetic-datum": "WGS-84",
+                "coord-accuracy": 5.0,
+                "height-accuracy": 10.0
+              }
+            },
+            "ellipsoid": {
+              "latitude": 40.7128,
+              "longitude": -74.0060,
+              "height": 15.0
+            },
+            "velocity": {
+              "v-north": 0.0,
+              "v-east": 0.0,
+              "v-up": 0.0
+            },
+            "timestamp": "2026-01-15T08:30:00Z",
+            "valid-until": "2030-12-31T23:59:59Z"
+          },
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 21]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+          "contained-chassis": [
+            {
+              "chassis-id": 1,
+              "ne-ref": "AP-Corridor-East-01",
+              "component-ref": "chassis-1"
+            }
+          ]
+        }
+      ],
+      "racks": []
+    }
+  }
+
+A.2.  Distributed Multi-Chassis Network Element
+
+   This example illustrates a distributed deployment where a single
+   logical network element (NE-1, a stack switch) spans multiple
+   physical locations.  The three chassis of the stack switch are
+   located in separate telecommunications rooms on different floors,
+   interconnected via stacking cables.  The location hierarchy is as
+   follows:
+
+   Site: Foo-DC
+   ├── Location: Room-101 (First Floor Telecom Room)
+   │   └── Rack: Rack-101-A
+   │       └── U10: NE-1 chassis-1 (Master switch)
+   │
+   ├── Location: Room-201 (Second Floor Telecom Room)
+   │   └── Rack: Rack-201-B
+   │       └── U15: NE-1 chassis-2 (Stack member)
+   │
+   └── Location: Room-301 (Third Floor Telecom Room)
+       └── Rack: Rack-301-C
+           └── U20: NE-1 chassis-3 (Stack member)
+
+   The following shows the location data instance:
+
+   {
+     "ietf-ni-location:locations": {
+       "location": [
+         {
+           "id": "Foo-DC",
+           "name": "Foo Data Center",
+           "type": "site",
+           "timestamp": "2026-01-15T08:00:00Z"
+         },
+         {
+           "id": "Room-101",
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 22]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+           "name": "First Floor Telecom Room",
+           "type": "room",
+           "parent": "Foo-DC",
+           "timestamp": "2026-01-15T08:00:00Z",
+           "contained-chassis": []
+         },
+         {
+           "id": "Room-201",
+           "name": "Second Floor Telecom Room",
+           "type": "room",
+           "parent": "Foo-DC",
+           "timestamp": "2026-01-15T08:00:00Z",
+           "contained-chassis": []
+         },
+         {
+           "id": "Room-301",
+           "name": "Third Floor Telecom Room",
+           "type": "room",
+           "parent": "Foo-DC",
+           "timestamp": "2026-01-15T08:00:00Z",
+           "contained-chassis": []
+         }
+       ],
+       "racks": {
+         "rack": [
+           {
+             "id": "Rack-101-A",
+             "uuid": "660e8400-e29b-41d4-a716-446655440010",
+             "name": "Rack A Room 101",
+             "rack-location": {
+               "location-ref": "Room-101",
+               "row-number": 1,
+               "column-number": 1
+             },
+             "height": 2200,
+             "width": 600,
+             "depth": 1200,
+             "max-voltage": 240,
+             "max-allocated-power": 8000,
+             "contained-chassis": [
+               {
+                 "relative-position": 10,
+                 "ne-ref": "NE-1",
+                 "component-ref": "chassis-1"
+               }
+             ],
+             "timestamp": "2026-01-15T10:00:00Z",
+             "valid-until": "2028-01-15T10:00:00Z"
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 23]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+           },
+           {
+             "id": "Rack-201-B",
+             "uuid": "660e8400-e29b-41d4-a716-446655440011",
+             "name": "Rack B Room 201",
+             "rack-location": {
+               "location-ref": "Room-201",
+               "row-number": 2,
+               "column-number": 1
+             },
+             "height": 2200,
+             "width": 600,
+             "depth": 1200,
+             "max-voltage": 240,
+             "max-allocated-power": 8000,
+             "contained-chassis": [
+               {
+                 "relative-position": 15,
+                 "ne-ref": "NE-1",
+                 "component-ref": "chassis-2"
+               }
+             ],
+             "timestamp": "2026-01-15T10:00:00Z",
+             "valid-until": "2028-01-15T10:00:00Z"
+           },
+           {
+             "id": "Rack-301-C",
+             "uuid": "660e8400-e29b-41d4-a716-446655440012",
+             "name": "Rack C Room 301",
+             "rack-location": {
+               "location-ref": "Room-301",
+               "row-number": 3,
+               "column-number": 1
+             },
+             "height": 2200,
+             "width": 600,
+             "depth": 1200,
+             "max-voltage": 240,
+             "max-allocated-power": 8000,
+             "contained-chassis": [
+               {
+                 "relative-position": 20,
+                 "ne-ref": "NE-1",
+                 "component-ref": "chassis-3"
+               }
+             ],
+             "timestamp": "2026-01-15T10:00:00Z",
+             "valid-until": "2028-01-15T10:00:00Z"
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 24]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+           }
+         ]
+       }
+     }
+   }
+
+Acknowledgments
+
+   The authors would like to thank the authors and contributors of
+   [I-D.ietf-ccamp-network-inventory-yang] to trigger this work.  During
+   the discussion of base Network Inventory (NI) model, it is agreed
+   that the definition of the equipment room and rack can be a separate
+   location model and support manual configuration, while the NI model
+   aggregates the inventory data of the Network Elements (NEs) on the
+   network.  Usually the information about sites or equipment rooms is
+   not detectable by network controller and configured manually.
+
+   The authors wish to thank Mohamed Boucadair and many others for their
+   helpful comments and suggestions.
+
+Contributors
+
+   Italo Busi
+   Huawei Technologies
+   Email: italo.busi@huawei.com
+
+
+   Chaode Yu
+   Huawei
+   Email: yuchaode@huawei.com
+
+
+Authors' Addresses
+
+   Bo Wu
+   Huawei
+   Email: lana.wubo@huawei.com
+
+
+   Sergio Belotti
+   Nokia
+   Email: sergio.belotti@nokia.com
+
+
+   Jean-Francois Bouquier
+   Vodafone
+   Email: jeff.bouquier@vodafone.com
+
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 25]
+
+Internet-Draft         Network Inventory Location          February 2026
+
+
+   Fabio Peruzzini
+   FiberCop
+   Email: fabio.peruzzini@fibercop.com
+
+
+   Phil Bedard
+   Cisco
+   Email: phbedard@cisco.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Wu, et al.              Expires 1 September 2026               [Page 26]
