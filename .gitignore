@@ -6,3 +6,13 @@ __pycache__/
 telemetry.log
 telemetry.pid
 .superpowers/
+
+# Licensed TM Forum TIO ontology / specs (proprietary: never commit or redistribute).
+# The only tracked TBox file is our own topology.ttl; everything else under
+# ontologies/ that is TTL/ZIP stays local. Keep licensed files in ontologies/licensed/.
+ontologies/licensed/
+ontologies/tbox/*.ttl
+!ontologies/tbox/topology.ttl
+ontologies/**/*.zip
+docs/spec/TR29*.pdf
+docs/spec/TMF921*.pdf
