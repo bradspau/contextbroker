@@ -20,7 +20,7 @@ from pathlib import Path
 
 from broker_engine.validation import _SAFE_TOKEN
 
-URI_RE = re.compile(r"^https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$")
+URI_RE = re.compile(r"^https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+\Z")
 ALLOWED_UNITS = frozenset({"Mbps", "Gbps", "ms", "us", "percent"})
 DEFAULT_PATH = Path(__file__).with_name("metric_map.json")
 
@@ -67,6 +67,8 @@ def load_metric_map(path: Path | None = None) -> dict[str, MetricMapping]:
             raise ValueError(f"unit not allowed: {unit!r}")
         if uri in out:
             raise ValueError(f"duplicate metric_uri: {uri}")
+        if any(m.broker_metric == broker for m in out.values()):
+            raise ValueError(f"duplicate broker_metric: {broker}")
         out[uri] = MetricMapping(broker, uri, unit)
     return out
 

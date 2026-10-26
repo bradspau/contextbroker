@@ -53,3 +53,33 @@ def test_missing_file_empty(tmp_path):
 
 def test_broker_metric_for_unknown_returns_none():
     assert broker_metric_for("http://example.org/Unknown") is None
+
+
+@pytest.mark.parametrize("field,val", [
+    ("metric_uri", URI + "\n"), ("broker_metric", "latency_ms\n"),
+    ("metric_uri", "http://x/a\n"),
+])
+def test_trailing_newline_rejected(tmp_path, field, val):
+    with pytest.raises(ValueError):
+        load_metric_map(_w(tmp_path, [_e(**{field: val})]))
+
+
+def test_duplicate_metric_uri_rejected(tmp_path):
+    with pytest.raises(ValueError):
+        load_metric_map(_w(tmp_path, [_e(), _e(broker_metric="other")]))
+
+
+def test_duplicate_broker_metric_rejected(tmp_path):
+    with pytest.raises(ValueError):
+        load_metric_map(_w(tmp_path, [_e(), _e(metric_uri="http://x.org/B")]))
+
+
+@pytest.mark.parametrize("unit", [5, ["ms"]])
+def test_unit_wrong_type_rejected(tmp_path, unit):
+    with pytest.raises(ValueError):
+        load_metric_map(_w(tmp_path, [_e(unit=unit)]))
+
+
+@pytest.mark.parametrize("unit", ["Mbps", "Gbps", "ms", "us", "percent", None])
+def test_accepted_units(tmp_path, unit):
+    assert load_metric_map(_w(tmp_path, [_e(unit=unit)]))[URI].unit == unit

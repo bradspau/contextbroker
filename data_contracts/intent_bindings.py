@@ -50,7 +50,10 @@ def _no_dupes(pairs):
 def _bound(value, uri: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"bound for {uri} must be a number")
-    value = float(value)
+    try:
+        value = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"bound for {uri} is out of range") from exc
     if not math.isfinite(value):
         raise ValueError(f"bound for {uri} must be finite")
     return value

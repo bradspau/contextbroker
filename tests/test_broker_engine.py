@@ -142,3 +142,11 @@ def test_resolve_intent_adds_state_and_source():
     assert out["state"] == "intended" and out["source"] == "fuseki"
     assert out["target_value"] == 80.0
     assert out["interfaces"] == [{"device": "r1", "interface_name": "eth0"}]
+
+
+def test_safe_token_and_window_reject_trailing_newline():
+    import pytest
+    from broker_engine.validation import _validate_token, _SAFE_WINDOW, ClientInputError
+    with pytest.raises(ClientInputError):
+        _validate_token("input_drops\n", "metric")
+    assert not _SAFE_WINDOW.match("30m\n")

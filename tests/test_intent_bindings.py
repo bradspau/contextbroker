@@ -61,3 +61,35 @@ def test_malformed_shape_rejected(tmp_path):
     for data in ([], {"i1": []}, {"i1": {URI: "x"}}):
         with pytest.raises(ValueError):
             load_bindings(_w(tmp_path, data))
+
+
+@pytest.mark.parametrize("kw", [{"device": "olt1\n"}, {"interface": "pon0/1\n"}])
+def test_trailing_newline_device_interface_rejected(tmp_path, kw):
+    with pytest.raises(ValueError):
+        load_bindings(_w(tmp_path, {"i1": {URI: _spec(**kw)}}))
+
+
+def test_trailing_newline_intent_and_uri_rejected(tmp_path):
+    with pytest.raises(ValueError):
+        load_bindings(_w(tmp_path, {"i1\n": {URI: _spec()}}))
+    with pytest.raises(ValueError):
+        load_bindings(_w(tmp_path, {"i1": {URI + "\n": _spec()}}))
+
+
+def test_unsafe_intent_id_and_uri_rejected(tmp_path):
+    with pytest.raises(ValueError):
+        load_bindings(_w(tmp_path, {"i 1": {URI: _spec()}}))
+    with pytest.raises(ValueError):
+        load_bindings(_w(tmp_path, {"i1": {"ftp://x/y": _spec()}}))
+
+
+def test_duplicate_intent_key_rejected(tmp_path):
+    raw = '{"i1": {}, "i1": {}}'
+    with pytest.raises(ValueError):
+        load_bindings(_w(tmp_path, raw))
+
+
+def test_huge_int_bound_rejected_as_valueerror(tmp_path):
+    raw = '{"i1": {"%s": {"device":"a","interface":"b","bound":1%s}}}' % (URI, "0" * 400)
+    with pytest.raises(ValueError):
+        load_bindings(_w(tmp_path, raw))
