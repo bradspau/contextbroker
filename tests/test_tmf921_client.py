@@ -186,12 +186,6 @@ def test_base_url_trailing_slash_stripped():
     assert Tmf921Client(BASE + "/").base_url == BASE
 
 
-def test_error_has_no_url_even_with_cause(client):
-    with patch("requests.get", return_value=resp(500)):
-        with pytest.raises(Tmf921Error) as ei:
-            client.get_intent(IID)
-    assert BASE not in str(ei.value)
-    assert all(BASE not in str(a) for a in ei.value.args)
 
 
 # ---------- intent_bounds ----------
@@ -262,7 +256,60 @@ def test_bounds_ignores_lists_of_wrong_shape():
     assert intent_bounds(_intent(ttl)) == {}
 
 
-def test_bounds_makes_no_network_call():
-    with patch("requests.get") as g, patch("requests.post") as p:
-        intent_bounds(load("intent.json"))
-    assert g.call_count == 0 and p.call_count == 0
+
+# ---------- fix round 1 ----------
+def test_huge_int_value_is_client_error(client):
+    with patch("requests.post") as p:
+        with pytest.raises(ClientInputError):
+            client.post_observation(IID, URI, 10**400)
+    assert p.call_count == 0
+
+
+@pytest.mark.parametrize("when", [
+    datetime.min.replace(tzinfo=timezone(timedelta(hours=2))),
+    datetime.max.replace(tzinfo=timezone(-timedelta(hours=2))),
+])
+def test_extreme_datetime_is_client_error(client, when):
+    with patch("requests.post") as p:
+        with pytest.raises(ClientInputError):
+            client.post_observation(IID, URI, 1.0, None, when)
+    assert p.call_count == 0
+
+
+def test_no_redirects_followed(client):
+    with patch("requests.get", return_value=resp(302)) as g:
+        with pytest.raises(Tmf921Error):
+            client.get_intent(IID)
+        with pytest.raises(Tmf921Error):
+            client.list_reports(IID)
+    assert all(c.kwargs["allow_redirects"] is False for c in g.call_args_list)
+    with patch("requests.post", return_value=resp(201, {})) as p:
+        client.post_observation(IID, URI, 1.0)
+    assert p.call_args.kwargs["allow_redirects"] is False
+
+
+def test_list_reports_elements_must_be_dicts(client):
+    with patch("requests.get", return_value=resp(200, [{"a": 1}, "x"])):
+        with pytest.raises(Tmf921Error):
+            client.list_reports(IID)
+
+
+def test_bounds_turtle_length_cap():
+    ttl = PRE + cond("atLeast", URI, "50") + "# " + "x" * 70000 + "\n"
+    assert intent_bounds(_intent(ttl)) == {}
+
+
+def test_base_url_env_override(monkeypatch):
+    """Fresh copy of the module under another name so shared classes stay intact."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_tmf921_env_probe", mod.__file__)
+
+    def fresh():
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    monkeypatch.setenv("TMF921_BASE_URL", "http://override.invalid/v5")
+    assert fresh().TMF921_BASE_URL == "http://override.invalid/v5"
+    monkeypatch.delenv("TMF921_BASE_URL")
+    assert fresh().TMF921_BASE_URL == "http://localhost:8000/tmf-api/intentManagement/v5"

@@ -26,6 +26,7 @@ TMF921_BASE_URL = os.environ.get(
     "TMF921_BASE_URL", "http://localhost:8000/tmf-api/intentManagement/v5"
 )
 
+_MAX_TTL_CHARS = 64 * 1024
 _INTENT_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
 
 
@@ -49,7 +50,7 @@ def intent_bounds(intent) -> dict[str, float]:
     try:
         expr = intent.get("expression")
         ttl = expr.get("expressionValue")
-        if not isinstance(ttl, str):
+        if not isinstance(ttl, str) or len(ttl) > _MAX_TTL_CHARS:
             return {}
         g = Graph()
         g.parse(data=ttl, format="turtle")
@@ -86,7 +87,8 @@ class Tmf921Client:
 
     def _get_json(self, path: str):
         try:
-            r = requests.get(f"{self.base_url}{path}", timeout=REQUEST_TIMEOUT_S)
+            r = requests.get(f"{self.base_url}{path}", timeout=REQUEST_TIMEOUT_S,
+                             allow_redirects=False)
             if not (200 <= r.status_code < 300):
                 raise Tmf921Error("TMF921 request failed")
             return r.json()
@@ -103,7 +105,7 @@ class Tmf921Client:
 
     def list_reports(self, intent_id: str) -> list[dict]:
         data = self._get_json(f"/intent/{_check_intent_id(intent_id)}/intentReport")
-        if not isinstance(data, list):
+        if not isinstance(data, list) or not all(isinstance(d, dict) for d in data):
             raise Tmf921Error("TMF921 response unusable")
         return data
 
@@ -115,8 +117,14 @@ class Tmf921Client:
             check_uri(metric_uri)
         except ValueError:
             raise ClientInputError("Invalid metric_uri") from None
-        if isinstance(value, bool) or not isinstance(value, (int, float)) \
-                or not math.isfinite(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ClientInputError("Invalid value")
+        try:
+            value = float(value)
+            finite = math.isfinite(value)
+        except (OverflowError, TypeError, ValueError):
+            raise ClientInputError("Invalid value") from None
+        if not finite:
             raise ClientInputError("Invalid value")
         if unit is not None and (not isinstance(unit, str) or unit not in ALLOWED_UNITS):
             raise ClientInputError("Invalid unit")
@@ -127,11 +135,15 @@ class Tmf921Client:
             if not isinstance(obtained_at, datetime) or obtained_at.tzinfo is None \
                     or obtained_at.utcoffset() is None:
                 raise ClientInputError("obtained_at must be timezone-aware")
-            utc = obtained_at.astimezone(timezone.utc).replace(tzinfo=None)
+            try:
+                utc = obtained_at.astimezone(timezone.utc).replace(tzinfo=None)
+            except (OverflowError, ValueError):
+                raise ClientInputError("Invalid obtained_at") from None
             body["obtainedAt"] = utc.isoformat(timespec="microseconds" if utc.microsecond else "seconds") + "Z"
         try:
             r = requests.post(f"{self.base_url}/intent/{intent_id}/observation",
-                              json=body, timeout=REQUEST_TIMEOUT_S)
+                              json=body, timeout=REQUEST_TIMEOUT_S,
+                              allow_redirects=False)
             ok = r.status_code in (200, 201)
         except Exception:
             raise Tmf921Error("TMF921 request failed") from None
