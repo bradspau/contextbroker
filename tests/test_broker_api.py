@@ -142,7 +142,7 @@ def test_unsafe_token_400():
 
 
 def test_unknown_intent_404():
-    with patch("broker_engine.main.resolve_intent", side_effect=ValueError("No such intent: 'X'")):
+    with patch("broker_engine.main.resolve_intent", side_effect=main.IntentNotFound("No such intent: 'X'")):
         assert client.get("/context/intent/X").status_code == 404
         r = client.post("/context/assess", json={"intent_id": "X", "time_window": "5m"})
     assert r.status_code == 404
@@ -168,3 +168,56 @@ def test_mcp_assess_tool_call():
         res = asyncio.run(server.call_tool("assess_intent", {"intent_id": "I1", "time_window": "5m"}))
     import json
     assert json.loads(res.content[0].text)["verdict"] == "success"
+
+
+def _metric_params():
+    return {"device": "r1", "interface": "e0", "metric_type": "latency_ms", "time_window": "5m"}
+
+
+def test_other_valueerror_is_not_400():
+    c = TestClient(main.app, raise_server_exceptions=False)
+    with patch("broker_engine.main.resolve_intent", side_effect=ValueError("secret upstream")):
+        r = c.get("/context/intent/I1")
+    assert r.status_code == 500
+    assert "secret" not in r.text
+
+
+def test_upstream_non_json_is_5xx_not_400():
+    import requests as rq
+    resp = type("R", (), {"raise_for_status": lambda self: None,
+                          "json": lambda self: (_ for _ in ()).throw(rq.exceptions.JSONDecodeError("bad body SECRET", "", 0))})()
+    c = TestClient(main.app, raise_server_exceptions=False)
+    with patch("broker_engine.tsdb_joiner.requests.get", return_value=resp):
+        r = c.get("/context/metric", params=_metric_params())
+    assert r.status_code >= 500 and "SECRET" not in r.text
+
+
+@pytest.mark.parametrize("target,url", [
+    ("broker_engine.sparql_resolver.requests.post", "/context/intent/I1"),
+    ("broker_engine.tsdb_joiner.requests.get", "/context/metric"),
+])
+def test_connection_error_is_502(target, url):
+    import requests as rq
+    with patch(target, side_effect=rq.ConnectionError("http://10.0.0.1:3030 refused")):
+        r = client.get(url, params=_metric_params() if "metric" in url else None)
+    assert r.status_code == 502
+    assert "10.0.0.1" not in r.text
+
+
+def test_timeout_passed_to_requests():
+    from unittest.mock import MagicMock
+    from broker_engine.validation import REQUEST_TIMEOUT_S
+    r = MagicMock()
+    r.json.return_value = {"data": {"result": [{"value": [1, "5"]}]}}
+    with patch("broker_engine.tsdb_joiner.requests.get", return_value=r) as g:
+        main.join_observed_metric("r1", "e0", "latency_ms", "5m")
+    assert len(g.call_args_list) == 2
+    assert all(c.kwargs["timeout"] == REQUEST_TIMEOUT_S for c in g.call_args_list)
+    r2 = MagicMock()
+    r2.json.return_value = {"results": {"bindings": [{"x": 1}]}}
+    with patch("broker_engine.sparql_resolver.requests.post", return_value=r2) as p:
+        try:
+            main.resolve_intent("I1")
+        except Exception:
+            pass
+    assert p.call_args.kwargs["timeout"] == REQUEST_TIMEOUT_S

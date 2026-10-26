@@ -3,7 +3,12 @@ from datetime import datetime, timezone
 
 import requests
 
-from broker_engine.validation import _SAFE_WINDOW, _validate_token
+from broker_engine.validation import (
+    REQUEST_TIMEOUT_S,
+    _SAFE_WINDOW,
+    ClientInputError,
+    _validate_token,
+)
 from data_contracts.envelope import ContextEnvelope, build_observed
 from telemetry_simulator import MEASUREMENT_NAME
 
@@ -22,7 +27,7 @@ def join_observed_metric(
     _validate_token(interface, "interface")
     _validate_token(metric_type, "metric_type")
     if not _SAFE_WINDOW.match(time_window):
-        raise ValueError(f"Unsafe time_window: {time_window!r}")
+        raise ClientInputError(f"Unsafe time_window: {time_window!r}")
 
     selector = (
         f'{MEASUREMENT_NAME}_{metric_type}'
@@ -30,7 +35,7 @@ def join_observed_metric(
     )
     promql = f'max_over_time({selector}[{time_window}])'
 
-    response = requests.get(query_endpoint, params={"query": promql})
+    response = requests.get(query_endpoint, params={"query": promql}, timeout=REQUEST_TIMEOUT_S)
     response.raise_for_status()
     result = response.json()["data"]["result"]
 
@@ -62,6 +67,7 @@ def _last_sample_ts(query_endpoint: str, selector: str, time_window: str):
         response = requests.get(
             query_endpoint,
             params={"query": f"last_timestamp({selector}[{time_window}])"},
+            timeout=REQUEST_TIMEOUT_S,
         )
         response.raise_for_status()
         result = response.json()["data"]["result"]

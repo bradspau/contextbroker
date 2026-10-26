@@ -1,16 +1,18 @@
 """Broker REST + MCP interface over the resolver, joiner, pruner and evaluator."""
 
+import requests
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from broker_engine.pruner import prune
+from broker_engine.validation import ClientInputError, IntentNotFound
 from broker_engine.sparql_resolver import resolve_intent
 from broker_engine.tsdb_joiner import join_observed_metric
 from outcome_assurance.evaluate import evaluate_intent
 
 DEFAULT_MAX_ENTITIES = 50
-_NO_SUCH_INTENT = "No such intent"
 
 
 def assess(intent_id: str, time_window: str, max_entities: int = DEFAULT_MAX_ENTITIES) -> dict:
@@ -80,12 +82,19 @@ def _allow_only(*names: str):
     return Depends(check)
 
 
-@app.exception_handler(ValueError)
-async def _value_error(request: Request, exc: ValueError):
-    from fastapi.responses import JSONResponse
+@app.exception_handler(ClientInputError)
+async def _client_error(request: Request, exc: ClientInputError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
-    status = 404 if str(exc).startswith(_NO_SUCH_INTENT) else 400
-    return JSONResponse(status_code=status, content={"detail": str(exc)})
+
+@app.exception_handler(IntentNotFound)
+async def _not_found(request: Request, exc: IntentNotFound):
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(requests.RequestException)
+async def _upstream_error(request: Request, exc: requests.RequestException):
+    return JSONResponse(status_code=502, content={"detail": "upstream data store unavailable"})
 
 
 class AssessRequest(BaseModel):

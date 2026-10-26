@@ -1,7 +1,7 @@
 """Resolve declared (intended) state from the Fuseki knowledge graph."""
 import requests
 
-from broker_engine.validation import _validate_token
+from broker_engine.validation import REQUEST_TIMEOUT_S, IntentNotFound, _validate_token
 
 FUSEKI_QUERY_ENDPOINT = "http://localhost:3030/network-dataset/query"
 
@@ -31,12 +31,13 @@ def resolve_intent(
         query_endpoint,
         data={"query": sparql},
         headers={"Accept": "application/sparql-results+json"},
+        timeout=REQUEST_TIMEOUT_S,
     )
     response.raise_for_status()
     bindings = response.json()["results"]["bindings"]
 
     if not bindings:
-        raise ValueError(f"No such intent: {intent_id!r}")
+        raise IntentNotFound(f"No such intent: {intent_id!r}")
 
     first = bindings[0]
     return {
