@@ -443,3 +443,61 @@ def test_real_deadline_bounds_polling():
     c = FakeClient(pre=[OLD_OK], post=[[OLD_OK]])
     out = run(c, monotonic=mono, poll_timeout_s=5.0, poll_interval_s=0.1)
     assert out["reasons"] == ["no new report"] and len(out["_sleeps"]) == 0
+
+
+R_DEG = "Conditions not met: atLeast: JitterMetric: FAIL"
+
+
+def two(post, pre=()):
+    return FakeClient(intent_doc=intent((URI, 100), (URI2, 10)), pre=pre, post=post)
+
+
+def test_garbage_old_date_cannot_reorder_new_reports():
+    old = rep("old", "garbage")
+    r1 = rep("r1", "2026-10-27T12:00:01Z")
+    r2 = rep("r2", "2026-10-27T12:00:02Z", "Degraded", R_DEG)
+    out = run(two([[old, r1, r2]], pre=[old]), bindings=BIND2)
+    assert out["verdict"] == "failure"
+
+
+def test_tie_at_top_is_ambiguous():
+    r1 = rep("r1", "2026-10-27T12:00:01Z")
+    r2 = rep("r2", "2026-10-27T12:00:01Z", "Degraded", R_DEG)
+    out = run(two([[r1, r2]]), bindings=BIND2)
+    assert out["verdict"] == "inconclusive" and out["reasons"] == ["ambiguous report order"]
+
+
+def test_identical_dates_server_order_never_success():
+    r1 = rep("r1", "2026-10-27T12:00:01.5Z")
+    r2 = rep("r2", "2026-10-27T12:00:01.500Z", "Degraded", R_DEG)
+    out = run(two([[r1, r2]]), bindings=BIND2)
+    assert out["verdict"] != "success"
+
+
+def test_offset_date_is_converted_to_utc():
+    a = rep("a", "2026-10-27T12:00:01Z")
+    b = rep("b", "2026-10-27T13:00:02+01:00", "Degraded",
+            "Conditions not met: atLeast: LatencyMetric: FAIL")
+    assert run(FakeClient(post=[[a, b]]), poll_timeout_s=0.0)["verdict"] == "failure"
+    assert run(FakeClient(post=[[b, a]]), poll_timeout_s=0.0)["verdict"] == "failure"
+
+
+def test_naive_date_is_not_new():
+    out = run(FakeClient(post=[[rep("n", "2026-10-27T12:00:01")]]), poll_timeout_s=0.0)
+    assert out["reasons"] == ["no new report"]
+
+
+def test_oldest_first_server_list_picks_true_newest():
+    r1 = rep("r1", "2026-10-27T12:00:01Z")
+    r2 = rep("r2", "2026-10-27T12:00:02Z", "Degraded", R_DEG)
+    assert run(two([[r1, r2]]), bindings=BIND2)["verdict"] == "failure"
+
+
+def test_input_rejection_paths_not_recorded_and_unknown():
+    def join(*a):
+        raise ClientInputError("bad")
+    for out in (run(FakeClient(), join),
+                run(FakeClient(get_exc=ClientInputError("bad"))),
+                run(FakeClient(push_exc=ClientInputError("bad")))):
+        assert out["verdict"] == "inconclusive" and out["intent_status"] == "unknown"
+        assert src.TMF921_STORE.tracked_count() == 0

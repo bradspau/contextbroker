@@ -12,7 +12,6 @@ refuses to push anything older (or equal with a different value).
 import re
 import threading
 import time
-from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 
 from fastapi.encoders import jsonable_encoder
@@ -40,7 +39,7 @@ TMF921_STORE = IntentStore(lambda _i: {})
 _STATE_LOCK = threading.Lock()
 _INTENT_LOCKS: dict[str, threading.Lock] = {}
 _MARKS: dict[tuple[str, str], tuple[datetime, float]] = {}
-_TS = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?Z")
+_TS = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)")
 
 DEFAULT_MAX_ENTITIES = 50
 
@@ -69,11 +68,14 @@ def _parse_ts(value) -> datetime | None:
     m = _TS.fullmatch(value)
     if not m:
         return None
-    frac = (m.group(2) or "")[:6].ljust(6, "0")
+    frac = (m.group(2) or "").ljust(6, "0")[:6]
+    zone = "+00:00" if m.group(3) == "Z" else m.group(3)
     try:
-        return datetime.strptime(m.group(1) + "." + frac, "%Y-%m-%dT%H:%M:%S.%f").replace(
-            tzinfo=timezone.utc)
-    except ValueError:
+        dt = datetime.fromisoformat(f"{m.group(1)}.{frac}{zone}")
+        if dt.tzinfo is None or dt.utcoffset() is None:
+            return None
+        return dt.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
         return None
 
 
@@ -104,16 +106,6 @@ def _unpushable(env, ref: datetime) -> str | None:
     if q.conflicts:
         return "conflicting observation"
     return None
-
-
-def _ordered_reports(reports: list[dict]) -> list[dict]:
-    """Newest first by parsed creationDate; the server's own order if any
-    date is unparseable (never a string comparison)."""
-    dates = [_parse_ts(r.get("creationDate")) for r in reports]
-    if reports and all(d is not None for d in dates):
-        order = sorted(range(len(reports)), key=lambda i: dates[i], reverse=True)
-        return [reports[i] for i in order]
-    return list(reports)
 
 
 def _is_new(report, pre_ids) -> bool:
@@ -169,6 +161,9 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
     prev = TMF921_STORE.last_outcome(intent_id)
     previous = prev.value if prev else None
 
+    def rejected(reason):  # caller/config input rejected: not an assessment
+        return _result(Outcome.INCONCLUSIVE, [reason], previous=previous, status="unknown")
+
     def done(outcome, reasons, per=None, envs=(), status="active"):
         _record(intent_id, outcome)
         return _result(outcome, reasons, per, envs, previous, status)
@@ -177,7 +172,7 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
     try:
         ok = _bounds_match(client.get_intent(intent_id), binding)
     except ClientInputError:
-        return done(Outcome.INCONCLUSIVE, ["invalid binding"], status="unknown")
+        return rejected("invalid binding")
     except Exception:
         return done(Outcome.INCONCLUSIVE, ["intent server unavailable"])
     if not ok:
@@ -197,7 +192,7 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
         try:
             envs[uri] = join(device, interface, mappings[uri].broker_metric, time_window)
         except ClientInputError:
-            return done(Outcome.INCONCLUSIVE, ["invalid binding"])
+            return rejected("invalid binding")
     all_envs = list(envs.values())
 
     ref = now or clock()
@@ -223,16 +218,20 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
                 client.post_observation(intent_id, u, envs[u].value, mappings[u].unit,
                                         envs[u].observed_at)
             except ClientInputError:
-                return done(Outcome.INCONCLUSIVE, ["invalid observation"], envs=all_envs)
+                return rejected("invalid observation")
             with _STATE_LOCK:
                 _MARKS[(intent_id, u)] = (envs[u].observed_at, envs[u].value)
         report = None
         waited = 0.0
         start = monotonic()
         while True:
-            new = [r for r in _ordered_reports(client.list_reports(intent_id))
-                   if _is_new(r, pre_ids)]
+            new = sorted((r for r in client.list_reports(intent_id) if _is_new(r, pre_ids)),
+                         key=lambda r: _parse_ts(r["creationDate"]), reverse=True)
             if len(new) >= len(uris):
+                if len(new) > 1 and _parse_ts(new[0]["creationDate"]) == _parse_ts(
+                        new[1]["creationDate"]):
+                    return done(Outcome.INCONCLUSIVE, ["ambiguous report order"],
+                                envs=all_envs)
                 report = new[0]
                 break
             if waited >= poll_timeout_s or monotonic() - start >= poll_timeout_s:
