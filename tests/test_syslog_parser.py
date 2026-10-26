@@ -70,3 +70,24 @@ def test_malformed_does_not_raise():
 def test_raw_always_retained():
     line = "<34>1 2026-10-26T10:00:00Z router1 a - - - msg  "
     assert parse_syslog(line, DEVS).raw == line
+
+
+def _h(host, devs):
+    return parse_syslog(f"<13>1 - {host} a - - - x", devs).device_id
+
+
+def test_exact_case_wins_in_collision():
+    assert _h("a", {"A": "1", "a": "2"}) == "2"
+    assert _h("A", {"A": "1", "a": "2"}) == "1"
+
+
+def test_ambiguous_case_insensitive_fails_closed():
+    assert _h("aA", {"Aa": "1", "aa": "2"}) is None
+
+
+def test_unique_case_insensitive_still_works():
+    assert _h("ROUTER", {"Router": "r"}) == "r"
+
+
+def test_collision_same_id_ok():
+    assert _h("aA", {"Aa": "1", "aa": "1"}) == "1"

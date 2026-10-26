@@ -6,6 +6,9 @@ message differs from its value, the contradiction is published in
 ``ReconcileResult.conflicts`` (and ``envelope.quality.conflicts``) rather than
 overwriting anything. ``reconcile`` never mutates or returns a modified
 ``current``; callers decide what to do with the observed fact and conflicts.
+
+The configured-vs-event comparison is a placeholder text comparison (stub),
+not real state semantics. A ``current`` for a different entity is ignored.
 """
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -37,7 +40,10 @@ def reconcile(
 ) -> ReconcileResult:
     if event.device_id is None:
         return ReconcileResult(None, ("unresolved device",))
-    now = now or datetime.now(timezone.utc)
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
     env = build_observed(event.device_id, event.message, "syslog", event.event_time, now, max_age_s)
     if event.event_time is None:
         env.quality.missing = True
@@ -50,6 +56,7 @@ def reconcile(
     conflicts: tuple[str, ...] = ()
     if (
         current is not None
+        and current.entity_id == event.device_id
         and current.state is StateCategory.CONFIGURED
         and _norm(current.value) != _norm(event.message)
     ):

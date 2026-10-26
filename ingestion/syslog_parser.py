@@ -6,12 +6,15 @@ than guessed. The original line is always retained in ``raw``.
 """
 import re
 from dataclasses import dataclass
+from typing import Any
 from datetime import datetime
 
 
 @dataclass(frozen=True)
 class SyslogEvent:
-    raw: str
+    """Normalised event. ``raw`` is the original input; non-str input is preserved as-is."""
+
+    raw: "str | Any"
     device_id: str | None
     severity: int | None
     event_time: datetime | None
@@ -33,11 +36,12 @@ def _parse_ts(ts: str) -> datetime | None:
 
 
 def _device(host: str, known: dict[str, str]) -> str | None:
+    """Exact-case match wins; else case-insensitive, failing closed if ambiguous."""
+    if host in known:
+        return known[host]
     h = host.lower()
-    for k, v in known.items():
-        if isinstance(k, str) and k.lower() == h:
-            return v
-    return None
+    ids = {v for k, v in known.items() if isinstance(k, str) and k.lower() == h}
+    return ids.pop() if len(ids) == 1 else None
 
 
 def _skip_sd(rest: str) -> str:

@@ -70,3 +70,16 @@ def test_provenance():
 def test_never_configured():
     for cur in (None, cfg("x")):
         assert reconcile(ev(), cur, now=NOW).envelope.state is not StateCategory.CONFIGURED
+
+
+def test_mismatched_current_ignored():
+    cur = ContextEnvelope("other", StateCategory.CONFIGURED, "different", "netconf", NOW, Quality())
+    r = reconcile(ev(), cur, now=NOW)
+    assert r.conflicts == ()
+    assert cur.value == "different" and cur.quality.conflicts == []
+
+
+def test_naive_now_raises():
+    import pytest
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        reconcile(ev(), None, now=datetime(2026, 10, 26, 10, 0))
