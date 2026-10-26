@@ -254,3 +254,37 @@ def test_assess_invalid_interface_is_inconclusive_not_400():
     bad = [e for e in body["context"] if e["entity_id"] == "r1:Gi0/0/0.100"][0]
     assert bad["quality"]["missing"] is True
     assert bad["quality"]["conflicts"] == ["invalid interface identifier"]
+
+
+def test_assess_bad_time_window_is_400_and_records_nothing():
+    # New-2: a bad request window is a client error, not an "invalid interface" verdict.
+    from broker_engine.assess import DEFAULT_STORE
+    DEFAULT_STORE._outcomes.pop("I-WIN", None)
+    with patch("broker_engine.main.resolve_intent", return_value=INTENT), \
+         patch("broker_engine.main.join_observed_metric", side_effect=fake_join):
+        r = client.post("/context/assess", json={"intent_id": "I-WIN", "time_window": "5min"})
+    assert r.status_code == 400
+    assert "I-WIN" not in DEFAULT_STORE._outcomes
+
+
+def test_assess_real_validation_rejects_unsafe_graph_interface_per_interface():
+    # Uses the REAL joiner validation (not a mock that raises) for the identifier case.
+    intent = {**INTENT, "interfaces": [
+        {"device": "r1", "interface_name": "e0"},
+        {"device": "r1", "interface_name": "Gi0/0/0.100"},
+    ]}
+    from broker_engine import tsdb_joiner
+
+    def real_join_with_fake_http(device, interface, metric_type, time_window, **kw):
+        if interface == "e0":
+            return fake_join(device, interface, metric_type, time_window)
+        return tsdb_joiner.join_observed_metric(device, interface, metric_type, time_window)
+
+    with patch("broker_engine.main.resolve_intent", return_value=intent), \
+         patch("broker_engine.main.join_observed_metric", side_effect=real_join_with_fake_http):
+        r = client.post("/context/assess", json={"intent_id": "I-REAL", "time_window": "5m"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["verdict"] == "inconclusive"
+    bad = [e for e in body["context"] if e["entity_id"] == "r1:Gi0/0/0.100"][0]
+    assert bad["quality"]["conflicts"] == ["invalid interface identifier"]

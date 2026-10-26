@@ -6,7 +6,7 @@ from fastapi.encoders import jsonable_encoder
 from broker_engine.pruner import prune
 from broker_engine.sparql_resolver import resolve_intent
 from broker_engine.tsdb_joiner import join_observed_metric
-from broker_engine.validation import ClientInputError
+from broker_engine.validation import _SAFE_WINDOW, ClientInputError, _validate_token
 from data_contracts.envelope import build_observed
 from intent_management.store import IntentStore
 from outcome_assurance.evaluate import Outcome, evaluate_intent
@@ -29,6 +29,10 @@ def assess_intent(
     then prune only the context returned. `resolve`/`join` default to the real
     resolver/joiner (looked up at call time so patches apply)."""
     join = join or join_observed_metric
+    # Validate caller input up front so a bad window is a client error (400),
+    # not a per-interface "invalid identifier" verdict.
+    if not _SAFE_WINDOW.match(time_window):
+        raise ClientInputError(f"Unsafe time_window: {time_window!r}")
     store = DEFAULT_STORE.with_resolver(resolve) if resolve else DEFAULT_STORE
     record = store.get(intent_id)
     previous = record.last_outcome.value if record.last_outcome else None
@@ -43,6 +47,7 @@ def assess_intent(
             "last_outcome": previous,
         })
     intent = record.as_resolver_dict()
+    _validate_token(intent["metric"], "metric_type")
     interfaces = intent["interfaces"]
     observations = {}
     for iface in interfaces:
@@ -52,7 +57,7 @@ def assess_intent(
                 iface["device"], iface["interface_name"], intent["metric"], time_window
             )
         except ClientInputError:
-            # One graph-supplied identifier we cannot safely query must not fail
+            # Window and metric were validated above, so this is one graph-supplied identifier we cannot safely query must not fail
             # the whole assessment: report that interface as missing/inconclusive.
             env = build_observed(
                 f'{iface["device"]}:{iface["interface_name"]}',
