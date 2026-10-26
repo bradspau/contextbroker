@@ -49,6 +49,10 @@ class IntentStore:
         with self._lock:
             return self._outcomes.get(intent_id)
 
+    def tracked_count(self) -> int:
+        with self._lock:
+            return len(self._outcomes)
+
     def fulfilment_update(self, intent_id: str, outcome: Outcome) -> None:
         with self._lock:
             self._outcomes[intent_id] = outcome

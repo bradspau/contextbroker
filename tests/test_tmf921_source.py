@@ -2,7 +2,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from broker_engine import assess
+import threading
+
+from intent_management import tmf921_source as src
 from broker_engine.validation import ClientInputError
 from data_contracts.envelope import build_observed
 from data_contracts.intent_bindings import IntentBinding
@@ -41,16 +43,21 @@ OLD_OK = rep("oldok", "2026-10-27T11:00:00Z")
 
 
 class FakeClient:
-    def __init__(self, intent_doc=None, pre=(), post=(), get_exc=None, push_exc=None, list_exc=None):
+    def __init__(self, intent_doc=None, docs=None, pre=(), post=(), get_exc=None, push_exc=None, list_exc=None):
         self.intent_doc = intent_doc if intent_doc is not None else intent((URI, 100))
         self.reports = [list(pre)] + [list(x) for x in post]
+        self.docs = list(docs) if docs else None
+        self.gets = 0
         self.posts = []
         self.lists = 0
         self.get_exc, self.push_exc, self.list_exc = get_exc, push_exc, list_exc
 
     def get_intent(self, i):
+        self.gets += 1
         if self.get_exc:
             raise self.get_exc
+        if self.docs:
+            return self.docs[min(self.gets, len(self.docs)) - 1]
         return self.intent_doc
 
     def list_reports(self, i):
@@ -85,16 +92,20 @@ def run(client, join=None, bindings=BIND, mmap=MMAP, iid=IID, window="5m", **kw)
     sleeps = []
     out = assess_via_tmf921(iid, window, client=client, join=join or make_join(),
                             now=NOW, metric_map=mmap, bindings=bindings,
-                            sleep=sleeps.append, **kw)
+                            sleep=sleeps.append,
+                            **{"monotonic": lambda: 0.0, **kw})
     out["_sleeps"] = sleeps
     return out
 
 
 @pytest.fixture(autouse=True)
 def clean_store():
-    assess.DEFAULT_STORE._outcomes.clear()
+    def reset():
+        src.TMF921_STORE._outcomes.clear()
+        src._MARKS.clear()
+    reset()
     yield
-    assess.DEFAULT_STORE._outcomes.clear()
+    reset()
 
 
 def test_success_pushes_observed_at_as_obtained_at():
@@ -211,10 +222,10 @@ def test_last_outcome_recorded():
     c = FakeClient(post=[[rep("n", "2026-10-27T12:00:01Z")]])
     first = run(c)
     assert first["last_outcome"] is None
-    assert assess.DEFAULT_STORE.last_outcome(IID).value == "success"
+    assert src.TMF921_STORE.last_outcome(IID).value == "success"
     c2 = FakeClient(intent_doc=intent((URI, 50)))
     assert run(c2)["last_outcome"] == "success"
-    assert assess.DEFAULT_STORE.last_outcome(IID).value == "inconclusive"
+    assert src.TMF921_STORE.last_outcome(IID).value == "inconclusive"
 
 
 @pytest.mark.parametrize("window", ["5x", "5m\n", "", "abc"])
@@ -235,7 +246,7 @@ def test_bad_intent_id_before_http(iid):
 
 def test_two_metrics_all_pushable_success():
     c = FakeClient(intent_doc=intent((URI, 100), (URI2, 10)),
-                   post=[[rep("n", "2026-10-27T12:00:01Z")]])
+                   post=[[rep("n", "2026-10-27T12:00:01Z"), rep("n2", "2026-10-27T12:00:02Z")]])
     out = run(c, bindings=BIND2)
     assert out["verdict"] == "success" and len(c.posts) == 2
 
@@ -247,12 +258,188 @@ def test_two_metrics_one_stale_never_success():
     c = FakeClient(intent_doc=intent((URI, 100), (URI2, 10)),
                    post=[[rep("n", "2026-10-27T12:00:01Z")]])
     out = run(c, join, bindings=BIND2)
-    assert out["verdict"] == "inconclusive" and len(c.posts) == 1
-    assert "stale observation: JitterMetric" in out["reasons"]
+    assert out["verdict"] == "inconclusive" and c.posts == [] and c.lists == 0
+    assert out["reasons"] == ["stale observation: JitterMetric"]
 
 
 def test_two_metrics_failure_wins():
     c = FakeClient(intent_doc=intent((URI, 100), (URI2, 10)),
                    post=[[rep("n", "2026-10-27T12:00:01Z", "Degraded",
-                              "Conditions not met: atLeast: JitterMetric: FAIL")]])
+                              "Conditions not met: atLeast: JitterMetric: FAIL"),
+                          rep("n2", "2026-10-27T12:00:00Z")]])
     assert run(c, bindings=BIND2)["verdict"] == "failure"
+
+
+def test_extra_intent_metric_not_in_binding_is_drift():
+    c = FakeClient(intent_doc=intent((URI, 100), (URI2, 10)),
+                   post=[[rep("n", "2026-10-27T12:00:01Z")]])
+    out = run(c)
+    assert out["verdict"] == "inconclusive" and out["reasons"] == ["intent bound drifted"]
+    assert c.posts == []
+
+
+def test_missing_intent_metric_is_drift():
+    c = FakeClient(intent_doc=intent((URI, 100)))
+    out = run(c, bindings=BIND2)
+    assert out["reasons"] == ["intent bound drifted"] and c.posts == []
+
+
+def test_two_pushes_wait_for_two_new_reports():
+    r1 = rep("r1", "2026-10-27T12:00:01Z")
+    r2 = rep("r2", "2026-10-27T12:00:02Z", "Degraded",
+             "Conditions not met: atLeast: JitterMetric: FAIL")
+    c = FakeClient(intent_doc=intent((URI, 100), (URI2, 10)), post=[[r1], [r2, r1]])
+    out = run(c, bindings=BIND2)
+    assert out["verdict"] == "failure"
+    assert len(out["_sleeps"]) == 1
+
+
+def test_creation_date_ordering_is_not_string_based():
+    # as strings "...01Z" > "...01.5Z"; as instants 01.5 is newer
+    a = rep("a", "2026-10-27T12:00:01Z")
+    b = rep("b", "2026-10-27T12:00:01.5Z", "Degraded",
+            "Conditions not met: atLeast: LatencyMetric: FAIL")
+    c = FakeClient(post=[[a, b]])
+    assert run(c)["verdict"] == "failure"
+
+
+def test_report_without_id_or_bad_date_is_not_new():
+    bad = [dict(rep("x", "garbage")), {"creationDate": "2026-10-27T12:00:01Z",
+                                        "intentHandlingState": "Fulfilled"}]
+    c = FakeClient(post=[bad])
+    out = run(c, poll_timeout_s=1.0, poll_interval_s=1.0)
+    assert out["reasons"] == ["no new report"]
+
+
+def test_bound_changes_before_success_is_inconclusive():
+    c = FakeClient(docs=[intent((URI, 100)), intent((URI, 50))],
+                   post=[[rep("n", "2026-10-27T12:00:01Z")]])
+    out = run(c)
+    assert out["verdict"] == "inconclusive" and out["reasons"] == ["intent bound drifted"]
+    assert c.gets == 2
+
+
+def test_same_intent_runs_are_serialised():
+    entered, release = threading.Event(), threading.Event()
+
+    class Blocking(FakeClient):
+        def get_intent(self, i):
+            self.gets += 1
+            if self.gets == 1:
+                entered.set()
+                release.wait(5)
+            return self.intent_doc
+
+    c = Blocking(post=[[rep("n", "2026-10-27T12:00:01Z")]])
+    results = []
+
+    def work():
+        results.append(assess_via_tmf921(IID, "5m", client=c, join=make_join(), now=NOW,
+                                         metric_map=MMAP, bindings=BIND, sleep=lambda s: None,
+                                         poll_timeout_s=0.0, monotonic=lambda: 0.0))
+    t1 = threading.Thread(target=work)
+    t1.start()
+    assert entered.wait(5)
+    t2 = threading.Thread(target=work)
+    t2.start()
+    t2.join(0.3)
+    assert c.gets == 1 and t2.is_alive()
+    release.set()
+    t1.join(5)
+    t2.join(5)
+    assert len(results) == 2
+
+
+def test_older_observation_than_last_pushed_rejected():
+    c = FakeClient(post=[[rep("n", "2026-10-27T12:00:01Z")]])
+    assert run(c, make_join(age=10))["verdict"] == "success"
+    c2 = FakeClient(post=[[rep("m", "2026-10-27T12:00:02Z")]])
+    out = run(c2, make_join(age=60))
+    assert out["verdict"] == "inconclusive" and c2.posts == [] and c2.lists == 0
+    assert out["reasons"] == ["observation not newer than last pushed: LatencyMetric"]
+
+
+def test_equal_observation_different_value_rejected_same_value_allowed():
+    c = FakeClient(post=[[rep("n", "2026-10-27T12:00:01Z")]])
+    run(c, make_join(age=10, value=42.0))
+    c2 = FakeClient(post=[[rep("m", "2026-10-27T12:00:02Z")]])
+    assert run(c2, make_join(age=10, value=43.0))["verdict"] == "inconclusive"
+    assert c2.posts == []
+    c3 = FakeClient(post=[[rep("q", "2026-10-27T12:00:03Z")]])
+    assert run(c3, make_join(age=10, value=42.0))["verdict"] == "success"
+
+
+def test_mark_not_updated_when_push_fails():
+    run(FakeClient(push_exc=Tmf921Error("x")), make_join(age=10))
+    assert src._MARKS == {}
+
+
+def test_no_binding_and_invalid_binding_not_recorded(monkeypatch):
+    run(FakeClient(), bindings={})
+    assert src.TMF921_STORE.tracked_count() == 0
+    monkeypatch.setattr(src, "load_bindings", lambda: (_ for _ in ()).throw(ValueError("x")))
+    assert_out = assess_via_tmf921(IID, "5m", client=FakeClient(), metric_map=MMAP)
+    assert assert_out["reasons"] == ["invalid binding"]
+    assert src.TMF921_STORE.tracked_count() == 0
+
+
+def test_graph_store_not_polluted_and_cap(monkeypatch):
+    from broker_engine import assess
+    run(FakeClient(post=[[rep("n", "2026-10-27T12:00:01Z")]]))
+    assert assess.DEFAULT_STORE.last_outcome(IID) is None
+    monkeypatch.setattr(src, "MAX_TRACKED_OUTCOMES", 1)
+    b = {"other": IntentBinding("other", {URI: ("olt1", "pon0/1")}, {URI: 100.0})}
+    run(FakeClient(), bindings=b, iid="other")
+    assert src.TMF921_STORE.tracked_count() == 1
+
+
+def test_unknown_status_for_no_binding_and_drift():
+    assert run(FakeClient(), bindings={})["intent_status"] == "unknown"
+    assert run(FakeClient(intent_doc=intent((URI, 5))))["intent_status"] == "unknown"
+
+
+def test_observed_at_reaches_interpret_stale_cap():
+    c = FakeClient(post=[[rep("n", "2026-10-27T12:00:01Z")]])
+    out = assess_via_tmf921(IID, "5m", client=c, join=make_join(age=290),
+                            now=NOW + timedelta(seconds=20), metric_map=MMAP,
+                            bindings=BIND, sleep=lambda s: None, monotonic=lambda: 0.0)
+    assert out["verdict"] == "inconclusive"
+    assert out["reasons"] == ["stale observation: LatencyMetric"]
+
+
+def test_join_client_input_error_is_invalid_binding():
+    def join(*a):
+        raise ClientInputError("bad")
+    out = run(FakeClient(), join)
+    assert out["reasons"] == ["invalid binding"]
+
+
+def test_post_client_input_error_is_invalid_observation():
+    out = run(FakeClient(push_exc=ClientInputError("bad")))
+    assert out["reasons"] == ["invalid observation"]
+
+
+def test_duplicate_key_bindings_file(tmp_path, monkeypatch):
+    f = tmp_path / "b.json"
+    f.write_text('{"hsi-demo-1": {"%s": {"device": "a", "interface": "b", "bound": 1},'
+                 ' "%s": {"device": "a", "interface": "b", "bound": 1}}}' % (URI, URI))
+    monkeypatch.setenv("INTENT_BINDINGS_PATH", str(f))
+    out = assess_via_tmf921(IID, "5m", client=FakeClient(), join=make_join(), metric_map=MMAP)
+    assert out["verdict"] == "inconclusive" and out["reasons"] == ["invalid binding"]
+
+
+def test_future_dated_envelope_not_pushed():
+    c = FakeClient()
+    out = run(c, make_join(age=-60))
+    assert c.posts == [] and out["reasons"] == ["future-dated observation: LatencyMetric"]
+
+
+def test_real_deadline_bounds_polling():
+    t = [0.0]
+
+    def mono():
+        t[0] += 10.0
+        return t[0]
+    c = FakeClient(pre=[OLD_OK], post=[[OLD_OK]])
+    out = run(c, monotonic=mono, poll_timeout_s=5.0, poll_interval_s=0.1)
+    assert out["reasons"] == ["no new report"] and len(out["_sleeps"]) == 0
