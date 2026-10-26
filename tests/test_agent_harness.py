@@ -481,3 +481,4 @@ def test_execute_tool_routes_tmf921_source():
 
 def test_system_prompt_mentions_tmf921_rule():
     assert "source=tmf921" in tools.SYSTEM_PROMPT
+    assert 'assess_intent(intent_id, time_window, source="graph"|"tmf921"' in tools.SYSTEM_PROMPT

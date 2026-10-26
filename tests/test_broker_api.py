@@ -307,6 +307,7 @@ def test_assess_source_tmf921_routes_to_new_path():
             "/context/assess", json={"intent_id": "I1", "time_window": "5m", "source": "tmf921"})
     assert r.status_code == 200 and r.json()["source"] == "tmf921"
     assert via.call_args.args == ("I1", "5m")
+    assert via.call_args.kwargs["join"] is main.join_observed_metric
 
 
 def test_assess_unknown_source_422_and_python_clientinputerror():

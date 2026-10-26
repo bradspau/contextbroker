@@ -106,6 +106,19 @@ def test_broker_has_tmf921_url():
     assert "tmf921-server" not in _services()["contextbroker-api"]["depends_on"]
 
 
+def test_broker_bindings_mount_read_only_and_no_ontology():
+    svc = _services()["contextbroker-api"]
+    env = _env(svc["environment"])
+    assert env["INTENT_BINDINGS_PATH"] == "/app/config/intent_bindings.json"
+    vols = svc["volumes"]
+    assert len(vols) == 1
+    assert vols[0].endswith(":/app/config/intent_bindings.json:ro")
+    assert "./data_contracts/intent_bindings.json" in vols[0]
+    assert not any("ontolog" in v.lower() or "TIO" in v for v in vols)
+    assert (ROOT / "data_contracts" / "intent_bindings.json").read_text().strip() == "{}"
+    assert svc["ports"] == ["8080:8080"]
+
+
 def _run(dir_path):
     env = dict(os.environ, TIO_ONTOLOGY_DIR=str(dir_path))
     return subprocess.run(["bash", str(PREFLIGHT)], env=env, capture_output=True, text=True)

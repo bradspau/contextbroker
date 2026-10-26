@@ -50,6 +50,9 @@ services:
       - FUSEKI_QUERY_ENDPOINT=http://fuseki:3030/network-dataset/query
       - VM_QUERY_ENDPOINT=http://victoriametrics:8428/api/v1/query
       - TMF921_BASE_URL=http://tmf921-server:8000/tmf-api/intentManagement/v5
+      - INTENT_BINDINGS_PATH=/app/config/intent_bindings.json
+    volumes:
+      - ${HOST_INTENT_BINDINGS:-./data_contracts/intent_bindings.json}:/app/config/intent_bindings.json:ro
     depends_on:
       - fuseki
       - victoriametrics

@@ -26,7 +26,7 @@ def query_tsdb_metrics(
 
 SYSTEM_PROMPT = """You are a network compliance agent. You have three tools:
 
-- assess_intent(intent_id, time_window): the primary tool. The broker deterministically
+- assess_intent(intent_id, time_window, source="graph"|"tmf921", default graph): the primary tool. The broker deterministically
   resolves the intent, reads telemetry for every interface, and evaluates compliance. It
   returns a verdict ("success", "failure" or "inconclusive"), per-interface results,
   reasons, supporting context and dropped_count.

@@ -36,7 +36,7 @@ flowchart TB
 | Package | Responsibility | Spec component |
 |---|---|---|
 | `data_contracts` | `ContextEnvelope` and state-quality labels shared by all layers | Data contracts |
-| `broker_engine` | FastAPI app (`broker_engine.main:app`, REST + MCP), pruner, SPARQL/PromQL resolvers, `assess` | Context broker engine |
+| `broker_engine` | FastAPI app (`broker_engine.main:app`, REST; MCP server built but not mounted), pruner, SPARQL/PromQL resolvers, `assess` | Context broker engine |
 | `outcome_assurance` | Deterministic, three-valued intent verdict (the LLM is not the judge) | Outcome assurance |
 | `agent_harness` | Tool-calling LLM loop (Claude, LM Studio fallback); `broker.py` is a thin CLI shim over it | Agent harness |
 | `ontologies` | `tbox/` topology + intent ontology, `shacl/` shapes | Ontology / knowledge layer |
@@ -57,10 +57,10 @@ flowchart TB
    them over REST or MCP). Separately, `broker_engine.main:app` serves a REST API
    (`GET /context/intent/{id}`, `GET /context/metric`, `POST /context/assess`) via
    `uvicorn broker_engine.main:app`. `POST /context/assess` also accepts
-   `"source":"tmf921"` (default `"graph"`) to assess via the TMF921 intent server. An MCP server is built and unit-tested
-   (`broker_engine.main.build_mcp_server()`) but is NOT mounted on that app and nothing
-   serves it; to use it you would have to run it yourself, e.g.
-   `build_mcp_server().run()`.
+   `"source":"tmf921"` (default `"graph"`) to assess via the TMF921 intent server.
+   An MCP server is built and unit-tested (`broker_engine.main.build_mcp_server()`)
+   but is NOT mounted on that app and nothing serves it; to use it you would have
+   to run it yourself, e.g. `build_mcp_server().run()`.
 2. `broker_engine` resolves declared state from Fuseki and observed state from
    VictoriaMetrics, wraps each in a `ContextEnvelope` with quality metadata, and prunes it.
 3. `outcome_assurance` computes the success / failure / inconclusive verdict
@@ -291,6 +291,43 @@ python broker.py "Is intent-core-health-01 compliant right now?"
 The broker reads the intent's requirement from Fuseki, reads the observed
 metric from VictoriaMetrics, and deterministically computes the verdict
 (success / failure / inconclusive); the LLM only explains that verdict.
+
+## Using an external TMF921 intent server
+
+The broker can take the intent (and its handling state) from a TMF921 server
+(BBF_921_java) instead of the ontology graph. The server runs as an opt-in
+compose service (profile `tmf921`); the licensed TM Forum TIO ontology files stay
+on the host and are only bind-mounted read-only (never committed, never baked
+into an image).
+
+1. Check the host ontology directory (`TIO_ONTOLOGY_DIR`, see `.env.example`):
+   `bash scripts/tmf921_preflight.sh`
+2. Start the server (and the broker): `docker compose --profile tmf921 up -d --build`
+   (port 8000, bound to 127.0.0.1).
+3. Create an intent the way `seed_data/seed.sh` in BBF_921_java does, against
+   `localhost:8000`. The bound must be a Turtle expression carrying
+   `quan:unit "Mbps"`, otherwise the server reports a unit mismatch. Then PATCH it ACTIVE.
+4. Pin the bound in the bindings file (default `data_contracts/intent_bindings.json`,
+   ships as `{}`; mount your own with `HOST_INTENT_BINDINGS`, read-only):
+   `{"<intent_id>": {"http://broadband-forum.org/Intent#DownstreamBandwidthMetric":
+   {"device": "olt1", "interface": "pon0", "bound": 100}}}`.
+   The metric map (`data_contracts/metric_map.json`, `METRIC_MAP_PATH`) maps the five
+   HSI metrics to broker metric names such as `downstream_bandwidth_mbps`.
+5. Assess:
+   `curl -X POST localhost:8080/context/assess -d '{"intent_id":"<id>","time_window":"30m","source":"tmf921"}'`
+
+Safety behaviour: stale, missing, conflicted, drifted or unpushable evidence gives
+`inconclusive`, never `success`. A partial-evidence assess pushes nothing to the
+server. The server's Flow 3 rewrites an intent's stored bound after any Degraded
+evaluation, so after a `failure` the same intent reports "intent bound drifted"
+(`inconclusive`) until it is re-created and re-pinned; this is server-side behaviour
+to raise with its owner. Per-intent locks and high-water marks are in-process, so
+run a single broker process. Observations pushed by other clients are invisible to the broker.
+
+Not done / limitations: polling only (no hub/webhook subscription); one source per
+metric URI; access-profile resources (UNI/PON, port 8001) are not mapped; the
+`compare` and `jena` evaluator engines were only spot-checked; the TIO files are
+mounted from the host and are not part of any image or commit.
 
 ## Running the tests
 
