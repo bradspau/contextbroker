@@ -12,7 +12,7 @@ import broker
 import telemetry_simulator
 
 
-ONTOLOGY_PATH = Path(__file__).resolve().parent.parent / "ontology" / "topology.ttl"
+ONTOLOGY_PATH = Path(__file__).resolve().parent.parent / "ontologies" / "tbox" / "topology.ttl"
 
 
 SPARQL_RESPONSE = {

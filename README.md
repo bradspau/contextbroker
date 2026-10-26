@@ -34,7 +34,7 @@ flowchart TB
     Broker -->|"query_intent_state_requirements<br/>(SPARQL)"| Fuseki
     Broker -->|"query_tsdb_metrics<br/>(PromQL)"| VM
 
-    SeedGraph["seed_graph.py"] -->|"loads ontology/topology.ttl"| Fuseki
+    SeedGraph["seed_graph.py"] -->|"loads ontologies/tbox/topology.ttl"| Fuseki
     TelemetrySim["telemetry_simulator.py"] -->|"writes every 5s"| VM
 ```
 
@@ -84,7 +84,7 @@ One-off setup script — loads the topology/intent ontology into Fuseki so
   endpoint (`/network-dataset/data`) with HTTP basic auth (`admin`/`admin`
   by default — matches the `ADMIN_PASSWORD` in `docker-compose.yml`).
 - Run directly: `python seed_graph.py` loads
-  `ontology/topology.ttl` (the `intent-core-health-01` requirement) into
+  `ontologies/tbox/topology.ttl` (the `intent-core-health-01` requirement) into
   the default endpoint. Both the file path and the endpoint can be
   overridden as positional CLI args if you want to load a different
   ontology or target a different dataset.
@@ -221,7 +221,7 @@ source venv/bin/activate
 python seed_graph.py
 ```
 
-Loads `ontology/topology.ttl` — the `intent-core-health-01` requirement
+Loads `ontologies/tbox/topology.ttl` — the `intent-core-health-01` requirement
 (zero input drops) on the link between `Router-A`/`GigabitEthernet0/0/0`
 and `Router-B`/`GigabitEthernet0/0/1`.
 
@@ -283,7 +283,7 @@ metric from VictoriaMetrics, and has the LLM compare the two and answer.
 ## Running the tests
 
 Tests mock all network calls (Fuseki/VictoriaMetrics/LLM) except one, which
-runs a real SPARQL query against `ontology/topology.ttl` via `rdflib` — no
+runs a real SPARQL query against `ontologies/tbox/topology.ttl` via `rdflib` — no
 Docker required to run the suite:
 
 ```bash

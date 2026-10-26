@@ -5,7 +5,7 @@ import rdflib
 
 import seed_graph
 
-ONTOLOGY_PATH = Path(__file__).resolve().parent.parent / "ontology" / "topology.ttl"
+ONTOLOGY_PATH = Path(__file__).resolve().parent.parent / "ontologies" / "tbox" / "topology.ttl"
 NS = rdflib.Namespace("http://example.org/network-ontology#")
 
 

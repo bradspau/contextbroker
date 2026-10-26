@@ -1,0 +1,23 @@
+@prefix : <http://example.org/network-ontology#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+:OperationalIntentShape a sh:NodeShape ;
+    sh:targetClass :OperationalIntent ;
+    sh:property [ sh:path :hasTargetMetric ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path :hasOperator ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path :hasTargetValue ; sh:datatype xsd:double ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path :appliesToLink ; sh:minCount 1 ] ;
+    sh:property [ sh:path :stateCategory ; sh:datatype xsd:string ; sh:maxCount 1 ;
+                  sh:in ( "intended" "configured" "observed" "inferred" ) ] ;
+    sh:property [ sh:path :validFrom ; sh:datatype xsd:dateTime ; sh:maxCount 1 ] ;
+    sh:property [ sh:path :validTo ; sh:datatype xsd:dateTime ; sh:maxCount 1 ] .
+
+:TopologicalLinkShape a sh:NodeShape ;
+    sh:targetClass :TopologicalLink ;
+    sh:property [ sh:path :hasInterface ; sh:minCount 1 ] .
+
+:InterfaceShape a sh:NodeShape ;
+    sh:targetClass :Interface ;
+    sh:property [ sh:path :onDevice ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path :interfaceName ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] .

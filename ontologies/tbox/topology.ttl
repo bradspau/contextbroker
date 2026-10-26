@@ -45,6 +45,19 @@
     rdfs:domain :Interface ;
     rdfs:range xsd:string .
 
+:stateCategory a owl:DatatypeProperty ;
+    rdfs:domain :OperationalIntent ;
+    rdfs:range xsd:string ;
+    rdfs:comment "One of: intended, configured, observed, inferred." .
+
+:validFrom a owl:DatatypeProperty ;
+    rdfs:domain :OperationalIntent ;
+    rdfs:range xsd:dateTime .
+
+:validTo a owl:DatatypeProperty ;
+    rdfs:domain :OperationalIntent ;
+    rdfs:range xsd:dateTime .
+
 ### Individuals ###
 
 :if-router-a-ge000 a :Interface ;
@@ -63,5 +76,6 @@
     rdfs:label "Core Health: Zero Input Drops" ;
     :hasTargetMetric "input_drops" ;
     :hasOperator "==" ;
-    :hasTargetValue 0.0 ;
+    :hasTargetValue "0.0"^^xsd:double ;
+    :stateCategory "intended" ;
     :appliesToLink :link-router-a-router-b .

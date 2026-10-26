@@ -1,10 +1,10 @@
-"""Loads ontology/topology.ttl into a Fuseki dataset via the Graph Store Protocol."""
+"""Loads ontologies/tbox/topology.ttl into a Fuseki dataset via the Graph Store Protocol."""
 import pathlib
 import sys
 
 import requests
 
-DEFAULT_TTL_PATH = pathlib.Path(__file__).resolve().parent / "ontology" / "topology.ttl"
+DEFAULT_TTL_PATH = pathlib.Path(__file__).resolve().parent / "ontologies" / "tbox" / "topology.ttl"
 DEFAULT_DATA_ENDPOINT = "http://localhost:3030/network-dataset/data"
 
 
