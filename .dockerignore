@@ -9,3 +9,5 @@ __pycache__/
 tests/
 lodlive/
 .env
+ontologies/licensed
+**/ontology/**/*.ttl
