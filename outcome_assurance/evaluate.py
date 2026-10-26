@@ -41,6 +41,9 @@ def _eval_one(op, target, env: ContextEnvelope | None) -> tuple[Outcome, object,
         return Outcome.INCONCLUSIVE, None, "missing observation"
     if env.quality.stale:
         return Outcome.INCONCLUSIVE, observed, "stale observation"
+    if env.quality.conflicts:
+        return (Outcome.INCONCLUSIVE, observed,
+                f"unresolved conflicts: {'; '.join(env.quality.conflicts)}")
     if not _is_number(observed) or not _is_number(target):
         return Outcome.INCONCLUSIVE, observed, f"not comparable: {observed!r} vs {target!r}"
     return (Outcome.SUCCESS if fn(observed, target) else Outcome.FAILURE), observed, None

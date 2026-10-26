@@ -88,3 +88,14 @@ def test_stale_plus_failing_is_failure():
 def test_unknown_operator_named_even_if_missing():
     v = evaluate_intent(intent(op="~="), {("r1", "e0"): env(None, missing=True)})
     assert any("~=" in r for r in v.reasons)
+
+
+def test_conflicted_observation_is_inconclusive_not_success_or_failure():
+    # New-3: with >1 matching series a passing/failing value must not be definitive.
+    conflicted = ContextEnvelope("x", StateCategory.OBSERVED, 500.0, "t", None,
+                                 Quality(conflicts=["multiple series match selector (2)"]))
+    v = evaluate_intent(intent(op=">=", target=100.0, ifaces=(("r1", "e0"),)),
+                        {("r1", "e0"): conflicted})
+    assert v.outcome == Outcome.INCONCLUSIVE
+    assert "unresolved conflicts" in v.reasons[0]
+    assert "multiple series" in v.reasons[0]

@@ -28,7 +28,7 @@ def test_join_observed_metric_returns_envelope():
     assert env.source == "victoriametrics"
     assert env.observed_at == datetime.fromtimestamp(TS, timezone.utc)
     assert not env.quality.missing and not env.quality.stale
-    assert g.call_args_list[0].kwargs["params"]["query"].startswith("max(max_over_time(")
+    assert g.call_args_list[0].kwargs["params"]["query"].startswith("max_over_time(")
     assert g.call_args_list[1].kwargs["params"]["query"].startswith("min(tlast_over_time(")
 
 
@@ -51,6 +51,50 @@ def test_join_observed_metric_fails_closed_without_timestamp():
         assert env.value == 3.0
         assert env.observed_at is None
         assert env.quality.stale is True and not env.quality.missing
+
+
+@pytest.mark.parametrize("bad_ts", ["NaN", "inf", "-inf", "1e20", "-5", "0"])
+def test_join_observed_metric_non_finite_or_out_of_range_timestamp_is_stale(bad_ts):
+    # New-1: these used to raise ValueError/OverflowError out of the joiner.
+    now = datetime.fromtimestamp(TS, timezone.utc)
+    r = _resp({"data": {"result": [{"value": [TS, "3"]}]}})
+    r2 = _resp({"data": {"result": [{"value": [TS, bad_ts]}]}})
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]):
+        env = join_observed_metric("r1", "eth0", "utilization", "5m", now=now)
+    assert env.observed_at is None
+    assert env.quality.stale is True and env.value == 3.0
+
+
+def test_join_observed_metric_future_timestamp_is_stale():
+    now = datetime.fromtimestamp(TS, timezone.utc)
+    r = _resp({"data": {"result": [{"value": [TS, "3"]}]}})
+    r2 = _resp({"data": {"result": [{"value": [TS, str(TS + 86400)]}]}})
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]):
+        env = join_observed_metric("r1", "eth0", "utilization", "5m", now=now)
+    assert env.quality.stale is True
+
+
+def test_join_observed_metric_multiple_series_flagged_as_conflict():
+    # New-3: the right worst case depends on the operator, so >1 series must not
+    # silently collapse to one value.
+    now = datetime.fromtimestamp(TS, timezone.utc)
+    r = _resp({"data": {"result": [
+        {"metric": {"job": "a"}, "value": [TS, "500"]},
+        {"metric": {"job": "b"}, "value": [TS, "10"]},
+    ]}})
+    r2 = _resp({"data": {"result": [{"value": [TS, str(TS)]}]}})
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]):
+        env = join_observed_metric("r1", "eth0", "utilization", "5m", now=now)
+    assert env.quality.conflicts == ["multiple series match selector (2)"]
+
+
+def test_join_observed_metric_single_series_has_no_conflict():
+    now = datetime.fromtimestamp(TS, timezone.utc)
+    r = _resp({"data": {"result": [{"value": [TS, "3"]}]}})
+    r2 = _resp({"data": {"result": [{"value": [TS, str(TS)]}]}})
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]):
+        env = join_observed_metric("r1", "eth0", "utilization", "5m", now=now)
+    assert env.quality.conflicts == []
 
 
 def test_join_observed_metric_live_response_shape():

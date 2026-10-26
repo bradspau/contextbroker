@@ -1,4 +1,5 @@
 """Join observed telemetry from VictoriaMetrics into context envelopes."""
+import math
 import os
 from datetime import datetime, timezone
 
@@ -34,7 +35,7 @@ def join_observed_metric(
         f'{MEASUREMENT_NAME}_{metric_type}'
         f'{{device="{device}", interface="{interface}"}}'
     )
-    promql = f'max(max_over_time({selector}[{time_window}]))'
+    promql = f'max_over_time({selector}[{time_window}])'
 
     response = requests.get(query_endpoint, params={"query": promql}, timeout=REQUEST_TIMEOUT_S)
     response.raise_for_status()
@@ -46,23 +47,32 @@ def join_observed_metric(
     if not result:
         return build_observed(entity_id, None, "victoriametrics", None, now)
     raw = result[0]["value"][1]
-    observed_ts = _oldest_sample_ts(query_endpoint, selector, time_window)
-    observed_at = (
-        datetime.fromtimestamp(observed_ts, timezone.utc)
-        if observed_ts is not None
-        else None  # fail closed: build_observed marks this stale
-    )
-    return build_observed(entity_id, float(raw), "victoriametrics", observed_at, now)
+    observed_at = _oldest_sample_time(query_endpoint, selector, time_window, now)
+    env = build_observed(entity_id, float(raw), "victoriametrics", observed_at, now)
+    if len(result) > 1:
+        # Which series is "the" value is ambiguous (the right worst case depends on
+        # the intent operator), so fail closed: the evaluator treats conflicts as
+        # inconclusive rather than letting one series hide another.
+        env.quality.conflicts.append(
+            f"multiple series match selector ({len(result)})"
+        )
+    return env
 
 
-def _oldest_sample_ts(query_endpoint: str, selector: str, time_window: str):
-    """Epoch seconds of the OLDEST per-series last sample in the window, or None.
+FUTURE_TOLERANCE_S = 5
+
+
+def _oldest_sample_time(
+    query_endpoint: str, selector: str, time_window: str, now: datetime
+) -> datetime | None:
+    """Time of the OLDEST per-series last sample in the window, or None.
 
     An instant max_over_time query reports the evaluation time, not the sample
     time, so tlast_over_time (verified against VictoriaMetrics v1.102.0; the
     name last_timestamp is not a supported function) is needed to judge
-    staleness. min() over series judges the worst case. Any failure -> None,
-    which the caller treats as stale (fail closed).
+    staleness. min() over series judges the worst case. Any failure, a
+    non-finite or non-positive timestamp, or one in the future -> None, which
+    the caller treats as stale (fail closed).
     """
     try:
         response = requests.get(
@@ -74,6 +84,12 @@ def _oldest_sample_ts(query_endpoint: str, selector: str, time_window: str):
         result = response.json()["data"]["result"]
         if not result:
             return None
-        return float(result[0]["value"][1])
+        ts = float(result[0]["value"][1])
+        if not math.isfinite(ts) or ts <= 0:
+            return None
+        observed_at = datetime.fromtimestamp(ts, timezone.utc)
+        if (observed_at - now).total_seconds() > FUTURE_TOLERANCE_S:
+            return None
+        return observed_at
     except Exception:
         return None
