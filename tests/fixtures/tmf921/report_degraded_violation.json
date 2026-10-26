@@ -1,0 +1,13 @@
+{
+  "id": "c2073b32-583f-42a4-b175-7a000412e644",
+  "href": "http://localhost:8000/tmf-api/intentManagement/v5/intent/2d1b8f96-0373-4af5-bb64-ace67761ed12/intentReport/c2073b32-583f-42a4-b175-7a000412e644",
+  "@type": "IntentReport",
+  "@baseType": "IntentReport",
+  "@schemaLocation": null,
+  "name": "Evaluation for intent 2d1b8f96-0373-4af5-bb64-ace67761ed12",
+  "creationDate": "2026-10-26T23:24:13.969907655Z",
+  "intentId": "2d1b8f96-0373-4af5-bb64-ace67761ed12",
+  "intentHandlingState": "Degraded",
+  "intentHandlingReason": "Conditions not met: 50 Mbps >= 100 Mbps: FAIL",
+  "expression": null
+}

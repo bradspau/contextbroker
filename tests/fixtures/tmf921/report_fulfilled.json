@@ -1,0 +1,13 @@
+{
+  "id": "65251c2e-f3a8-463f-8229-83cbbce23279",
+  "href": "http://localhost:8000/tmf-api/intentManagement/v5/intent/00cc148b-16b9-443f-81e0-f96510238cda/intentReport/65251c2e-f3a8-463f-8229-83cbbce23279",
+  "@type": "IntentReport",
+  "@baseType": "IntentReport",
+  "@schemaLocation": null,
+  "name": "Evaluation for intent 00cc148b-16b9-443f-81e0-f96510238cda",
+  "creationDate": "2026-10-26T23:24:13.245429170Z",
+  "intentId": "00cc148b-16b9-443f-81e0-f96510238cda",
+  "intentHandlingState": "Fulfilled",
+  "intentHandlingReason": null,
+  "expression": null
+}

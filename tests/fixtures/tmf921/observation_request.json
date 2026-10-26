@@ -1,0 +1,6 @@
+{
+  "metricUri": "http://broadband-forum.org/Intent#DownstreamBandwidthMetric",
+  "value": 150,
+  "unit": "Mbps",
+  "obtainedAt": "2026-10-26T23:30:00Z"
+}

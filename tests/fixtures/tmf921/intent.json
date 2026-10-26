@@ -1,0 +1,14 @@
+{
+  "id": "ffa9df3b-da2a-48ec-b029-4fec8c70531d",
+  "href": "http://localhost:8000/tmf-api/intentManagement/v5/intent/ffa9df3b-da2a-48ec-b029-4fec8c70531d",
+  "@type": "Intent",
+  "name": "Sample Bandwidth Intent",
+  "description": "Downstream bandwidth >= 100 Mbps",
+  "lifecycleStatus": "ACTIVE",
+  "creationDate": "2026-10-26T23:24:11.976117687Z",
+  "expression": {
+    "@type": "TurtleExpression",
+    "iri": null,
+    "expressionValue": "@prefix quan: <http://tio.models.tmforum.org/tio/v3.6.0/QuantityOntology/> .\n@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .\n_:c quan:atLeast ( <http://broadband-forum.org/Intent#DownstreamBandwidthMetric> [ rdf:value \"100\"^^xsd:decimal ; quan:unit \"Mbps\"^^xsd:string ] ) .\n"
+  }
+}

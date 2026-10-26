@@ -1,0 +1,13 @@
+{
+  "id": "0bc879d0-8c6c-4bb3-be51-345a0c2be912",
+  "href": "http://localhost:8000/tmf-api/intentManagement/v5/intent/ffa9df3b-da2a-48ec-b029-4fec8c70531d/intentReport/0bc879d0-8c6c-4bb3-be51-345a0c2be912",
+  "@type": "IntentReport",
+  "@baseType": "IntentReport",
+  "@schemaLocation": null,
+  "name": "Evaluation for intent ffa9df3b-da2a-48ec-b029-4fec8c70531d",
+  "creationDate": "2026-10-26T23:24:12.096250230Z",
+  "intentId": "ffa9df3b-da2a-48ec-b029-4fec8c70531d",
+  "intentHandlingState": "Degraded",
+  "intentHandlingReason": "Conditions not met: atLeast: no observation: DownstreamBandwidthMetric",
+  "expression": null
+}

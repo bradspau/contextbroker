@@ -1,0 +1,13 @@
+{
+  "id": "b0f51a58-b227-4725-a318-f3e8a31a6732",
+  "href": "http://localhost:8000/tmf-api/intentManagement/v5/intent/01f51caa-74bc-4864-af05-c50f1df8f61e/intentReport/b0f51a58-b227-4725-a318-f3e8a31a6732",
+  "@type": "IntentReport",
+  "@baseType": "IntentReport",
+  "@schemaLocation": null,
+  "name": "Evaluation for intent 01f51caa-74bc-4864-af05-c50f1df8f61e",
+  "creationDate": "2026-10-26T23:24:14.655360807Z",
+  "intentId": "01f51caa-74bc-4864-af05-c50f1df8f61e",
+  "intentHandlingState": "Degraded",
+  "intentHandlingReason": "Conditions not met: atLeast: unit mismatch: 'ms' cannot be compared with 'Mbps'",
+  "expression": null
+}
