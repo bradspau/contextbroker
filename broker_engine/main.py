@@ -39,9 +39,9 @@ def build_mcp_server():
         return resolve_intent(intent_id)
 
     @server.tool()
-    def query_tsdb_metrics(device: str, interface: str, metric_type: str, time_window: str) -> float | None:
-        """Read the observed value of a metric over a time window from the TSDB."""
-        return join_observed_metric(device, interface, metric_type, time_window).value
+    def query_tsdb_metrics(device: str, interface: str, metric_type: str, time_window: str) -> dict:
+        """Read the observed metric as a context envelope incl. quality flags (stale/missing)."""
+        return _metric(device, interface, metric_type, time_window)
 
     @server.tool()
     def assess_intent(intent_id: str, time_window: str) -> dict:

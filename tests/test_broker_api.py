@@ -221,3 +221,36 @@ def test_timeout_passed_to_requests():
         except Exception:
             pass
     assert p.call_args.kwargs["timeout"] == REQUEST_TIMEOUT_S
+
+
+def test_mcp_metric_tool_returns_envelope():
+    import json
+    server = main.build_mcp_server()
+    env = build_observed("r1:e0", 1.0, "vm", NOW - timedelta(hours=1), NOW)
+    with patch("broker_engine.main.join_observed_metric", return_value=env):
+        res = asyncio.run(server.call_tool("query_tsdb_metrics", _metric_params()))
+    payload = json.loads(res.content[0].text)
+    assert payload["quality"]["stale"] is True and payload["value"] == 1.0
+
+
+def test_assess_invalid_interface_is_inconclusive_not_400():
+    from broker_engine.validation import ClientInputError
+    intent = {**INTENT, "interfaces": [
+        {"device": "r1", "interface_name": "e0"},
+        {"device": "r1", "interface_name": "Gi0/0/0.100"},
+    ]}
+
+    def join(device, interface, metric_type, time_window, **kw):
+        if "." in interface:
+            raise ClientInputError("Unsafe 'interface'")
+        return fake_join(device, interface, metric_type, time_window)
+
+    with patch("broker_engine.main.resolve_intent", return_value=intent), \
+         patch("broker_engine.main.join_observed_metric", side_effect=join):
+        r = client.post("/context/assess", json={"intent_id": "I-BAD", "time_window": "5m"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["verdict"] == "inconclusive"
+    bad = [e for e in body["context"] if e["entity_id"] == "r1:Gi0/0/0.100"][0]
+    assert bad["quality"]["missing"] is True
+    assert bad["quality"]["conflicts"] == ["invalid interface identifier"]

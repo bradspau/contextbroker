@@ -1,9 +1,13 @@
 """Deterministic assessment: resolve intent, join telemetry, evaluate, prune context."""
+from datetime import datetime, timezone
+
 from fastapi.encoders import jsonable_encoder
 
 from broker_engine.pruner import prune
 from broker_engine.sparql_resolver import resolve_intent
 from broker_engine.tsdb_joiner import join_observed_metric
+from broker_engine.validation import ClientInputError
+from data_contracts.envelope import build_observed
 from intent_management.store import IntentStore
 from outcome_assurance.evaluate import Outcome, evaluate_intent
 
@@ -43,9 +47,19 @@ def assess_intent(
     observations = {}
     for iface in interfaces:
         key = (iface["device"], iface["interface_name"])
-        observations[key] = join(
-            iface["device"], iface["interface_name"], intent["metric"], time_window
-        )
+        try:
+            observations[key] = join(
+                iface["device"], iface["interface_name"], intent["metric"], time_window
+            )
+        except ClientInputError:
+            # One graph-supplied identifier we cannot safely query must not fail
+            # the whole assessment: report that interface as missing/inconclusive.
+            env = build_observed(
+                f'{iface["device"]}:{iface["interface_name"]}',
+                None, "victoriametrics", None, datetime.now(timezone.utc),
+            )
+            env.quality.conflicts.append("invalid interface identifier")
+            observations[key] = env
     verdict = evaluate_intent(intent, observations)  # never depends on pruning
     store.fulfilment_update(intent_id, verdict.outcome)
     pruned = prune(list(observations.values()), max(max_entities, len(interfaces)))

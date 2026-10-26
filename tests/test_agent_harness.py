@@ -380,3 +380,71 @@ def test_assess_intent_tool_returns_deterministic_verdict():
     assert body["verdict"] == "failure"  # nonzero input_drops on r1
     assert {p["outcome"] for p in body["per_interface"]} == {"failure", "success"}
     assert set(body) >= {"verdict", "per_interface", "reasons", "context", "dropped_count"}
+
+
+# ---- envelope-returning metric tool and sanitised errors ----
+
+def _vm(payload):
+    from unittest.mock import Mock
+    r = Mock()
+    r.json.return_value = payload
+    r.raise_for_status.return_value = None
+    return r
+
+
+_METRIC_ARGS = {"device": "r1", "interface": "e0", "metric_type": "input_drops", "time_window": "30m"}
+
+
+def test_metric_tool_returns_stale_envelope_to_model():
+    value = _vm({"data": {"result": [{"metric": {}, "value": [1793009347, "0"]}]}})
+    ts = _vm({"data": {"result": [{"metric": {}, "value": [1793009347, "1793008245"]}]}})
+    from datetime import datetime, timezone
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[value, ts]), \
+         patch("broker_engine.tsdb_joiner.datetime") as dt:
+        dt.now.return_value = datetime.fromtimestamp(1793009347, timezone.utc)
+        dt.fromtimestamp.side_effect = datetime.fromtimestamp
+        content, is_error = tools.execute_tool("query_tsdb_metrics", dict(_METRIC_ARGS))
+    assert is_error is False
+    payload = json.loads(content)
+    assert payload["value"] == 0.0
+    assert payload["quality"]["stale"] is True
+    assert payload["state"] == "observed" and payload["observed_at"]
+
+
+def test_metric_tool_missing_envelope_reaches_model():
+    with patch("broker_engine.tsdb_joiner.requests.get", return_value=_vm({"data": {"result": []}})):
+        content, _ = tools.execute_tool("query_tsdb_metrics", dict(_METRIC_ARGS))
+    payload = json.loads(content)
+    assert payload["value"] is None and payload["quality"]["missing"] is True
+
+
+def test_system_prompt_forbids_stale_as_current():
+    assert "quality.stale" in tools.SYSTEM_PROMPT and "quality.missing" in tools.SYSTEM_PROMPT
+
+
+def test_execute_tool_keeps_safe_messages():
+    from broker_engine.validation import IntentNotFound
+    with patch("agent_harness.tools.query_intent_state_requirements", side_effect=IntentNotFound("No such intent: 'x'")):
+        content, is_error = tools.execute_tool("query_intent_state_requirements", {"intent_id": "x"})
+    assert is_error and "No such intent" in json.loads(content)["error"]
+    content, is_error = tools.execute_tool("query_tsdb_metrics", {**_METRIC_ARGS, "time_window": "5min"})
+    assert is_error and "time_window" in json.loads(content)["error"]
+
+
+def test_execute_tool_hides_upstream_details():
+    import requests
+    exc = requests.HTTPError("500 for url http://fuseki.internal:3030/ds/query?query=SELECT secret")
+    with patch("agent_harness.tools.query_intent_state_requirements", side_effect=exc):
+        content, is_error = tools.execute_tool("query_intent_state_requirements", {"intent_id": "x"})
+    assert is_error
+    assert json.loads(content) == {"error": "upstream data store unavailable"}
+    assert "fuseki.internal" not in content and "secret" not in content
+
+
+def test_execute_tool_generic_exception_has_type_only():
+    with patch("agent_harness.tools.query_intent_state_requirements",
+               side_effect=KeyError("http://vm.internal:8428/leak")):
+        content, is_error = tools.execute_tool("query_intent_state_requirements", {"intent_id": "x"})
+    assert is_error
+    assert json.loads(content) == {"error": "tool error: KeyError"}
+    assert "vm.internal" not in content

@@ -10,7 +10,6 @@ from agent_harness.tools import (  # noqa: F401
     _TOOL_ALLOWED_ARGS,
     execute_tool,
     query_intent_state_requirements,
-    query_tsdb_metrics,
 )
 from agent_harness.tools import execute_tool as _execute_tool  # noqa: F401
 from agent_harness.workflow import (  # noqa: F401
@@ -30,6 +29,16 @@ from broker_engine.tsdb_joiner import VM_QUERY_ENDPOINT, join_observed_metric  #
 from broker_engine.validation import _SAFE_TOKEN, _SAFE_WINDOW, _validate_token  # noqa: F401
 from ingestion.telemetry_simulator import MEASUREMENT_NAME  # noqa: F401
 
+
+def query_tsdb_metrics(device, interface, metric_type, time_window, query_endpoint=VM_QUERY_ENDPOINT):
+    """Back-compat shim returning the bare float/None. The LLM tool path uses the
+    envelope-returning agent_harness.tools.query_tsdb_metrics instead."""
+    return join_observed_metric(
+        device, interface, metric_type, time_window, query_endpoint
+    ).value
+
+
 if __name__ == "__main__":
     prompt = " ".join(sys.argv[1:]) or input("Ask the broker: ")
     print(run_agent(prompt))
+
