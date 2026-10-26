@@ -1,4 +1,4 @@
-"""Broker REST + MCP interface over the resolver, joiner, pruner and evaluator."""
+"""Broker REST interface (MCP server built but not mounted) over the resolver, joiner, pruner and evaluator."""
 
 from typing import Literal
 

@@ -305,8 +305,13 @@ into an image).
 2. Start the server (and the broker): `docker compose --profile tmf921 up -d --build`
    (port 8000, bound to 127.0.0.1).
 3. Create an intent the way `seed_data/seed.sh` in BBF_921_java does, against
-   `localhost:8000`. The bound must be a Turtle expression carrying
-   `quan:unit "Mbps"`, otherwise the server reports a unit mismatch. Then PATCH it ACTIVE.
+   `localhost:8000`. The bound must carry `quan:unit "Mbps"` (inside the bracketed
+   quantity, e.g. `[ rdf:value \"100\"^^xsd:decimal ; quan:unit \"Mbps\" ]`), otherwise the
+   server reports a unit mismatch. Pattern (placeholders in angle brackets):
+   `curl -sf -X POST "$BASE/intent" -H "Content-Type: application/json" -d '{"@type":"Intent","name":"<name>","expression":{"@type":"TurtleExpression","expressionValue":"<turtle>"}}'`
+   then activate it:
+   `curl -sf -X PATCH "$BASE/intent/<intent_id>" -H "Content-Type: application/json" -d '{"lifecycleStatus": "ACTIVE"}'`
+   with `BASE=http://localhost:8000/tmf-api/intentManagement/v5`.
 4. Pin the bound in the bindings file (default `data_contracts/intent_bindings.json`,
    ships as `{}`; mount your own with `HOST_INTENT_BINDINGS`, read-only):
    `{"<intent_id>": {"http://broadband-forum.org/Intent#DownstreamBandwidthMetric":
@@ -314,7 +319,7 @@ into an image).
    The metric map (`data_contracts/metric_map.json`, `METRIC_MAP_PATH`) maps the five
    HSI metrics to broker metric names such as `downstream_bandwidth_mbps`.
 5. Assess:
-   `curl -X POST localhost:8080/context/assess -d '{"intent_id":"<id>","time_window":"30m","source":"tmf921"}'`
+   `curl -X POST localhost:8080/context/assess -H 'Content-Type: application/json' -d '{"intent_id":"<id>","time_window":"30m","source":"tmf921"}'`
 
 Safety behaviour: stale, missing, conflicted, drifted or unpushable evidence gives
 `inconclusive`, never `success`. A partial-evidence assess pushes nothing to the
@@ -323,6 +328,19 @@ evaluation, so after a `failure` the same intent reports "intent bound drifted"
 (`inconclusive`) until it is re-created and re-pinned; this is server-side behaviour
 to raise with its owner. Per-intent locks and high-water marks are in-process, so
 run a single broker process. Observations pushed by other clients are invisible to the broker.
+
+Known behaviours / troubleshooting:
+- The first assess right after a new series appears can return `inconclusive`
+  "missing observation": VictoriaMetrics does not expose very recent samples
+  immediately (observed live, about 2-15 s). Retry; it fails closed.
+- If `HOST_INTENT_BINDINGS` points at a file that does not exist before
+  `docker compose up`, Docker creates a DIRECTORY there and every tmf921 assess
+  returns 200 `inconclusive` "invalid binding" with no detail. Create the file first
+  (`cp data_contracts/intent_bindings.json <path>`). A malformed bindings file gives
+  the same result.
+- The TMF921 server writes two Degraded reports for a new intent (creation and
+  activation) before any observation, so a freshly activated intent shows 2 reports
+  and a Degraded state until an observation arrives.
 
 Not done / limitations: polling only (no hub/webhook subscription); one source per
 metric URI; access-profile resources (UNI/PON, port 8001) are not mapped; the
