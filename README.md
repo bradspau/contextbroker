@@ -18,7 +18,7 @@ flowchart TB
     Harness -->|"messages.create()"| Claude["Claude API"]
     Harness -.->|"on APIConnectionError"| LMStudio["LM Studio (local fallback)"]
 
-    Harness -->|"REST / MCP tools"| Engine["broker_engine :8080<br/>FastAPI: intent, metric, assess"]
+    Harness -->|"in-process import"| Engine["broker_engine<br/>(FastAPI app + MCP server built, see below)"]
     Engine --> Resolver["sparql_resolver / tsdb_joiner<br/>ContextEnvelope (data_contracts)"]
     Resolver -->|"SPARQL"| Fuseki["Fuseki :3030"]
     Resolver -->|"PromQL"| VM["VictoriaMetrics :8428"]
@@ -53,18 +53,32 @@ flowchart TB
 
 ### Data flow
 
-1. `agent_harness` calls the broker engine over REST/MCP tools (`GET /context/intent/{id}`,
-   `GET /context/metric`, `POST /context/assess`).
+1. `agent_harness` imports `broker_engine` functions in-process (it does not call
+   them over REST or MCP). Separately, `broker_engine.main:app` serves a REST API
+   (`GET /context/intent/{id}`, `GET /context/metric`, `POST /context/assess`) via
+   `uvicorn broker_engine.main:app`. An MCP server is built and unit-tested
+   (`broker_engine.main.build_mcp_server()`) but is NOT mounted on that app and nothing
+   serves it; to use it you would have to run it yourself, e.g.
+   `build_mcp_server().run()`.
 2. `broker_engine` resolves declared state from Fuseki and observed state from
    VictoriaMetrics, wraps each in a `ContextEnvelope` with quality metadata, and prunes it.
-3. `outcome_assurance` computes the compliant / non-compliant / unknown verdict
+3. `outcome_assurance` computes the success / failure / inconclusive verdict
    deterministically from the envelopes; the LLM only explains it.
 4. Ontologies are loaded with `python -m ingestion.load_ontologies`, which
    validates every TBox file against every SHACL shape file first and posts
    nothing if any violation is found (empty directories are rejected).
-5. Actions go through `governance_gate` and `action_lifecycle`. The gate is
-   fail-closed and the only controller is `NullController`: no real network
-   controller exists, so nothing is ever changed on a device.
+5. `governance_gate` and `action_lifecycle` are a library only: no runtime path builds
+   or submits an `ActionProposal`. The gate is fail-closed and the only controller is
+   `NullController`, so nothing is ever changed on a device. The executor's "recheck"
+   re-ages the evidence and re-checks the reservation and catalogue; it does NOT re-read
+   current network state, and `ActionTemplate.preconditions` are not evaluated. The
+   gate also does not implement identity, approval or validation-readiness checks from
+   the spec.
+6. Freshness is fail-closed: a telemetry value whose last-sample time cannot be
+   established (timestamp query fails, is empty or unparseable) is marked
+   `quality.stale`, and across several matching series the oldest sample is judged.
+7. `stateCategory`, `validFrom` and `validTo` are declared in the TBox/SHACL but are
+   not yet read or enforced by the broker.
 
 ### Not implemented
 
@@ -145,11 +159,11 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Dev/test-only dependencies (`pytest`, `pyyaml`, `rdflib`) are not in
-`requirements.txt` — install them separately if you want to run the tests:
+`rdflib` is pinned in `requirements.txt`. Dev/test-only dependencies
+(`pytest`, `pyyaml`) are not; install them separately to run the tests:
 
 ```bash
-pip install pytest pyyaml rdflib
+pip install pytest pyyaml
 ```
 
 ## 2. Configure the LLM
@@ -274,7 +288,8 @@ python broker.py "Is intent-core-health-01 compliant right now?"
 ```
 
 The broker reads the intent's requirement from Fuseki, reads the observed
-metric from VictoriaMetrics, and has the LLM compare the two and answer.
+metric from VictoriaMetrics, and deterministically computes the verdict
+(success / failure / inconclusive); the LLM only explains that verdict.
 
 ## Running the tests
 
