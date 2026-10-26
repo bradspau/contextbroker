@@ -9,67 +9,18 @@ import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from telemetry_simulator import MEASUREMENT_NAME
+from broker_engine.sparql_resolver import (  # noqa: F401
+    FUSEKI_QUERY_ENDPOINT,
+    _build_intent_sparql,
+    resolve_intent,
+)
+from broker_engine.tsdb_joiner import VM_QUERY_ENDPOINT, join_observed_metric
+from broker_engine.validation import _SAFE_TOKEN, _SAFE_WINDOW, _validate_token  # noqa: F401
+from telemetry_simulator import MEASUREMENT_NAME  # noqa: F401
 
-FUSEKI_QUERY_ENDPOINT = "http://localhost:3030/network-dataset/query"
-VM_QUERY_ENDPOINT = "http://localhost:8428/api/v1/query"
 MAX_ITERATIONS = 10
 
-_SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_\-/]+$")
-_SAFE_WINDOW = re.compile(r"^[0-9]+[smhd]$")
-
-
-def _validate_token(value: str, label: str) -> str:
-    if not _SAFE_TOKEN.match(value):
-        raise ValueError(f"Unsafe {label!r}: {value!r}")
-    return value
-
-
-def _build_intent_sparql(intent_id: str) -> str:
-    _validate_token(intent_id, "intent_id")
-    return f"""
-    PREFIX : <http://example.org/network-ontology#>
-    SELECT ?metric ?operator ?targetValue ?device ?interfaceName WHERE {{
-      :{intent_id} :hasTargetMetric ?metric ;
-                    :hasOperator ?operator ;
-                    :hasTargetValue ?targetValue ;
-                    :appliesToLink ?link .
-      ?link :hasInterface ?iface .
-      ?iface :onDevice ?device ;
-             :interfaceName ?interfaceName .
-    }}
-    """
-
-
-def query_intent_state_requirements(
-    intent_id: str, query_endpoint: str = FUSEKI_QUERY_ENDPOINT
-) -> dict:
-    sparql = _build_intent_sparql(intent_id)
-
-    response = requests.post(
-        query_endpoint,
-        data={"query": sparql},
-        headers={"Accept": "application/sparql-results+json"},
-    )
-    response.raise_for_status()
-    bindings = response.json()["results"]["bindings"]
-
-    if not bindings:
-        raise ValueError(f"No such intent: {intent_id!r}")
-
-    first = bindings[0]
-    return {
-        "metric": first["metric"]["value"],
-        "operator": first["operator"]["value"],
-        "target_value": float(first["targetValue"]["value"]),
-        "interfaces": [
-            {
-                "device": row["device"]["value"],
-                "interface_name": row["interfaceName"]["value"],
-            }
-            for row in bindings
-        ],
-    }
+query_intent_state_requirements = resolve_intent
 
 
 def query_tsdb_metrics(
@@ -79,24 +30,9 @@ def query_tsdb_metrics(
     time_window: str,
     query_endpoint: str = VM_QUERY_ENDPOINT,
 ) -> float | None:
-    _validate_token(device, "device")
-    _validate_token(interface, "interface")
-    _validate_token(metric_type, "metric_type")
-    if not _SAFE_WINDOW.match(time_window):
-        raise ValueError(f"Unsafe time_window: {time_window!r}")
-
-    promql = (
-        f'max_over_time({MEASUREMENT_NAME}_{metric_type}'
-        f'{{device="{device}", interface="{interface}"}}[{time_window}])'
-    )
-
-    response = requests.get(query_endpoint, params={"query": promql})
-    response.raise_for_status()
-    result = response.json()["data"]["result"]
-
-    if not result:
-        return None
-    return float(result[0]["value"][1])
+    return join_observed_metric(
+        device, interface, metric_type, time_window, query_endpoint
+    ).value
 
 
 SYSTEM_PROMPT = """You are a network compliance agent. You have two tools:
