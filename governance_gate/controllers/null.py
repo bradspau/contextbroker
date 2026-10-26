@@ -12,3 +12,7 @@ class NullController:
 
     def rollback(self, handle: str) -> None:
         log.info("NullController.rollback %s (no change made)", handle)
+
+    def compensate(self, template_id: str, scope: str, idempotency_key: str) -> None:
+        log.info("NullController.compensate %s %s %s (no change made)",
+                 template_id, scope, idempotency_key)
