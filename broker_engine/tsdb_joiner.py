@@ -24,10 +24,11 @@ def join_observed_metric(
     if not _SAFE_WINDOW.match(time_window):
         raise ValueError(f"Unsafe time_window: {time_window!r}")
 
-    promql = (
-        f'max_over_time({MEASUREMENT_NAME}_{metric_type}'
-        f'{{device="{device}", interface="{interface}"}}[{time_window}])'
+    selector = (
+        f'{MEASUREMENT_NAME}_{metric_type}'
+        f'{{device="{device}", interface="{interface}"}}'
     )
+    promql = f'max_over_time({selector}[{time_window}])'
 
     response = requests.get(query_endpoint, params={"query": promql})
     response.raise_for_status()
@@ -39,10 +40,33 @@ def join_observed_metric(
     if not result:
         return build_observed(entity_id, None, "victoriametrics", None, now)
     ts, raw = result[0]["value"]
+    observed_ts = _last_sample_ts(query_endpoint, selector, time_window)
+    if observed_ts is None:
+        observed_ts = ts
     return build_observed(
         entity_id,
         float(raw),
         "victoriametrics",
-        datetime.fromtimestamp(ts, timezone.utc),
+        datetime.fromtimestamp(observed_ts, timezone.utc),
         now,
     )
+
+
+def _last_sample_ts(query_endpoint: str, selector: str, time_window: str):
+    """Epoch seconds of the newest sample in the window, or None if unavailable.
+
+    An instant max_over_time query reports the evaluation time, not the sample
+    time, so last_timestamp() is needed to judge staleness.
+    """
+    try:
+        response = requests.get(
+            query_endpoint,
+            params={"query": f"last_timestamp({selector}[{time_window}])"},
+        )
+        response.raise_for_status()
+        result = response.json()["data"]["result"]
+        if not result:
+            return None
+        return float(result[0]["value"][1])
+    except Exception:
+        return None

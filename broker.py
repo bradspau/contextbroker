@@ -1,7 +1,6 @@
 """Context broker: compares live TSDB telemetry against graph-declared intent."""
 import json
 import os
-import re
 import sys
 
 import anthropic

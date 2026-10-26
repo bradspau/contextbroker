@@ -17,9 +17,10 @@ def _resp(payload):
 
 
 def test_join_observed_metric_returns_envelope():
-    r = _resp({"data": {"result": [{"value": [TS, "3"]}]}})
+    r = _resp({"data": {"result": [{"value": [TS + 100, "3"]}]}})
+    r2 = _resp({"data": {"result": [{"value": [TS + 100, str(TS)]}]}})
     now = datetime.fromtimestamp(TS, timezone.utc)
-    with patch("broker_engine.tsdb_joiner.requests.get", return_value=r):
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]) as g:
         env = join_observed_metric("r1", "eth0", "utilization", "5m", now=now)
     assert env.value == 3.0
     assert env.entity_id == "r1:eth0"
@@ -27,6 +28,26 @@ def test_join_observed_metric_returns_envelope():
     assert env.source == "victoriametrics"
     assert env.observed_at == datetime.fromtimestamp(TS, timezone.utc)
     assert not env.quality.missing and not env.quality.stale
+    assert g.call_args_list[0].kwargs["params"]["query"].startswith("max_over_time(")
+    assert g.call_args_list[1].kwargs["params"]["query"].startswith("last_timestamp(")
+
+
+def test_join_observed_metric_stale():
+    now = datetime.fromtimestamp(TS, timezone.utc)
+    r = _resp({"data": {"result": [{"value": [TS, "3"]}]}})
+    r2 = _resp({"data": {"result": [{"value": [TS, str(TS - 600)]}]}})
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]):
+        env = join_observed_metric("r1", "eth0", "utilization", "15m", now=now)
+    assert env.quality.stale is True
+
+
+def test_join_observed_metric_falls_back_without_last_timestamp():
+    now = datetime.fromtimestamp(TS, timezone.utc)
+    r = _resp({"data": {"result": [{"value": [TS, "3"]}]}})
+    r2 = _resp({"data": {"result": []}})
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]):
+        env = join_observed_metric("r1", "eth0", "utilization", "5m", now=now)
+    assert env.observed_at == datetime.fromtimestamp(TS, timezone.utc)
 
 
 def test_join_observed_metric_empty_is_missing():
