@@ -1,28 +1,14 @@
-"""Loads ontologies/tbox/topology.ttl into a Fuseki dataset via the Graph Store Protocol."""
+"""Thin CLI shim: the loader now lives in ingestion.load_ontologies."""
 import pathlib
 import sys
 
-import requests
+import requests  # noqa: F401  (kept so tests can patch seed_graph.requests.post)
 
-DEFAULT_TTL_PATH = pathlib.Path(__file__).resolve().parent / "ontologies" / "tbox" / "topology.ttl"
-DEFAULT_DATA_ENDPOINT = "http://localhost:3030/network-dataset/data"
-
-
-def load_ttl_to_fuseki(
-    ttl_path: pathlib.Path,
-    data_endpoint: str,
-    auth: tuple[str, str] | None = ("admin", "admin"),
-) -> requests.Response:
-    payload = pathlib.Path(ttl_path).read_bytes()
-    response = requests.post(
-        data_endpoint,
-        data=payload,
-        headers={"Content-Type": "text/turtle"},
-        auth=auth,
-    )
-    response.raise_for_status()
-    return response
-
+from ingestion.load_ontologies import (  # noqa: F401
+    DEFAULT_DATA_ENDPOINT,
+    DEFAULT_TTL_PATH,
+    load_ttl_to_fuseki,
+)
 
 if __name__ == "__main__":
     ttl_path = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_TTL_PATH

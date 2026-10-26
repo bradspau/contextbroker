@@ -1,9 +1,13 @@
 """Resolve declared (intended) state from the Fuseki knowledge graph."""
+import os
+
 import requests
 
 from broker_engine.validation import REQUEST_TIMEOUT_S, IntentNotFound, _validate_token
 
-FUSEKI_QUERY_ENDPOINT = "http://localhost:3030/network-dataset/query"
+FUSEKI_QUERY_ENDPOINT = os.environ.get(
+    "FUSEKI_QUERY_ENDPOINT", "http://localhost:3030/network-dataset/query"
+)
 
 
 def _build_intent_sparql(intent_id: str) -> str:

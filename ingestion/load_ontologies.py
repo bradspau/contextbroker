@@ -3,14 +3,31 @@ import argparse
 import pathlib
 from pathlib import Path
 
+import requests
 import rdflib
 from pyshacl import validate
-
-from seed_graph import DEFAULT_DATA_ENDPOINT, load_ttl_to_fuseki
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TBOX_DIR = REPO_ROOT / "ontologies" / "tbox"
 DEFAULT_SHACL_DIR = REPO_ROOT / "ontologies" / "shacl"
+DEFAULT_TTL_PATH = DEFAULT_TBOX_DIR / "topology.ttl"
+DEFAULT_DATA_ENDPOINT = "http://localhost:3030/network-dataset/data"
+
+
+def load_ttl_to_fuseki(
+    ttl_path: Path,
+    data_endpoint: str,
+    auth: tuple[str, str] | None = ("admin", "admin"),
+) -> requests.Response:
+    payload = Path(ttl_path).read_bytes()
+    response = requests.post(
+        data_endpoint,
+        data=payload,
+        headers={"Content-Type": "text/turtle"},
+        auth=auth,
+    )
+    response.raise_for_status()
+    return response
 
 
 def validate_shapes(data_ttl: Path, shapes_ttl: Path) -> tuple[bool, str]:
@@ -28,6 +45,10 @@ def load_ontologies(
 ) -> None:
     files = sorted(Path(tbox_dir).glob("*.ttl"))
     shapes_files = sorted(Path(shacl_dir).glob("*.ttl"))
+    if not files:
+        raise ValueError(f"no *.ttl files found in tbox_dir: {tbox_dir}")
+    if not shapes_files:
+        raise ValueError(f"no *.ttl files found in shacl_dir: {shacl_dir}")
     failures = []
     for f in files:
         for shapes in shapes_files:

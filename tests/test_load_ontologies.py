@@ -73,3 +73,27 @@ def test_repo_files_validate_and_load_one_post_each():
     with patch("requests.post", return_value=resp) as post:
         load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT)
     assert post.call_count == len(list(TBOX_DIR.glob("*.ttl")))
+
+
+def test_empty_tbox_dir_raises(tmp_path):
+    shacl = tmp_path / "shacl"
+    shacl.mkdir()
+    (shacl / "s.ttl").write_text("")
+    tbox = tmp_path / "tbox"
+    tbox.mkdir()
+    with patch("ingestion.load_ontologies.requests.post") as post:
+        with pytest.raises(ValueError, match="tbox_dir"):
+            load_ontologies(tbox, shacl, "http://x/data")
+    post.assert_not_called()
+
+
+def test_empty_shacl_dir_raises(tmp_path):
+    tbox = tmp_path / "tbox"
+    tbox.mkdir()
+    (tbox / "t.ttl").write_text("")
+    shacl = tmp_path / "shacl"
+    shacl.mkdir()
+    with patch("ingestion.load_ontologies.requests.post") as post:
+        with pytest.raises(ValueError, match="shacl_dir"):
+            load_ontologies(tbox, shacl, "http://x/data")
+    post.assert_not_called()

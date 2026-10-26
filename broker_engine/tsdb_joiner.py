@@ -1,4 +1,5 @@
 """Join observed telemetry from VictoriaMetrics into context envelopes."""
+import os
 from datetime import datetime, timezone
 
 import requests
@@ -10,9 +11,9 @@ from broker_engine.validation import (
     _validate_token,
 )
 from data_contracts.envelope import ContextEnvelope, build_observed
-from telemetry_simulator import MEASUREMENT_NAME
+from ingestion.telemetry_simulator import MEASUREMENT_NAME
 
-VM_QUERY_ENDPOINT = "http://localhost:8428/api/v1/query"
+VM_QUERY_ENDPOINT = os.environ.get("VM_QUERY_ENDPOINT", "http://localhost:8428/api/v1/query")
 
 
 def join_observed_metric(

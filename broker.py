@@ -28,7 +28,7 @@ from broker_engine.sparql_resolver import (  # noqa: F401
 )
 from broker_engine.tsdb_joiner import VM_QUERY_ENDPOINT, join_observed_metric  # noqa: F401
 from broker_engine.validation import _SAFE_TOKEN, _SAFE_WINDOW, _validate_token  # noqa: F401
-from telemetry_simulator import MEASUREMENT_NAME  # noqa: F401
+from ingestion.telemetry_simulator import MEASUREMENT_NAME  # noqa: F401
 
 if __name__ == "__main__":
     prompt = " ".join(sys.argv[1:]) or input("Ask the broker: ")

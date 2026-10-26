@@ -9,7 +9,7 @@ import pytest
 import rdflib
 
 import broker
-import telemetry_simulator
+import ingestion.telemetry_simulator as telemetry_simulator
 
 
 ONTOLOGY_PATH = Path(__file__).resolve().parent.parent / "ontologies" / "tbox" / "topology.ttl"

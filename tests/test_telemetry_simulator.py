@@ -1,7 +1,7 @@
 import random
 from unittest.mock import Mock, patch
 
-import telemetry_simulator as sim
+import ingestion.telemetry_simulator as sim
 
 
 def test_format_line_protocol_builds_expected_string():
@@ -101,7 +101,7 @@ def test_post_metrics_sends_payload_to_write_endpoint():
     mock_response = Mock()
     mock_response.raise_for_status = Mock()
 
-    with patch("telemetry_simulator.requests.post", return_value=mock_response) as mock_post:
+    with patch("ingestion.telemetry_simulator.requests.post", return_value=mock_response) as mock_post:
         sim.post_metrics("http://localhost:8428/write", "some,line=protocol value=1 1")
 
     mock_post.assert_called_once_with(
