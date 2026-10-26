@@ -1,4 +1,5 @@
 """Deterministic three-valued outcome evaluation of an intent against observations."""
+import math
 import operator
 from dataclasses import dataclass, field
 from enum import Enum
@@ -27,19 +28,22 @@ class Verdict:
     reasons: list[str] = field(default_factory=list)
 
 
+def _is_number(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and not math.isnan(x)
+
+
 def _eval_one(op, target, env: ContextEnvelope | None) -> tuple[Outcome, object, str | None]:
+    observed = env.value if env is not None else None
+    fn = OPERATORS.get(op)
+    if fn is None:
+        return Outcome.INCONCLUSIVE, observed, f"unknown operator {op!r}"
     if env is None or env.quality.missing or env.value is None:
         return Outcome.INCONCLUSIVE, None, "missing observation"
     if env.quality.stale:
-        return Outcome.INCONCLUSIVE, env.value, "stale observation"
-    fn = OPERATORS.get(op)
-    if fn is None:
-        return Outcome.INCONCLUSIVE, env.value, f"unknown operator {op!r}"
-    try:
-        ok = fn(env.value, target)
-    except TypeError:
-        return Outcome.INCONCLUSIVE, env.value, f"value {env.value!r} not comparable to {target!r}"
-    return (Outcome.SUCCESS if ok else Outcome.FAILURE), env.value, None
+        return Outcome.INCONCLUSIVE, observed, "stale observation"
+    if not _is_number(observed) or not _is_number(target):
+        return Outcome.INCONCLUSIVE, observed, f"not comparable: {observed!r} vs {target!r}"
+    return (Outcome.SUCCESS if fn(observed, target) else Outcome.FAILURE), observed, None
 
 
 def evaluate_intent(intent: dict, observations: dict[tuple[str, str], ContextEnvelope]) -> Verdict:

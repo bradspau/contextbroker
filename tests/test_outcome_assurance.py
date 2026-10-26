@@ -61,3 +61,30 @@ def test_operators():
         v = evaluate_intent(intent(op=op, target=2.0, ifaces=(("r1", "e0"),)),
                             {("r1", "e0"): env(val)})
         assert v.outcome == exp, op
+
+
+def test_string_value_eq_inconclusive():
+    v = evaluate_intent(intent(ifaces=(("r1", "e0"),)), {("r1", "e0"): env("0")})
+    assert v.outcome == Outcome.INCONCLUSIVE
+    assert any("not comparable" in r for r in v.reasons)
+
+
+def test_nan_and_bool_inconclusive():
+    for bad in (float("nan"), True):
+        v = evaluate_intent(intent(ifaces=(("r1", "e0"),)), {("r1", "e0"): env(bad)})
+        assert v.outcome == Outcome.INCONCLUSIVE
+
+
+def test_int_vs_float_eq_success():
+    v = evaluate_intent(intent(ifaces=(("r1", "e0"),)), {("r1", "e0"): env(0)})
+    assert v.outcome == Outcome.SUCCESS
+
+
+def test_stale_plus_failing_is_failure():
+    v = evaluate_intent(intent(), {("r1", "e0"): env(0, stale=True), ("r2", "e1"): env(7)})
+    assert v.outcome == Outcome.FAILURE
+
+
+def test_unknown_operator_named_even_if_missing():
+    v = evaluate_intent(intent(op="~="), {("r1", "e0"): env(None, missing=True)})
+    assert any("~=" in r for r in v.reasons)
