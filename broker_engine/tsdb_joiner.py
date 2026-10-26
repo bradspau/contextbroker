@@ -34,7 +34,7 @@ def join_observed_metric(
         f'{MEASUREMENT_NAME}_{metric_type}'
         f'{{device="{device}", interface="{interface}"}}'
     )
-    promql = f'max_over_time({selector}[{time_window}])'
+    promql = f'max(max_over_time({selector}[{time_window}]))'
 
     response = requests.get(query_endpoint, params={"query": promql}, timeout=REQUEST_TIMEOUT_S)
     response.raise_for_status()
@@ -45,29 +45,29 @@ def join_observed_metric(
     entity_id = f"{device}:{interface}"
     if not result:
         return build_observed(entity_id, None, "victoriametrics", None, now)
-    ts, raw = result[0]["value"]
-    observed_ts = _last_sample_ts(query_endpoint, selector, time_window)
-    if observed_ts is None:
-        observed_ts = ts
-    return build_observed(
-        entity_id,
-        float(raw),
-        "victoriametrics",
-        datetime.fromtimestamp(observed_ts, timezone.utc),
-        now,
+    raw = result[0]["value"][1]
+    observed_ts = _oldest_sample_ts(query_endpoint, selector, time_window)
+    observed_at = (
+        datetime.fromtimestamp(observed_ts, timezone.utc)
+        if observed_ts is not None
+        else None  # fail closed: build_observed marks this stale
     )
+    return build_observed(entity_id, float(raw), "victoriametrics", observed_at, now)
 
 
-def _last_sample_ts(query_endpoint: str, selector: str, time_window: str):
-    """Epoch seconds of the newest sample in the window, or None if unavailable.
+def _oldest_sample_ts(query_endpoint: str, selector: str, time_window: str):
+    """Epoch seconds of the OLDEST per-series last sample in the window, or None.
 
     An instant max_over_time query reports the evaluation time, not the sample
-    time, so last_timestamp() is needed to judge staleness.
+    time, so tlast_over_time (verified against VictoriaMetrics v1.102.0; the
+    name last_timestamp is not a supported function) is needed to judge
+    staleness. min() over series judges the worst case. Any failure -> None,
+    which the caller treats as stale (fail closed).
     """
     try:
         response = requests.get(
             query_endpoint,
-            params={"query": f"last_timestamp({selector}[{time_window}])"},
+            params={"query": f"min(tlast_over_time({selector}[{time_window}]))"},
             timeout=REQUEST_TIMEOUT_S,
         )
         response.raise_for_status()

@@ -29,3 +29,9 @@ def test_to_dict_is_json_serialisable():
     d = json.loads(json.dumps(env.to_dict()))
     assert d["state"] == "observed"
     assert d["observed_at"] == NOW.isoformat()
+
+
+def test_present_value_without_timestamp_is_stale():
+    env = build_observed("e1", 1.0, "src", None, NOW, 300)
+    assert env.quality.stale is True
+    assert env.quality.missing is False

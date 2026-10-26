@@ -28,8 +28,8 @@ def test_join_observed_metric_returns_envelope():
     assert env.source == "victoriametrics"
     assert env.observed_at == datetime.fromtimestamp(TS, timezone.utc)
     assert not env.quality.missing and not env.quality.stale
-    assert g.call_args_list[0].kwargs["params"]["query"].startswith("max_over_time(")
-    assert g.call_args_list[1].kwargs["params"]["query"].startswith("last_timestamp(")
+    assert g.call_args_list[0].kwargs["params"]["query"].startswith("max(max_over_time(")
+    assert g.call_args_list[1].kwargs["params"]["query"].startswith("min(tlast_over_time(")
 
 
 def test_join_observed_metric_stale():
@@ -41,13 +41,30 @@ def test_join_observed_metric_stale():
     assert env.quality.stale is True
 
 
-def test_join_observed_metric_falls_back_without_last_timestamp():
+def test_join_observed_metric_fails_closed_without_timestamp():
     now = datetime.fromtimestamp(TS, timezone.utc)
     r = _resp({"data": {"result": [{"value": [TS, "3"]}]}})
-    r2 = _resp({"data": {"result": []}})
+    for second in (_resp({"data": {"result": []}}), RuntimeError("boom"),
+                   _resp({"data": {"result": [{"value": [TS, "nan-ish"]}]}})):
+        with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, second]):
+            env = join_observed_metric("r1", "eth0", "utilization", "5m", now=now)
+        assert env.value == 3.0
+        assert env.observed_at is None
+        assert env.quality.stale is True and not env.quality.missing
+
+
+def test_join_observed_metric_live_response_shape():
+    # Shapes captured from VictoriaMetrics v1.102.0 (aggregated, empty metric labels).
+    now = datetime.fromtimestamp(1793009347, timezone.utc)
+    r = _resp({"status": "success", "data": {"resultType": "vector",
+               "result": [{"metric": {}, "value": [1793009347, "9"]}]}})
+    r2 = _resp({"status": "success", "data": {"resultType": "vector",
+                "result": [{"metric": {}, "value": [1793009347, "1793008245"]}]}})
     with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]):
-        env = join_observed_metric("r1", "eth0", "utilization", "5m", now=now)
-    assert env.observed_at == datetime.fromtimestamp(TS, timezone.utc)
+        env = join_observed_metric("r1", "old", "input_drops", "30m", now=now)
+    assert env.value == 9.0
+    assert env.observed_at == datetime.fromtimestamp(1793008245, timezone.utc)
+    assert env.quality.stale is True
 
 
 def test_join_observed_metric_empty_is_missing():

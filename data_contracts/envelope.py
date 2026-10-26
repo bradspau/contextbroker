@@ -48,10 +48,9 @@ class ContextEnvelope:
 
 def build_observed(entity_id, value, source, observed_at, now, max_age_s=DEFAULT_MAX_AGE_S) -> ContextEnvelope:
     missing = value is None
-    stale = (
-        not missing
-        and observed_at is not None
-        and (now - observed_at).total_seconds() > max_age_s
+    # Fail closed: a present value whose sample time is unknown is stale.
+    stale = not missing and (
+        observed_at is None or (now - observed_at).total_seconds() > max_age_s
     )
     return ContextEnvelope(
         entity_id=entity_id,
