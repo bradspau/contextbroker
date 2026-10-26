@@ -1,0 +1,382 @@
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import anthropic
+import httpx2
+import pytest
+
+from agent_harness import tools, workflow
+from agent_harness.workflow import run_agent
+from broker_engine.assess import assess_intent  # noqa: F401
+from data_contracts.envelope import build_observed
+
+
+def _text_block(text):
+    return SimpleNamespace(type="text", text=text)
+
+
+def _tool_use_block(block_id, name, input_):
+    return SimpleNamespace(type="tool_use", id=block_id, name=name, input=input_)
+
+
+def _response(content):
+    return SimpleNamespace(content=content)
+
+
+def test_run_agent_executes_tool_call_then_returns_final_message():
+    first_response = _response(
+        [_tool_use_block("call_1", "query_intent_state_requirements", {"intent_id": "intent-core-health-01"})]
+    )
+    final_response = _response(
+        [_text_block("Compliant: 0 drops observed, target is 0.")]
+    )
+
+    fake_client = Mock()
+    fake_client.messages.create.side_effect = [first_response, final_response]
+
+    with patch(
+        "agent_harness.tools.query_intent_state_requirements",
+        return_value={"metric": "input_drops", "operator": "==", "target_value": 0.0, "interfaces": []},
+    ) as mock_tool:
+        result = run_agent(
+            "Is intent-core-health-01 compliant right now?", client=fake_client, model="test-model"
+        )
+
+    mock_tool.assert_called_once_with(intent_id="intent-core-health-01")
+    assert result == "Compliant: 0 drops observed, target is 0."
+    assert fake_client.messages.create.call_count == 2
+
+
+def test_run_agent_returns_immediately_when_no_tool_call_needed():
+    final_response = _response([_text_block("I need an intent id to check.")])
+    fake_client = Mock()
+    fake_client.messages.create.return_value = final_response
+
+    result = run_agent("hello", client=fake_client, model="test-model")
+
+    assert result == "I need an intent id to check."
+    assert fake_client.messages.create.call_count == 1
+
+
+def test_run_agent_rejects_llm_supplied_extra_kwarg_and_recovers():
+    """Finding 3 + 4: an LLM-supplied argument outside the tool's declared schema
+    (e.g. an attacker-controlled query_endpoint, aka SSRF) must be rejected before
+    dispatch, fed back to the model as a tool error, and NOT passed to the real
+    tool function — and run_agent must recover rather than crash."""
+    bad_block = _tool_use_block(
+        "call_1",
+        "query_intent_state_requirements",
+        {"intent_id": "intent-core-health-01", "query_endpoint": "http://attacker.example/x"},
+    )
+    first_response = _response([bad_block])
+    final_response = _response([_text_block("I hit an error reading the requirement.")])
+
+    fake_client = Mock()
+    fake_client.messages.create.side_effect = [first_response, final_response]
+
+    with patch("agent_harness.tools.query_intent_state_requirements") as mock_tool:
+        result = run_agent(
+            "Is intent-core-health-01 compliant right now?", client=fake_client, model="test-model"
+        )
+
+    mock_tool.assert_not_called()
+    assert result == "I hit an error reading the requirement."
+    assert fake_client.messages.create.call_count == 2
+
+    # The conversation sent on the second call must contain a tool_result error message.
+    second_call_messages = fake_client.messages.create.call_args_list[1].kwargs["messages"]
+    tool_result_messages = [m for m in second_call_messages if m["role"] == "user" and isinstance(m["content"], list)]
+    assert len(tool_result_messages) == 1
+    tool_results = tool_result_messages[0]["content"]
+    assert len(tool_results) == 1
+    assert tool_results[0]["tool_use_id"] == "call_1"
+    assert tool_results[0]["is_error"] is True
+    error_payload = json.loads(tool_results[0]["content"])
+    assert "query_endpoint" in error_payload["error"]
+
+
+def test_run_agent_recovers_from_unsafe_tool_argument_value():
+    """Finding 4: an unsafe argument value (caught inside the tool function itself,
+    e.g. an invalid time_window) must also be caught and fed back, not raised."""
+    bad_block = _tool_use_block(
+        "call_1",
+        "query_tsdb_metrics",
+        {
+            "device": "Router-A",
+            "interface": "GigabitEthernet0/0/0",
+            "metric_type": "input_drops",
+            "time_window": "5min",
+        },
+    )
+    first_response = _response([bad_block])
+    final_response = _response([_text_block("Let me retry with a valid window.")])
+
+    fake_client = Mock()
+    fake_client.messages.create.side_effect = [first_response, final_response]
+
+    result = run_agent("check compliance", client=fake_client, model="test-model")
+
+    assert result == "Let me retry with a valid window."
+    assert fake_client.messages.create.call_count == 2
+
+    second_call_messages = fake_client.messages.create.call_args_list[1].kwargs["messages"]
+    tool_result_messages = [m for m in second_call_messages if m["role"] == "user" and isinstance(m["content"], list)]
+    assert len(tool_result_messages) == 1
+    tool_results = tool_result_messages[0]["content"]
+    assert tool_results[0]["is_error"] is True
+    error_payload = json.loads(tool_results[0]["content"])
+    assert "time_window" in error_payload["error"]
+
+
+def test_run_agent_reports_no_data_explicitly_when_tsdb_returns_none():
+    """A None result from query_tsdb_metrics (no data in window) must be surfaced
+    to the model as an explicit {"status": "no_data"} tool result, not a bare
+    null — so the model can't mistake missing telemetry for an observed zero."""
+    block = _tool_use_block(
+        "call_1",
+        "query_tsdb_metrics",
+        {
+            "device": "Router-A",
+            "interface": "GigabitEthernet0/0/0",
+            "metric_type": "input_drops",
+            "time_window": "5m",
+        },
+    )
+    first_response = _response([block])
+    final_response = _response([_text_block("Compliance is unknown due to missing telemetry.")])
+
+    fake_client = Mock()
+    fake_client.messages.create.side_effect = [first_response, final_response]
+
+    with patch("agent_harness.tools.query_tsdb_metrics", return_value=None):
+        result = run_agent("check compliance", client=fake_client, model="test-model")
+
+    assert result == "Compliance is unknown due to missing telemetry."
+
+    second_call_messages = fake_client.messages.create.call_args_list[1].kwargs["messages"]
+    tool_result_messages = [m for m in second_call_messages if m["role"] == "user" and isinstance(m["content"], list)]
+    assert len(tool_result_messages) == 1
+    tool_results = tool_result_messages[0]["content"]
+    assert tool_results[0]["is_error"] is False
+    payload = json.loads(tool_results[0]["content"])
+    assert payload == {"status": "no_data"}
+
+
+def test_run_agent_rejects_unknown_tool_name_without_raising():
+    """An unknown/unregistered tool name must also be caught, not raised."""
+    bad_block = _tool_use_block("call_1", "delete_all_data", {})
+    first_response = _response([bad_block])
+    final_response = _response([_text_block("I can't do that.")])
+
+    fake_client = Mock()
+    fake_client.messages.create.side_effect = [first_response, final_response]
+
+    result = run_agent("do something", client=fake_client, model="test-model")
+
+    assert result == "I can't do that."
+
+
+def test_run_agent_stops_after_max_iterations_without_raising():
+    """Finding 4: if the model keeps returning tool calls forever, run_agent must
+    give up after MAX_ITERATIONS create() calls instead of looping unboundedly."""
+    always_tool_call_response = _response(
+        [_tool_use_block("call_x", "query_intent_state_requirements", {"intent_id": "intent-core-health-01"})]
+    )
+
+    fake_client = Mock()
+    fake_client.messages.create.return_value = always_tool_call_response
+
+    with patch(
+        "agent_harness.tools.query_intent_state_requirements",
+        return_value={"metric": "input_drops", "operator": "==", "target_value": 0.0, "interfaces": []},
+    ):
+        result = run_agent("check compliance forever", client=fake_client, model="test-model")
+
+    assert result == (
+        f"Unable to reach a final answer after {workflow.MAX_ITERATIONS} tool-calling iterations."
+    )
+    assert fake_client.messages.create.call_count == workflow.MAX_ITERATIONS
+
+
+def _connection_error() -> anthropic.APIConnectionError:
+    req = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    return anthropic.APIConnectionError(request=req)
+
+
+def _openai_tool_call(call_id, name, arguments_json):
+    return SimpleNamespace(
+        id=call_id,
+        function=SimpleNamespace(name=name, arguments=arguments_json),
+    )
+
+
+def test_run_agent_falls_back_to_lmstudio_on_connection_error():
+    """When Claude's API is unreachable, run_agent must fall back to the
+    LM Studio client and still return an answer."""
+    fake_claude_client = Mock()
+    fake_claude_client.messages.create.side_effect = _connection_error()
+
+    lmstudio_final = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="From LM Studio.", tool_calls=None))]
+    )
+    fake_lmstudio_client = Mock()
+    fake_lmstudio_client.chat.completions.create.return_value = lmstudio_final
+
+    result = run_agent(
+        "Is intent-core-health-01 compliant right now?",
+        client=fake_claude_client,
+        model="test-model",
+        fallback_client=fake_lmstudio_client,
+        fallback_model="local-model",
+    )
+
+    assert result == "From LM Studio."
+    fake_claude_client.messages.create.assert_called_once()
+    fake_lmstudio_client.chat.completions.create.assert_called_once()
+
+
+def test_run_agent_does_not_fallback_on_non_connection_error():
+    """Auth/rate-limit errors must propagate, not silently fall back — a
+    misconfigured API key should fail loudly, not be masked by LM Studio."""
+    req = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    resp = httpx2.Response(401, request=req)
+    fake_claude_client = Mock()
+    fake_claude_client.messages.create.side_effect = anthropic.AuthenticationError(
+        "invalid x-api-key", response=resp, body=None
+    )
+    fake_lmstudio_client = Mock()
+
+    with pytest.raises(anthropic.AuthenticationError):
+        run_agent(
+            "Is intent-core-health-01 compliant right now?",
+            client=fake_claude_client,
+            model="test-model",
+            fallback_client=fake_lmstudio_client,
+            fallback_model="local-model",
+        )
+
+    fake_lmstudio_client.chat.completions.create.assert_not_called()
+
+
+def test_run_agent_lmstudio_fallback_executes_tool_call():
+    """The LM Studio fallback path must run the same tool-dispatch logic
+    (allow-list, no_data handling) as the Claude path."""
+    fake_claude_client = Mock()
+    fake_claude_client.messages.create.side_effect = _connection_error()
+
+    first_message = SimpleNamespace(
+        content=None,
+        tool_calls=[
+            _openai_tool_call(
+                "call_1", "query_intent_state_requirements", '{"intent_id": "intent-core-health-01"}'
+            )
+        ],
+    )
+    final_message = SimpleNamespace(content="Compliant via LM Studio.", tool_calls=None)
+    fake_lmstudio_client = Mock()
+    fake_lmstudio_client.chat.completions.create.side_effect = [
+        SimpleNamespace(choices=[SimpleNamespace(message=first_message)]),
+        SimpleNamespace(choices=[SimpleNamespace(message=final_message)]),
+    ]
+
+    with patch(
+        "agent_harness.tools.query_intent_state_requirements",
+        return_value={"metric": "input_drops", "operator": "==", "target_value": 0.0, "interfaces": []},
+    ) as mock_tool:
+        result = run_agent(
+            "Is intent-core-health-01 compliant right now?",
+            client=fake_claude_client,
+            model="test-model",
+            fallback_client=fake_lmstudio_client,
+            fallback_model="local-model",
+        )
+
+    mock_tool.assert_called_once_with(intent_id="intent-core-health-01")
+    assert result == "Compliant via LM Studio."
+    assert fake_lmstudio_client.chat.completions.create.call_count == 2
+
+
+def test_run_agent_fallback_requires_lmstudio_model_env_var(monkeypatch):
+    """If Claude is unreachable and LMSTUDIO_MODEL isn't configured, fail with
+    a clear error instead of guessing a model name."""
+    monkeypatch.delenv("LMSTUDIO_MODEL", raising=False)
+    fake_claude_client = Mock()
+    fake_claude_client.messages.create.side_effect = _connection_error()
+
+    with pytest.raises(RuntimeError, match="LMSTUDIO_MODEL"):
+        run_agent(
+            "Is intent-core-health-01 compliant right now?",
+            client=fake_claude_client,
+            model="test-model",
+        )
+
+
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+INTENT = {
+    "state": "intended", "source": "fuseki", "metric": "input_drops",
+    "operator": "==", "target_value": 0.0,
+    "interfaces": [
+        {"device": "r1", "interface_name": "e0"},
+        {"device": "r2", "interface_name": "e1"},
+    ],
+}
+
+
+def test_harness_does_not_import_execution_layers():
+    code = (
+        "import sys, agent_harness.tools, agent_harness.workflow\n"
+        "bad = [m for m in sys.modules if m.startswith(('governance_gate.controllers', 'action_lifecycle'))]\n"
+        "print(','.join(bad))\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip() == ""
+
+
+def test_system_prompt_forbids_own_verdict():
+    assert "do not compute compliance yourself" in tools.SYSTEM_PROMPT
+    assert "assess_intent" in tools.SYSTEM_PROMPT
+    assert "inconclusive" in tools.SYSTEM_PROMPT
+
+
+def test_assess_intent_tool_registered_and_rejects_extra_args():
+    names = {t["name"] for t in tools.TOOLS}
+    assert "assess_intent" in names
+    assert tools._TOOL_ALLOWED_ARGS["assess_intent"] == {"intent_id", "time_window"}
+    assert {t["function"]["name"] for t in tools.TOOLS_OPENAI} == names
+    with patch("agent_harness.tools.assess_intent") as mock_tool:
+        content, is_error = tools.execute_tool(
+            "assess_intent",
+            {"intent_id": "I1", "time_window": "5m", "query_endpoint": "http://evil"},
+        )
+    mock_tool.assert_not_called()
+    assert is_error is True
+    assert "query_endpoint" in json.loads(content)["error"]
+    content, is_error = tools.execute_tool("delete_all_data", {})
+    assert is_error is True
+
+
+def test_assess_intent_tool_returns_deterministic_verdict():
+    def join(device, interface, metric_type, time_window, **kw):
+        value = 3.0 if device == "r1" else 0.0
+        return build_observed(f"{device}:{interface}", value, "vm", NOW, NOW)
+
+    with patch("broker_engine.assess.resolve_intent", return_value=INTENT), \
+         patch("broker_engine.assess.join_observed_metric", side_effect=join):
+        content, is_error = tools.execute_tool(
+            "assess_intent", {"intent_id": "I1", "time_window": "5m"}
+        )
+    assert is_error is False
+    body = json.loads(content)
+    assert body["verdict"] == "failure"  # nonzero input_drops on r1
+    assert {p["outcome"] for p in body["per_interface"]} == {"failure", "success"}
+    assert set(body) >= {"verdict", "per_interface", "reasons", "context", "dropped_count"}

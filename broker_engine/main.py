@@ -2,39 +2,22 @@
 
 import requests
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
-from broker_engine.pruner import prune
+from broker_engine.assess import DEFAULT_MAX_ENTITIES, assess_intent
+from broker_engine.pruner import prune  # noqa: F401
 from broker_engine.validation import ClientInputError, IntentNotFound
 from broker_engine.sparql_resolver import resolve_intent
 from broker_engine.tsdb_joiner import join_observed_metric
-from outcome_assurance.evaluate import evaluate_intent
-
-DEFAULT_MAX_ENTITIES = 50
-
+from outcome_assurance.evaluate import evaluate_intent  # noqa: F401
 
 def assess(intent_id: str, time_window: str, max_entities: int = DEFAULT_MAX_ENTITIES) -> dict:
-    """Resolve the intent, join telemetry, evaluate on the full observations,
-    then prune only the context returned."""
-    intent = resolve_intent(intent_id)
-    interfaces = intent["interfaces"]
-    observations = {}
-    for iface in interfaces:
-        key = (iface["device"], iface["interface_name"])
-        observations[key] = join_observed_metric(
-            iface["device"], iface["interface_name"], intent["metric"], time_window
-        )
-    verdict = evaluate_intent(intent, observations)  # never depends on pruning
-    pruned = prune(list(observations.values()), max(max_entities, len(interfaces)))
-    return jsonable_encoder({
-        "verdict": verdict.outcome.value,
-        "per_interface": verdict.per_interface,
-        "reasons": verdict.reasons,
-        "context": [e.to_dict() for e in pruned.kept],
-        "dropped_count": pruned.dropped_count,
-    })
+    """Thin wrapper over assess_intent using this module's resolver/joiner."""
+    return assess_intent(
+        intent_id, time_window, max_entities,
+        resolve=resolve_intent, join=join_observed_metric,
+    )
 
 
 def _metric(device: str, interface: str, metric_type: str, time_window: str) -> dict:

@@ -1,248 +1,34 @@
-"""Context broker: compares live TSDB telemetry against graph-declared intent."""
-import json
-import os
+"""Context broker CLI shim: the agent lives in agent_harness, data access in broker_engine."""
 import sys
 
-import anthropic
-import requests
-from dotenv import load_dotenv
-from openai import OpenAI
+import requests  # noqa: F401  (tests patch broker.requests.*)
 
+from agent_harness.tools import (  # noqa: F401
+    SYSTEM_PROMPT,
+    TOOLS,
+    TOOLS_OPENAI,
+    _TOOL_ALLOWED_ARGS,
+    execute_tool,
+    query_intent_state_requirements,
+    query_tsdb_metrics,
+)
+from agent_harness.tools import execute_tool as _execute_tool  # noqa: F401
+from agent_harness.workflow import (  # noqa: F401
+    MAX_ITERATIONS,
+    _build_client,
+    _build_lmstudio_client,
+    _run_claude,
+    _run_lmstudio,
+    run_agent,
+)
 from broker_engine.sparql_resolver import (  # noqa: F401
     FUSEKI_QUERY_ENDPOINT,
     _build_intent_sparql,
     resolve_intent,
 )
-from broker_engine.tsdb_joiner import VM_QUERY_ENDPOINT, join_observed_metric
+from broker_engine.tsdb_joiner import VM_QUERY_ENDPOINT, join_observed_metric  # noqa: F401
 from broker_engine.validation import _SAFE_TOKEN, _SAFE_WINDOW, _validate_token  # noqa: F401
 from telemetry_simulator import MEASUREMENT_NAME  # noqa: F401
-
-MAX_ITERATIONS = 10
-
-query_intent_state_requirements = resolve_intent
-
-
-def query_tsdb_metrics(
-    device: str,
-    interface: str,
-    metric_type: str,
-    time_window: str,
-    query_endpoint: str = VM_QUERY_ENDPOINT,
-) -> float | None:
-    return join_observed_metric(
-        device, interface, metric_type, time_window, query_endpoint
-    ).value
-
-
-SYSTEM_PROMPT = """You are a network compliance agent. You have two tools:
-
-- query_intent_state_requirements(intent_id): reads the declared requirement for an
-  operational intent from the knowledge graph (target metric, operator, target value,
-  and the interfaces it applies to).
-- query_tsdb_metrics(device, interface, metric_type, time_window): reads the observed
-  value of a metric over a recent time window from the telemetry database.
-
-To answer a compliance question: first call query_intent_state_requirements to learn
-what is expected and which interfaces to check. Then call query_tsdb_metrics for each
-of those interfaces to learn what is actually happening. Mathematically compare the
-observed value against the target value using the given operator, and state plainly
-whether the intent is currently compliant, citing the numbers you compared.
-
-If a query_tsdb_metrics result has "status": "no_data", no observed value exists for
-that interface in the requested window — do not treat this as zero or as compliant.
-Report compliance for that interface as unknown due to missing telemetry."""
-
-TOOLS = [
-    {
-        "name": "query_intent_state_requirements",
-        "description": "Read the declared requirement for an operational intent from the knowledge graph.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"intent_id": {"type": "string"}},
-            "required": ["intent_id"],
-        },
-    },
-    {
-        "name": "query_tsdb_metrics",
-        "description": "Read the observed value of a metric over a time window from the TSDB.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "device": {"type": "string"},
-                "interface": {"type": "string"},
-                "metric_type": {"type": "string"},
-                "time_window": {"type": "string"},
-            },
-            "required": ["device", "interface", "metric_type", "time_window"],
-        },
-    },
-]
-
-# Derive each tool's allowed argument keys from its own declared JSON-schema
-# properties in TOOLS, so the allow-list can never drift from the schema.
-_TOOL_ALLOWED_ARGS = {
-    tool["name"]: set(tool["input_schema"]["properties"])
-    for tool in TOOLS
-}
-
-
-def _to_openai_tool(tool: dict) -> dict:
-    return {
-        "type": "function",
-        "function": {
-            "name": tool["name"],
-            "description": tool["description"],
-            "parameters": tool["input_schema"],
-        },
-    }
-
-
-# LM Studio speaks the OpenAI tool-calling wire format, so derive its tool list
-# from the same TOOLS declarations Claude uses — one schema, no drift.
-TOOLS_OPENAI = [_to_openai_tool(tool) for tool in TOOLS]
-
-
-def _execute_tool(name: str, arguments: dict) -> tuple[str, bool]:
-    """Run one tool call. Shared by both the Claude and LM Studio loops so the
-    allow-list, SSRF guard, and no_data handling can't drift between them.
-    Returns (json content string, is_error)."""
-    try:
-        # Restrict tool dispatch to the allow-list (derived from TOOLS,
-        # so it can never drift from the declared schema)
-        if name not in _TOOL_ALLOWED_ARGS:
-            raise ValueError(f"Unknown tool: {name!r}")
-        # Reject any argument key the tool's own schema doesn't declare
-        # (prevents e.g. an LLM-supplied query_endpoint override / SSRF).
-        allowed_keys = _TOOL_ALLOWED_ARGS[name]
-        extra_keys = set(arguments) - allowed_keys
-        if extra_keys:
-            raise ValueError(f"Unexpected argument(s) for tool {name!r}: {sorted(extra_keys)}")
-        # Look up the function dynamically from globals so patches work
-        func = globals()[name]
-        result = func(**arguments)
-        # query_tsdb_metrics returns None for "no data in this window" —
-        # surface that as an explicit status rather than a bare null, so
-        # the model can't mistake missing telemetry for an observed zero.
-        if result is None:
-            result = {"status": "no_data"}
-        return json.dumps(result), False
-    except Exception as exc:
-        return json.dumps({"error": str(exc)}), True
-
-
-def _build_client() -> anthropic.Anthropic:
-    load_dotenv()
-    return anthropic.Anthropic()
-
-
-def _build_lmstudio_client() -> OpenAI:
-    load_dotenv()
-    return OpenAI(
-        base_url=os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1"),
-        api_key="lm-studio",  # unused by LM Studio, but the OpenAI client requires a value
-    )
-
-
-def _run_claude(user_prompt: str, client: anthropic.Anthropic, model: str) -> str:
-    messages = [{"role": "user", "content": user_prompt}]
-
-    for _ in range(MAX_ITERATIONS):
-        response = client.messages.create(
-            model=model,
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            messages=messages,
-            tools=TOOLS,
-        )
-        messages.append({"role": "assistant", "content": response.content})
-
-        tool_use_blocks = [block for block in response.content if block.type == "tool_use"]
-        if not tool_use_blocks:
-            return "".join(block.text for block in response.content if block.type == "text")
-
-        tool_results = []
-        for block in tool_use_blocks:
-            content, is_error = _execute_tool(block.name, block.input)
-            tool_results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": content,
-                    "is_error": is_error,
-                }
-            )
-        messages.append({"role": "user", "content": tool_results})
-
-    return f"Unable to reach a final answer after {MAX_ITERATIONS} tool-calling iterations."
-
-
-def _run_lmstudio(user_prompt: str, client: OpenAI, model: str) -> str:
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_prompt},
-    ]
-
-    for _ in range(MAX_ITERATIONS):
-        response = client.chat.completions.create(
-            model=model, messages=messages, tools=TOOLS_OPENAI
-        )
-        message = response.choices[0].message
-
-        if not message.tool_calls:
-            return message.content
-
-        messages.append(
-            {"role": "assistant", "content": message.content, "tool_calls": message.tool_calls}
-        )
-        for tool_call in message.tool_calls:
-            try:
-                arguments = json.loads(tool_call.function.arguments)
-            except json.JSONDecodeError as exc:
-                content = json.dumps({"error": f"Invalid tool arguments JSON: {exc}"})
-            else:
-                content, _is_error = _execute_tool(tool_call.function.name, arguments)
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": content,
-                }
-            )
-
-    return f"Unable to reach a final answer after {MAX_ITERATIONS} tool-calling iterations."
-
-
-def run_agent(
-    user_prompt: str,
-    client: anthropic.Anthropic | None = None,
-    model: str | None = None,
-    fallback_client: OpenAI | None = None,
-    fallback_model: str | None = None,
-) -> str:
-    if client is None:
-        client = _build_client()
-    if model is None:
-        load_dotenv()
-        model = os.environ.get("MODEL_NAME", "claude-opus-5")
-
-    try:
-        return _run_claude(user_prompt, client, model)
-    except anthropic.APIConnectionError:
-        # Claude's API is unreachable (network/DNS/timeout) — fall back to a
-        # local LM Studio server. Auth and rate-limit errors are NOT caught
-        # here, so a misconfigured API key still fails loudly.
-        if fallback_client is None:
-            fallback_client = _build_lmstudio_client()
-        if fallback_model is None:
-            load_dotenv()
-            fallback_model = os.environ.get("LMSTUDIO_MODEL")
-            if not fallback_model:
-                raise RuntimeError(
-                    "Claude API is unreachable and LMSTUDIO_MODEL is not set in .env — "
-                    "cannot fall back to LM Studio."
-                ) from None
-        return _run_lmstudio(user_prompt, fallback_client, fallback_model)
-
 
 if __name__ == "__main__":
     prompt = " ".join(sys.argv[1:]) or input("Ask the broker: ")
