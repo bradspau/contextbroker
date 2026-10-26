@@ -1,0 +1,75 @@
+"""Metric map: broker metric names <-> TMF921 metric URIs (+ unit).
+
+Data lives in metric_map.json (override with env METRIC_MAP_PATH). Format:
+
+    [{"broker_metric": "latency_ms",
+      "metric_uri": "http://broadband-forum.org/Intent#LatencyMetric",
+      "unit": "ms"}, ...]
+
+Only URIs and units are stored, no ontology text. The five BBF HSI metrics use
+new broker metric names (not emitted by the telemetry simulator yet):
+downstream_bandwidth_mbps, upstream_bandwidth_mbps, latency_ms, jitter_ms,
+packet_loss_percent. A missing file yields an empty map; any malformed content
+raises ValueError (fail closed).
+"""
+import json
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+from broker_engine.validation import _SAFE_TOKEN
+
+URI_RE = re.compile(r"^https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$")
+ALLOWED_UNITS = frozenset({"Mbps", "Gbps", "ms", "us", "percent"})
+DEFAULT_PATH = Path(__file__).with_name("metric_map.json")
+
+
+@dataclass(frozen=True)
+class MetricMapping:
+    broker_metric: str
+    metric_uri: str
+    unit: str | None
+
+
+def _check_token(value, label: str) -> str:
+    if not isinstance(value, str) or not _SAFE_TOKEN.match(value):
+        raise ValueError(f"unsafe {label}: {value!r}")
+    return value
+
+
+def check_uri(value, label: str = "metric_uri") -> str:
+    if not isinstance(value, str) or not URI_RE.match(value):
+        raise ValueError(f"unsafe {label}: {value!r}")
+    return value
+
+
+def load_metric_map(path: Path | None = None) -> dict[str, MetricMapping]:
+    if path is None:
+        path = Path(os.environ.get("METRIC_MAP_PATH") or DEFAULT_PATH)
+    path = Path(path)
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"cannot read metric map {path}: {exc}") from exc
+    if not isinstance(raw, list):
+        raise ValueError("metric map must be a JSON list")
+    out: dict[str, MetricMapping] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("metric map entries must be objects")
+        uri = check_uri(item.get("metric_uri"))
+        broker = _check_token(item.get("broker_metric"), "broker_metric")
+        unit = item.get("unit")
+        if unit is not None and (not isinstance(unit, str) or unit not in ALLOWED_UNITS):
+            raise ValueError(f"unit not allowed: {unit!r}")
+        if uri in out:
+            raise ValueError(f"duplicate metric_uri: {uri}")
+        out[uri] = MetricMapping(broker, uri, unit)
+    return out
+
+
+def broker_metric_for(uri: str) -> MetricMapping | None:
+    return load_metric_map().get(uri)
