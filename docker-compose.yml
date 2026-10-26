@@ -60,8 +60,9 @@ services:
   # it is bind-mounted read-only (SchemaInit loads it on every start). 3030/8001 are not published.
   tmf921-server:
     build:
-      context: ${TMF921_SRC:-../BBF_921_java}
-      dockerfile: ${PWD:-.}/docker/tmf921.Dockerfile
+      context: ./docker/tmf921
+      additional_contexts:
+        bbf: ${TMF921_SRC:-../BBF_921_java}
     image: contextbroker/tmf921-server:local
     container_name: tmf921-server
     profiles: ["tmf921"]

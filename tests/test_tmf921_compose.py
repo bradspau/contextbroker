@@ -60,16 +60,44 @@ def _effective_dockerfile_text():
     build = _services()["tmf921-server"]["build"]
     if "dockerfile_inline" in build:
         return build["dockerfile_inline"]
-    return DOCKERFILE.read_text()
+    ctx = (ROOT / build["context"]).resolve()
+    return (ctx / build.get("dockerfile", "Dockerfile")).read_text()
 
 
-def test_dockerfile_does_not_copy_ontology():
+def test_build_is_independent_of_cwd():
+    build = _services()["tmf921-server"]["build"]
+    assert "PWD" not in yaml.safe_dump(build)
+    assert build["context"] == "./docker/tmf921"
+    assert "dockerfile" not in build or not str(build["dockerfile"]).startswith("/")
+    assert "bbf" in build["additional_contexts"]
+
+
+def test_dockerfile_copies_exact_sources_and_no_ontology():
     text = _effective_dockerfile_text()
-    copies = [l for l in text.splitlines() if l.strip().upper().startswith(("COPY", "ADD"))]
-    assert copies
-    assert not any("ontology" in l.lower() for l in copies)
+    sources = []
+    for line in text.splitlines():
+        parts = line.split()
+        if parts and parts[0].upper() in ("COPY", "ADD"):
+            args = [p for p in parts[1:]]
+            frm = next((a.split("=", 1)[1] for a in args if a.startswith("--from=")), None)
+            pos = [a for a in args if not a.startswith("--")]
+            sources.append((frm, tuple(pos[:-1])))
+    assert sources == [
+        ("bbf", ("pom.xml",)),
+        ("bbf", ("src/",)),
+        ("build", ("/app/target/*.jar",)),
+        ("bbf", ("BBF_access/",)),
+        ("bbf", ("seed_data/",)),
+    ]
+    assert not any("ontology" in str(x).lower() for x in sources)
     assert "maven:3.9-eclipse-temurin-21-jammy" in text
     assert "eclipse-temurin:21-jre-jammy" in text
+
+
+def test_root_dockerignore_blocks_licensed():
+    lines = (ROOT / ".dockerignore").read_text().splitlines()
+    assert "ontologies/licensed" in lines
+    assert "**/ontology/**/*.ttl" in lines
 
 
 def test_broker_has_tmf921_url():
@@ -93,3 +121,26 @@ def test_preflight_fails_on_empty_and_missing(tmp_path):
 def test_preflight_passes_with_ttl(tmp_path):
     (tmp_path / "x.ttl").write_text("")
     assert _run(tmp_path).returncode == 0
+
+
+def test_preflight_reads_dotenv_and_repo_relative(tmp_path):
+    # copy script into a fake repo root so relative paths and .env resolve against it
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    script = root / "scripts" / "tmf921_preflight.sh"
+    script.write_text(PREFLIGHT.read_text())
+    onto = root / "onto"
+    onto.mkdir()
+    (onto / "a.ttl").write_text("")
+    env = {k: v for k, v in os.environ.items() if k != "TIO_ONTOLOGY_DIR"}
+    (root / ".env").write_text("TIO_ONTOLOGY_DIR=./onto\n")
+    # run from an unrelated cwd
+    r = subprocess.run(["bash", str(script)], env=env, cwd="/", capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    (root / ".env").write_text("TIO_ONTOLOGY_DIR=./missing\n")
+    r = subprocess.run(["bash", str(script)], env=env, cwd="/", capture_output=True, text=True)
+    assert r.returncode != 0
+    # shell env wins over .env
+    env2 = dict(env, TIO_ONTOLOGY_DIR="onto")
+    r = subprocess.run(["bash", str(script)], env=env2, cwd="/", capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
