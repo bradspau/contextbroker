@@ -23,6 +23,9 @@ mcp-types==2.3.0
 mcp==2.3.0
 openai==3.11.0
 opentelemetry-api==1.45.1
+owlrl==7.6.2
+packaging==26.3
+prettytable==3.18.0
 pycparser==3.12
 pydantic==2.13.5
 pydantic_core==2.46.5
@@ -42,3 +45,4 @@ typing-inspection==0.4.4
 typing_extensions==4.16.0
 urllib3==2.7.0
 uvicorn==0.54.0
+wcwidth==0.9.4

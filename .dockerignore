@@ -1,0 +1,11 @@
+venv/
+.git/
+docs/
+.superpowers/
+.sdd/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+tests/
+lodlive/
+.env

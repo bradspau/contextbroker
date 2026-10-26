@@ -41,5 +41,18 @@ services:
       - lodlive-proxy
     restart: unless-stopped
 
+  contextbroker-api:
+    build: .
+    container_name: contextbroker-api
+    ports:
+      - "8080:8080"
+    environment:
+      - FUSEKI_QUERY_ENDPOINT=http://fuseki:3030/network-dataset/query
+      - VM_QUERY_ENDPOINT=http://victoriametrics:8428/api/v1/query
+    depends_on:
+      - fuseki
+      - victoriametrics
+    restart: unless-stopped
+
 volumes:
   vm-data:
