@@ -43,3 +43,15 @@ def test_model_registry():
 def test_bad_status():
     with pytest.raises(ValueError):
         ModelRegistry().register("m", "1", "bogus")
+
+
+@pytest.mark.parametrize("v", ["", "1.", ".1", "1..2", "v1", "1.0-rc", "١.٢", "1.0\n", " 1"])
+def test_strict_version_rejected(v):
+    with pytest.raises(ValueError):
+        ActionCatalogue().add(tpl(v))
+
+
+def test_duplicate_template_version_rejected():
+    c = ActionCatalogue([tpl("1.0")])
+    with pytest.raises(ValueError):
+        c.add(tpl("1.0"))

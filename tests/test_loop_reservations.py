@@ -48,3 +48,13 @@ def test_release_only_by_holder():
 def test_bad_ttl(ttl):
     with pytest.raises(ValueError):
         ReservationBook().reserve("a", "s", ttl, T0)
+
+
+def test_naive_datetime_rejected():
+    b = ReservationBook()
+    naive = datetime(2026, 1, 1)
+    with pytest.raises(ValueError):
+        b.reserve("a", "s", 10, naive)
+    b.reserve("a", "s", 10, T0)
+    with pytest.raises(ValueError):
+        b.holder("s", naive)

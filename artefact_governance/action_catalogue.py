@@ -1,4 +1,5 @@
 """Approved action catalogue. Only approved templates are ever returned."""
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -14,7 +15,12 @@ class ActionTemplate:
     approved: bool
 
 
+_VERSION_RE = re.compile(r"[0-9]+(\.[0-9]+)*")
+
+
 def _version_key(version: str) -> tuple[int, ...]:
+    if type(version) is not str or not _VERSION_RE.fullmatch(version):
+        raise ValueError(f"invalid version: {version!r}")
     return tuple(int(p) for p in version.split("."))
 
 
@@ -26,6 +32,9 @@ class ActionCatalogue:
 
     def add(self, template: ActionTemplate) -> None:
         _version_key(template.version)  # reject malformed versions (ValueError)
+        for t in self._templates:
+            if t.template_id == template.template_id and _version_key(t.version) == _version_key(template.version):
+                raise ValueError("duplicate template_id/version")
         self._templates.append(template)
 
     def get(self, template_id: str) -> ActionTemplate | None:

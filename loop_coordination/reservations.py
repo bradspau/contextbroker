@@ -2,11 +2,17 @@
 from datetime import datetime, timedelta
 
 
+def _check_aware(now) -> None:
+    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be a timezone-aware datetime")
+
+
 class ReservationBook:
     def __init__(self):
         self._held: dict[str, tuple[str, datetime]] = {}
 
     def reserve(self, loop_id: str, scope: str, ttl_s: int, now: datetime) -> bool:
+        _check_aware(now)
         if ttl_s <= 0:
             raise ValueError("ttl_s must be positive")
         current = self.holder(scope, now)
@@ -16,6 +22,7 @@ class ReservationBook:
         return True
 
     def holder(self, scope: str, now: datetime) -> str | None:
+        _check_aware(now)
         entry = self._held.get(scope)
         if entry is None:
             return None

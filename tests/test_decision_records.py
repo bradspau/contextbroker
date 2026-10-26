@@ -47,3 +47,44 @@ def test_persists_to_file(tmp_path):
     p = tmp_path / "r.db"
     rid = RecordStore(p).append("k", {"z": 2})
     assert RecordStore(p).get(rid)["payload"] == {"z": 2}
+
+
+def test_insert_or_replace_blocked():
+    s = RecordStore()
+    rid = s.append("x", {"a": 1})
+    with pytest.raises(sqlite3.DatabaseError):
+        s._conn.execute(
+            "INSERT OR REPLACE INTO records (id, kind, payload, links, created_at) "
+            "VALUES (?, 'evil', '{}', '[]', 't')", (rid,))
+    with pytest.raises(sqlite3.DatabaseError):
+        s._conn.execute(
+            "INSERT OR REPLACE INTO records (seq, id, kind, payload, links, created_at) "
+            "VALUES (1, 'new', 'evil', '{}', '[]', 't')")
+    assert s.get(rid)["kind"] == "x"
+
+
+def test_find_by_payload():
+    s = RecordStore()
+    a = s.append("action_execution", {"idempotency_key": "k", "status": "executed"})
+    s.append("action_execution", {"idempotency_key": "j", "status": "executed"})
+    s.append("other", {"idempotency_key": "k"})
+    assert [r["id"] for r in s.find("action_execution", "idempotency_key", "k")] == [a]
+    assert s.find("action_execution", "idempotency_key", "zz") == []
+
+
+def test_thread_safe_appends():
+    import threading
+    s = RecordStore()
+    errs = []
+
+    def work():
+        try:
+            for _ in range(50):
+                s.append("k", {})
+        except Exception as e:  # pragma: no cover
+            errs.append(e)
+    ts = [threading.Thread(target=work) for _ in range(8)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert errs == []
+    assert s._conn.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 400
