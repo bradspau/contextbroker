@@ -44,6 +44,11 @@ class IntentStore:
             interfaces=data.get("interfaces") or [], status=status, last_outcome=last,
         )
 
+    def last_outcome(self, intent_id: str) -> Outcome | None:
+        """Recorded outcome for an id, without consulting the resolver."""
+        with self._lock:
+            return self._outcomes.get(intent_id)
+
     def fulfilment_update(self, intent_id: str, outcome: Outcome) -> None:
         with self._lock:
             self._outcomes[intent_id] = outcome
