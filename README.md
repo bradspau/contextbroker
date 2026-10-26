@@ -56,7 +56,8 @@ flowchart TB
 1. `agent_harness` imports `broker_engine` functions in-process (it does not call
    them over REST or MCP). Separately, `broker_engine.main:app` serves a REST API
    (`GET /context/intent/{id}`, `GET /context/metric`, `POST /context/assess`) via
-   `uvicorn broker_engine.main:app`. An MCP server is built and unit-tested
+   `uvicorn broker_engine.main:app`. `POST /context/assess` also accepts
+   `"source":"tmf921"` (default `"graph"`) to assess via the TMF921 intent server. An MCP server is built and unit-tested
    (`broker_engine.main.build_mcp_server()`) but is NOT mounted on that app and nothing
    serves it; to use it you would have to run it yourself, e.g.
    `build_mcp_server().run()`.

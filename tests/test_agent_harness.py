@@ -351,7 +351,7 @@ def test_system_prompt_forbids_own_verdict():
 def test_assess_intent_tool_registered_and_rejects_extra_args():
     names = {t["name"] for t in tools.TOOLS}
     assert "assess_intent" in names
-    assert tools._TOOL_ALLOWED_ARGS["assess_intent"] == {"intent_id", "time_window"}
+    assert tools._TOOL_ALLOWED_ARGS["assess_intent"] == {"intent_id", "time_window", "source"}
     assert {t["function"]["name"] for t in tools.TOOLS_OPENAI} == names
     with patch("agent_harness.tools.assess_intent") as mock_tool:
         content, is_error = tools.execute_tool(
@@ -448,3 +448,36 @@ def test_execute_tool_generic_exception_has_type_only():
     assert is_error
     assert json.loads(content) == {"error": "tool error: KeyError"}
     assert "vm.internal" not in content
+
+
+def test_assess_tool_source_enum_in_both_schemas():
+    for schema in (
+        next(t for t in tools.TOOLS if t["name"] == "assess_intent")["input_schema"],
+        next(t for t in tools.TOOLS_OPENAI if t["function"]["name"] == "assess_intent")["function"]["parameters"],
+    ):
+        assert schema["properties"]["source"]["enum"] == ["graph", "tmf921"]
+        assert "source" not in schema["required"]
+
+
+def test_execute_tool_rejects_bad_source_and_undeclared_args():
+    with patch("agent_harness.tools.assess_intent") as m:
+        content, err = tools.execute_tool(
+            "assess_intent", {"intent_id": "I1", "time_window": "5m", "source": "evil"})
+        assert err and "source" in json.loads(content)["error"]
+        for extra in ("query_endpoint", "base_url"):
+            content, err = tools.execute_tool(
+                "assess_intent", {"intent_id": "I1", "time_window": "5m", extra: "http://x"})
+            assert err and "Unexpected argument" in json.loads(content)["error"]
+        m.assert_not_called()
+
+
+def test_execute_tool_routes_tmf921_source():
+    with patch("agent_harness.tools.assess_intent", return_value={"verdict": "success"}) as m:
+        content, err = tools.execute_tool(
+            "assess_intent", {"intent_id": "I1", "time_window": "5m", "source": "tmf921"})
+    assert not err
+    m.assert_called_once_with(intent_id="I1", time_window="5m", source="tmf921")
+
+
+def test_system_prompt_mentions_tmf921_rule():
+    assert "source=tmf921" in tools.SYSTEM_PROMPT

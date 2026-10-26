@@ -9,6 +9,7 @@ from broker_engine.tsdb_joiner import join_observed_metric
 from broker_engine.validation import _SAFE_WINDOW, ClientInputError, _validate_token
 from data_contracts.envelope import build_observed
 from intent_management.store import IntentStore
+from intent_management.tmf921_source import assess_via_tmf921
 from outcome_assurance.evaluate import Outcome, evaluate_intent
 
 DEFAULT_MAX_ENTITIES = 50
@@ -24,10 +25,20 @@ def assess_intent(
     *,
     resolve=None,
     join=None,
+    source: str = "graph",
 ) -> dict:
     """Resolve the intent, join telemetry, evaluate on the full observations,
     then prune only the context returned. `resolve`/`join` default to the real
-    resolver/joiner (looked up at call time so patches apply)."""
+    resolver/joiner (looked up at call time so patches apply).
+
+    `source` is "graph" (default; the graph-resolved intent path) or "tmf921"
+    (intent handling state from the TMF921 intent server combined with the
+    broker's deterministic checks). For "tmf921", `max_entities` is ignored.
+    Any other value raises ClientInputError."""
+    if source not in ("graph", "tmf921"):
+        raise ClientInputError(f"Unknown source: {source!r}")
+    if source == "tmf921":
+        return assess_via_tmf921(intent_id, time_window, join=join)
     join = join or join_observed_metric
     # Validate caller input up front so a bad window is a client error (400),
     # not a per-interface "invalid identifier" verdict.

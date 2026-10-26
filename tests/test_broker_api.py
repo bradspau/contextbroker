@@ -288,3 +288,56 @@ def test_assess_real_validation_rejects_unsafe_graph_interface_per_interface():
     assert body["verdict"] == "inconclusive"
     bad = [e for e in body["context"] if e["entity_id"] == "r1:Gi0/0/0.100"][0]
     assert bad["quality"]["conflicts"] == ["invalid interface identifier"]
+
+
+# --- source switch (graph | tmf921) ---
+
+def test_assess_default_source_is_graph_not_tmf921():
+    with patch("broker_engine.main.resolve_intent", return_value=INTENT), \
+         patch("broker_engine.main.join_observed_metric", side_effect=fake_join), \
+         patch("broker_engine.assess.assess_via_tmf921") as via:
+        r = TestClient(main.app).post("/context/assess", json={"intent_id": "I1", "time_window": "5m"})
+    assert r.status_code == 200
+    via.assert_not_called()
+
+
+def test_assess_source_tmf921_routes_to_new_path():
+    with patch("broker_engine.assess.assess_via_tmf921", return_value={"verdict": "success", "source": "tmf921"}) as via:
+        r = TestClient(main.app).post(
+            "/context/assess", json={"intent_id": "I1", "time_window": "5m", "source": "tmf921"})
+    assert r.status_code == 200 and r.json()["source"] == "tmf921"
+    assert via.call_args.args == ("I1", "5m")
+
+
+def test_assess_unknown_source_422_and_python_clientinputerror():
+    r = TestClient(main.app).post(
+        "/context/assess", json={"intent_id": "I1", "time_window": "5m", "source": "bogus"})
+    assert r.status_code == 422
+    from broker_engine.assess import assess_intent
+    from broker_engine.validation import ClientInputError
+    with pytest.raises(ClientInputError):
+        assess_intent("I1", "5m", source="bogus")
+
+
+def test_assess_extra_field_still_422_with_source():
+    r = TestClient(main.app).post(
+        "/context/assess", json={"intent_id": "I1", "time_window": "5m", "source": "graph", "x": 1})
+    assert r.status_code == 422
+
+
+def test_assess_tmf921_client_input_error_is_400():
+    from broker_engine.validation import ClientInputError
+    with patch("broker_engine.assess.assess_via_tmf921", side_effect=ClientInputError("bad")):
+        r = TestClient(main.app).post(
+            "/context/assess", json={"intent_id": "I1", "time_window": "5m", "source": "tmf921"})
+    assert r.status_code == 400
+
+
+def test_mcp_assess_tool_accepts_source():
+    import json
+    server = main.build_mcp_server()
+    with patch("broker_engine.assess.assess_via_tmf921", return_value={"verdict": "success", "source": "tmf921"}) as via:
+        res = asyncio.run(server.call_tool(
+            "assess_intent", {"intent_id": "I1", "time_window": "5m", "source": "tmf921"}))
+    via.assert_called_once()
+    assert json.loads(res.content[0].text)["source"] == "tmf921"

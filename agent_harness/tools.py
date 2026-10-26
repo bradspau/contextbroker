@@ -46,7 +46,9 @@ never treat its value as an observed zero; report compliance as unknown.
 
 If the verdict is "inconclusive", or any interface has missing telemetry ("no_data"),
 never report the intent as compliant; report compliance as unknown due to missing or
-unreliable telemetry."""
+unreliable telemetry.
+
+With assess_intent source=tmf921 the verdict still comes from the broker's deterministic checks combined with the intent server's handling state; explain it and never compute or override it, and an "inconclusive" verdict means evidence was stale, missing, conflicted, drifted or unavailable and must never be presented as compliant."""
 
 TOOLS = [
     {
@@ -80,6 +82,7 @@ TOOLS = [
             "properties": {
                 "intent_id": {"type": "string"},
                 "time_window": {"type": "string"},
+                "source": {"type": "string", "enum": ["graph", "tmf921"], "default": "graph"},
             },
             "required": ["intent_id", "time_window"],
         },
@@ -126,6 +129,9 @@ def execute_tool(name: str, arguments: dict) -> tuple[str, bool]:
         if extra_keys:
             raise ClientInputError(f"Unexpected argument(s) for tool {name!r}: {sorted(extra_keys)}")
         # Look up the function dynamically from globals so patches work
+        for key, prop in next(t for t in TOOLS if t["name"] == name)["input_schema"]["properties"].items():
+            if "enum" in prop and key in arguments and arguments[key] not in prop["enum"]:
+                raise ClientInputError(f"Invalid value for {key!r}: must be one of {prop['enum']}")
         func = globals()[name]
         result = func(**arguments)
         # query_tsdb_metrics returns None for "no data in this window" —

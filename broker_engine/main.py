@@ -1,5 +1,7 @@
 """Broker REST + MCP interface over the resolver, joiner, pruner and evaluator."""
 
+from typing import Literal
+
 import requests
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -12,11 +14,12 @@ from broker_engine.sparql_resolver import resolve_intent
 from broker_engine.tsdb_joiner import join_observed_metric
 from outcome_assurance.evaluate import evaluate_intent  # noqa: F401
 
-def assess(intent_id: str, time_window: str, max_entities: int = DEFAULT_MAX_ENTITIES) -> dict:
+def assess(intent_id: str, time_window: str, max_entities: int = DEFAULT_MAX_ENTITIES,
+           source: str = "graph") -> dict:
     """Thin wrapper over assess_intent using this module's resolver/joiner."""
     return assess_intent(
         intent_id, time_window, max_entities,
-        resolve=resolve_intent, join=join_observed_metric,
+        resolve=resolve_intent, join=join_observed_metric, source=source,
     )
 
 
@@ -44,9 +47,11 @@ def build_mcp_server():
         return _metric(device, interface, metric_type, time_window)
 
     @server.tool()
-    def assess_intent(intent_id: str, time_window: str) -> dict:
+    def assess_intent(
+        intent_id: str, time_window: str, source: Literal["graph", "tmf921"] = "graph"
+    ) -> dict:
         """Assess an intent against observed telemetry and return verdict plus pruned context."""
-        return assess(intent_id, time_window)
+        return assess(intent_id, time_window, source=source)
 
     return server
 
@@ -84,6 +89,7 @@ class AssessRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intent_id: str
     time_window: str
+    source: Literal["graph", "tmf921"] = "graph"
 
 
 @app.get("/context/intent/{intent_id}", dependencies=[_allow_only()])
@@ -100,4 +106,4 @@ def get_metric(device: str, interface: str, metric_type: str, time_window: str) 
 def post_assess(body: AssessRequest, request: Request) -> dict:
     if request.query_params:
         raise HTTPException(422, "Undeclared query parameter(s)")
-    return assess(body.intent_id, body.time_window)
+    return assess(body.intent_id, body.time_window, source=body.source)
