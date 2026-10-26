@@ -132,3 +132,76 @@ def test_no_model_score_input():
     import inspect
     names = set(inspect.signature(ActionProposal).parameters)
     assert not names & {"score", "confidence", "model_score"}
+
+
+# ---- hardening regressions ----
+class Yes(str):
+    __ne__ = lambda s, o: o == ""  # noqa: E731  reviewer probe: != always False-ish
+    __eq__ = lambda s, o: True  # noqa: E731
+    __hash__ = str.__hash__
+
+
+def test_str_subclass_outcome_denied(parts):
+    d = parts[3].evaluate(proposal(expected_outcome=Yes("something else")), NOW)
+    assert not d.allowed
+
+
+@pytest.mark.parametrize("field", ["template_id", "scope", "loop_id"])
+def test_str_subclass_fields_denied(parts, field):
+    class S(str):
+        pass
+    val = S({"template_id": "restart", "scope": "site/a", "loop_id": "L1"}[field])
+    assert not parts[3].evaluate(proposal(**{field: val}), NOW).allowed
+
+
+def test_proposal_subclass_denied(parts):
+    class P(ActionProposal):
+        pass
+    p = P("restart", "site/a", "L1", (env(),), "link_up")
+    assert not parts[3].evaluate(p, NOW).allowed
+
+
+def test_envelope_subclass_and_state_exactness(parts):
+    class E(ContextEnvelope):
+        pass
+    e = E("e", StateCategory.OBSERVED, 1.0, "s", NOW, Quality())
+    assert not parts[3].evaluate(proposal(context=(e,)), NOW).allowed
+    bad = ContextEnvelope("e", "observed", 1.0, "s", NOW, Quality())
+    assert not parts[3].evaluate(proposal(context=(bad,)), NOW).allowed
+    q = ContextEnvelope("e", StateCategory.OBSERVED, 1.0, "s", NOW, Quality(stale=0))
+    assert not parts[3].evaluate(proposal(context=(q,)), NOW).allowed
+
+
+def aged(delta, state=StateCategory.OBSERVED, at="auto"):
+    return ContextEnvelope("e", state, 1.0, "s", NOW - delta if at == "auto" else at, Quality())
+
+
+def test_old_observation_denied_even_if_quality_clean(parts):
+    d = parts[3].evaluate(proposal(context=(aged(timedelta(days=1)),)), NOW)
+    assert not d.allowed and any("fresh" in r for r in d.reasons)
+
+
+def test_freshness_boundaries(parts):
+    g = parts[3]
+    assert g.evaluate(proposal(context=(aged(timedelta(seconds=300)),)), NOW).allowed
+    assert not g.evaluate(proposal(context=(aged(timedelta(seconds=301)),)), NOW).allowed
+    assert g.evaluate(proposal(context=(aged(timedelta(seconds=-5)),)), NOW).allowed
+    assert not g.evaluate(proposal(context=(aged(timedelta(seconds=-6)),)), NOW).allowed
+
+
+def test_missing_or_naive_observed_at_denied(parts):
+    g = parts[3]
+    assert not g.evaluate(proposal(context=(aged(None, at=None),)), NOW).allowed
+    assert not g.evaluate(proposal(context=(aged(None, at=datetime(2026, 1, 1)),)), NOW).allowed
+
+
+def test_configured_old_denied_and_max_age_configurable(parts):
+    cat, res, rec, _ = parts
+    old = aged(timedelta(seconds=600), StateCategory.CONFIGURED)
+    assert not Gate(cat, res, rec).evaluate(proposal(context=(old,)), NOW).allowed
+    assert Gate(cat, res, rec, max_age_s=900).evaluate(proposal(context=(old,)), NOW).allowed
+
+
+def test_naive_now_denied(parts):
+    d = parts[3].evaluate(proposal(), datetime(2026, 1, 1))
+    assert not d.allowed and d.record_id
