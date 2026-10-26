@@ -67,6 +67,10 @@ def check(proposal, template, holder, now: datetime,
     if reasons:
         return reasons
 
+    # A wildcard/traversal scope could dodge exact-string reservations.
+    if any(c in proposal.scope for c in "*?[") or ".." in proposal.scope.split("/"):
+        return ["scope contains wildcard or path-traversal characters"]
+
     if template is None:
         reasons.append("template not approved or unknown")
     elif (not _nonempty_str(template.scope_pattern)

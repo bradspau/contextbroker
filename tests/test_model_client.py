@@ -119,7 +119,19 @@ def test_router_empty_context_ignore():
 
 
 def test_investigation_workers_does_not_import_action_modules():
-    for path in Path(investigation_workers.__file__).parent.glob("*.py"):
-        src = path.read_text()
-        assert "governance_gate" not in src, path
-        assert "action_lifecycle" not in src, path
+    import ast
+
+    forbidden = ("governance_gate", "action_lifecycle")
+    root = Path(investigation_workers.__file__).parent
+    files = list(root.rglob("*.py"))
+    assert files
+    for path in files:
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            for name in names:
+                assert name.split(".")[0] not in forbidden, (path, name)

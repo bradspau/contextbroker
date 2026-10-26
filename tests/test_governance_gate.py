@@ -36,8 +36,16 @@ def test_allow(parts):
     assert isinstance(d, Decision) and d.allowed and d.reasons == ()
     r = rec.get(d.record_id)
     assert r["kind"] == "gate_decision"
-    assert r["payload"] == {"template_id": "restart", "scope": "site/a", "loop_id": "L1",
-                            "allowed": True, "reasons": []}
+    p = r["payload"]
+    assert p["template_id"] == "restart" and p["scope"] == "site/a" and p["loop_id"] == "L1"
+    assert p["allowed"] is True and p["reasons"] == []
+    assert p["template_version"] == "1.0"
+    assert p["evidence"] == [{"entity_id": "e", "state": "observed", "observed_at": NOW.isoformat()}]
+    assert p["reservation_holder"] == "L1"
+    assert p["evaluated_at"] == NOW.isoformat()
+    assert p["max_age_s"] == 300
+    import json
+    json.dumps(p)
 
 
 def test_deny_unknown_template(parts):
@@ -205,3 +213,21 @@ def test_configured_old_denied_and_max_age_configurable(parts):
 def test_naive_now_denied(parts):
     d = parts[3].evaluate(proposal(), datetime(2026, 1, 1))
     assert not d.allowed and d.record_id
+
+
+def test_deny_record_has_reconstruction_fields(parts):
+    _, _, rec, gate = parts
+    d = gate.evaluate(proposal(template_id="nope"), NOW)
+    p = rec.get(d.record_id)["payload"]
+    assert p["allowed"] is False and p["template_version"] is None
+    assert p["reservation_holder"] == "L1"
+    assert p["evidence"][0]["entity_id"] == "e"
+    assert p["evaluated_at"] == NOW.isoformat()
+
+
+@pytest.mark.parametrize("scope", ["site/*", "site/a?", "site/[ab]", "site/../x", ".."])
+def test_deny_wildcard_or_traversal_scope(parts, scope):
+    cat, res, rec, gate = parts
+    res.reserve("L1", scope, 60, NOW)
+    d = gate.evaluate(proposal(scope=scope), NOW)
+    assert not d.allowed and any("wildcard" in r for r in d.reasons)

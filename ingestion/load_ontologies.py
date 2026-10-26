@@ -7,6 +7,8 @@ import requests
 import rdflib
 from pyshacl import validate
 
+from broker_engine.validation import REQUEST_TIMEOUT_S
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TBOX_DIR = REPO_ROOT / "ontologies" / "tbox"
 DEFAULT_SHACL_DIR = REPO_ROOT / "ontologies" / "shacl"
@@ -25,6 +27,7 @@ def load_ttl_to_fuseki(
         data=payload,
         headers={"Content-Type": "text/turtle"},
         auth=auth,
+        timeout=REQUEST_TIMEOUT_S,
     )
     response.raise_for_status()
     return response
