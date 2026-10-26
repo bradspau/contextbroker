@@ -1,3 +1,5 @@
+> Note: this document describes the original single-file build; the repo has since been restructured into layered packages (see README.md).
+
 # Planning: Reproducing the Autonomous Context Broker
 
 **For:** a fresh Claude Code session with no memory of building this the first time.
@@ -40,7 +42,7 @@ docker-compose.yml
 requirements.txt
 .env                    # placeholders, gitignored
 .gitignore
-ontology/topology.ttl
+ontologies/tbox/topology.ttl
 seed_graph.py
 telemetry_simulator.py
 broker.py
@@ -122,7 +124,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 ## Step 2: Ontology and graph seeding
 
-`ontology/topology.ttl`:
+`ontologies/tbox/topology.ttl`:
 ```turtle
 @prefix : <http://example.org/network-ontology#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
@@ -195,7 +197,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 `seed_graph.py`:
 ```python
-"""Loads ontology/topology.ttl into a Fuseki dataset via the Graph Store Protocol."""
+"""Loads ontologies/tbox/topology.ttl into a Fuseki dataset via the Graph Store Protocol."""
 import pathlib
 import sys
 
@@ -549,7 +551,7 @@ if __name__ == "__main__":
 3. `query_tsdb_metrics` parses a mocked VictoriaMetrics vector result into a `float`.
 4. `query_tsdb_metrics` returns `None` when the vector result is empty.
 5. `query_tsdb_metrics` rejects unsafe `device`/`interface`/`time_window` values (parametrized: `"Router-A; DROP"`, `'Gi0/0/0"}'`, `"5m; rm -rf"`).
-6. **Real, unmocked:** load `ontology/topology.ttl` with `rdflib`, call `_build_intent_sparql("intent-core-health-01")`, run that exact query text against the loaded graph, and assert it returns the 2 expected rows. Prove this isn't tautological by checking it would fail on a predicate typo (e.g. temporarily mutate `:onDevice` in a copy of the query and confirm 0 rows).
+6. **Real, unmocked:** load `ontologies/tbox/topology.ttl` with `rdflib`, call `_build_intent_sparql("intent-core-health-01")`, run that exact query text against the loaded graph, and assert it returns the 2 expected rows. Prove this isn't tautological by checking it would fail on a predicate typo (e.g. temporarily mutate `:onDevice` in a copy of the query and confirm 0 rows).
 7. `run_agent` with a fake client: first response has a tool call, mock the tool function, second response is the final answer — assert the tool was called with the right keyword arguments, and the final content is returned.
 8. `run_agent` with a fake client whose first response has no tool calls — returns immediately, one `create()` call.
 9. `run_agent` rejects an LLM-supplied extra kwarg (e.g. `query_endpoint`) on a tool call — assert the real tool function is NOT called with it, and the error is fed back as a `role: "tool"` message rather than raised.

@@ -7,111 +7,104 @@ tool-calling loop (via the Anthropic SDK) to answer questions like
 
 ## Architecture
 
+The repo is a layered Context Broker (spec: `docs/Context-Broker-Updated.md`)
+grown from a single-file compliance agent by a strangler migration. The broker
+engine serves bounded, quality-labelled context; it never decides or acts.
+
 ```mermaid
 flowchart TB
-    User(["User"]) -->|"CLI prompt"| Broker["broker.py<br/>tool-calling agent"]
-    Broker -->|"compliance answer"| User
-    User -->|"browses, click to expand"| LodLive["LodLive :8888<br/>graph explorer UI"]
+    User(["User"]) -->|"CLI prompt"| Harness["agent_harness<br/>(broker.py shim)"]
+    Harness -->|"answer"| User
+    Harness -->|"messages.create()"| Claude["Claude API"]
+    Harness -.->|"on APIConnectionError"| LMStudio["LM Studio (local fallback)"]
 
-    LodLive -->|"SPARQL via JSONP"| Proxy["lodlive-proxy :8081<br/>JSONP-wrapping proxy"]
-    Proxy -->|"forwards query,<br/>wraps callback()"| Fuseki
+    Harness -->|"REST / MCP tools"| Engine["broker_engine :8080<br/>FastAPI: intent, metric, assess"]
+    Engine --> Resolver["sparql_resolver / tsdb_joiner<br/>ContextEnvelope (data_contracts)"]
+    Resolver -->|"SPARQL"| Fuseki["Fuseki :3030"]
+    Resolver -->|"PromQL"| VM["VictoriaMetrics :8428"]
+    Engine --> Assurance["outcome_assurance<br/>deterministic verdict"]
 
-    subgraph LLM["LLM providers"]
-        Claude["Claude API<br/>(Anthropic, primary)"]
-        LMStudio["LM Studio<br/>(local, fallback)"]
-    end
+    Ingest["ingestion.load_ontologies<br/>(SHACL-gated)"] -->|"ontologies/tbox, shacl"| Fuseki
+    Sim["ingestion.telemetry_simulator"] -->|"writes every 5s"| VM
 
-    Broker -->|"messages.create()"| Claude
-    Broker -.->|"on APIConnectionError"| LMStudio
-    Claude -->|"tool_use / final answer"| Broker
-    LMStudio -->|"tool_use / final answer"| Broker
-
-    subgraph Data["Data stores (Docker)"]
-        Fuseki["Fuseki :3030<br/>intent/topology graph"]
-        VM["VictoriaMetrics :8428<br/>telemetry"]
-    end
-
-    Broker -->|"query_intent_state_requirements<br/>(SPARQL)"| Fuseki
-    Broker -->|"query_tsdb_metrics<br/>(PromQL)"| VM
-
-    SeedGraph["seed_graph.py"] -->|"loads ontologies/tbox/topology.ttl"| Fuseki
-    TelemetrySim["telemetry_simulator.py"] -->|"writes every 5s"| VM
+    Gate["governance_gate -> action_lifecycle<br/>(fail-closed, NullController)"]
+    User -->|"browses"| LodLive["LodLive :8888"] --> Proxy["lodlive-proxy :8081"] --> Fuseki
 ```
 
-`broker.py` is the only component that talks to an LLM. It calls two tools —
-`query_intent_state_requirements` (Fuseki) and `query_tsdb_metrics`
-(VictoriaMetrics) — and hands their results to Claude to compare and answer.
-`seed_graph.py` and `telemetry_simulator.py` are one-off/background setup
-scripts that populate the two data stores; they never touch the LLM.
+### Module map
 
-### `broker.py`
+| Package | Responsibility | Spec component |
+|---|---|---|
+| `data_contracts` | `ContextEnvelope` and state-quality labels shared by all layers | Data contracts |
+| `broker_engine` | FastAPI app (`broker_engine.main:app`, REST + MCP), pruner, SPARQL/PromQL resolvers, `assess` | Context broker engine |
+| `outcome_assurance` | Deterministic, three-valued intent verdict (the LLM is not the judge) | Outcome assurance |
+| `agent_harness` | Tool-calling LLM loop (Claude, LM Studio fallback); `broker.py` is a thin CLI shim over it | Agent harness |
+| `ontologies` | `tbox/` topology + intent ontology, `shacl/` shapes | Ontology / knowledge layer |
+| `ingestion` | `load_ontologies` (SHACL-gated load into Fuseki), `telemetry_simulator`, `syslog_parser` | Ingestion |
+| `intent_management` | Intent store | Intent management |
+| `decision_records` | Record store | Decision records |
+| `loop_coordination` | Reservation book to stop concurrent loops acting on the same target | Loop coordination |
+| `artefact_governance` | Action catalogue and model registry | Artefact governance |
+| `governance_gate` | Policy gate (action readiness) and controller interface; only `NullController` exists | Governance gate |
+| `action_lifecycle` | Executor: proposal snapshot, gate check, recheck, fail-closed | Action lifecycle |
+| `investigation_workers` | `model_client` protocol with threshold/router stubs; unapproved models rejected | Investigation workers |
+| `state_reconciliation` | Event reconciler (stub) | State reconciliation |
+| `source_federation`, `platform_services` | Placeholders | Not implemented |
 
-The tool-calling agent — the only script that talks to an LLM.
+### Data flow
 
-- **`query_intent_state_requirements(intent_id)`** — runs a SPARQL `SELECT`
-  against Fuseki for a given intent (e.g. `intent-core-health-01`) and
-  returns its declared target metric, operator, target value, and the
-  `device`/`interface` pairs it applies to. Raises `ValueError` if the
-  intent doesn't exist.
-- **`query_tsdb_metrics(device, interface, metric_type, time_window)`** —
-  runs a PromQL `max_over_time(...)` query against VictoriaMetrics for one
-  interface and returns the observed value over that window, or `None` if
-  there's no data.
-- Both functions validate every argument against a strict allow-list regex
-  (`_validate_token` / `_SAFE_WINDOW`) before it reaches the SPARQL/PromQL
-  string, and reject any tool-call argument the tool's own JSON schema
-  doesn't declare (`_execute_tool`) — this is what stops the LLM from
-  injecting query syntax or redirecting a query to an attacker-controlled
-  endpoint.
-- **`run_agent(user_prompt)`** drives the tool-calling loop: it sends the
-  prompt and `SYSTEM_PROMPT` to Claude (`_run_claude`), executes whatever
-  tools Claude asks for via `_execute_tool`, feeds the results back, and
-  repeats (up to `MAX_ITERATIONS`) until Claude returns a final text
-  answer. If Claude's API is unreachable (`anthropic.APIConnectionError`),
-  it restarts the whole conversation against a local LM Studio server
-  instead (`_run_lmstudio`) — see [Optional: local LM Studio
-  fallback](#optional-local-lm-studio-fallback).
-- Run directly: `python broker.py "<question>"` (or with no argument, it
-  prompts interactively).
+1. `agent_harness` calls the broker engine over REST/MCP tools (`GET /context/intent/{id}`,
+   `GET /context/metric`, `POST /context/assess`).
+2. `broker_engine` resolves declared state from Fuseki and observed state from
+   VictoriaMetrics, wraps each in a `ContextEnvelope` with quality metadata, and prunes it.
+3. `outcome_assurance` computes the compliant / non-compliant / unknown verdict
+   deterministically from the envelopes; the LLM only explains it.
+4. Ontologies are loaded with `python -m ingestion.load_ontologies`, which
+   validates every TBox file against every SHACL shape file first and posts
+   nothing if any violation is found (empty directories are rejected).
+5. Actions go through `governance_gate` and `action_lifecycle`. The gate is
+   fail-closed and the only controller is `NullController`: no real network
+   controller exists, so nothing is ever changed on a device.
 
-### `seed_graph.py`
+### Not implemented
 
-One-off setup script — loads the topology/intent ontology into Fuseki so
-`broker.py` has something to query.
+The spec lists these as candidates needing validation; none are built here:
+Redpanda transport, Qdrant retrieval, OPA/Rego policy (the policy is Python),
+Temporal durable execution, real LQM / System 1 / investigation models (only
+stubs), and real controllers (Nornir, OpenDaylight). `state_reconciliation`
+and the syslog parser are stubs, and the action catalogue is in-memory.
 
-- **`load_ttl_to_fuseki(ttl_path, data_endpoint, auth)`** reads a Turtle
-  (`.ttl`) file and `POST`s its raw bytes to Fuseki's Graph Store Protocol
-  endpoint (`/network-dataset/data`) with HTTP basic auth (`admin`/`admin`
-  by default — matches the `ADMIN_PASSWORD` in `docker-compose.yml`).
-- Run directly: `python seed_graph.py` loads
-  `ontologies/tbox/topology.ttl` (the `intent-core-health-01` requirement) into
-  the default endpoint. Both the file path and the endpoint can be
-  overridden as positional CLI args if you want to load a different
-  ontology or target a different dataset.
+### `broker.py` and `agent_harness`
 
-### `telemetry_simulator.py`
+`broker.py` is a thin CLI shim; the loop lives in `agent_harness`
+(`workflow.run_agent`, `tools.execute_tool`). Run `python broker.py "<question>"`
+(or with no argument it prompts interactively). Tool arguments are validated
+against strict allow-lists and the tools' own JSON schemas, which stops the LLM
+from injecting query syntax or redirecting a query to another endpoint. If
+Claude's API is unreachable (`anthropic.APIConnectionError`) the conversation
+restarts against local LM Studio — see [Optional: local LM Studio
+fallback](#optional-local-lm-studio-fallback).
 
-Background script — generates synthetic interface telemetry and writes it
-to VictoriaMetrics, standing in for a real network monitoring feed.
+### `ingestion/load_ontologies.py`
 
-- **`generate_metrics(rng, inject_drops)`** produces one sample of
-  `in_octets`, `out_octets`, and `input_drops` for one interface.
-  `input_drops` is always `0` unless `inject_drops=True`, in which case
-  there's a ~5% chance per sample of a nonzero value (1–20) — this is what
-  drives the compliant-vs-non-compliant demo.
-- **`format_line_protocol(...)`** / **`build_payload(...)`** format one
-  sample per router (`Router-A`/`GigabitEthernet0/0/0`,
-  `Router-B`/`GigabitEthernet0/0/1`) as InfluxDB line protocol, all tagged
-  under the `interface_metrics` measurement.
-- **`post_metrics(write_endpoint, payload)`** `POST`s that payload to
-  VictoriaMetrics's InfluxDB-compatible write endpoint (`/write`).
-- **`run(...)`** loops forever, posting a fresh batch every
-  `POST_INTERVAL_SECONDS` (5s), unless `--once` is passed.
-- Run directly: `python telemetry_simulator.py` (continuous) or
-  `python telemetry_simulator.py --once` (single batch, for manual
-  verification). Add `--inject-drops` to exercise the non-compliant path.
-  `MEASUREMENT_NAME` (`"interface_metrics"`) is imported by `broker.py` so
-  the two scripts can never disagree on the metric name prefix.
+SHACL-gated loader. `load_ttl_to_fuseki(ttl_path, data_endpoint, auth)` `POST`s a
+Turtle file to Fuseki's Graph Store endpoint (`/network-dataset/data`, basic auth
+`admin`/`admin`, matching `ADMIN_PASSWORD` in `docker-compose.yml`).
+`python -m ingestion.load_ontologies` (options `--tbox-dir`, `--shacl-dir`,
+`--endpoint`) validates then loads `ontologies/tbox/*.ttl`. The legacy
+`python seed_graph.py [ttl] [endpoint]` still works as a shim and loads a single
+file without SHACL validation.
+
+### `ingestion/telemetry_simulator.py`
+
+Generates synthetic interface telemetry for `Router-A`/`GigabitEthernet0/0/0`
+and `Router-B`/`GigabitEthernet0/0/1` (`in_octets`, `out_octets`, `input_drops`)
+as InfluxDB line protocol under the `interface_metrics` measurement and writes it
+to VictoriaMetrics (`/write`) every 5s. `input_drops` is `0` unless
+`--inject-drops` is given (~5% chance of 1-20 per sample), which drives the
+compliant-vs-non-compliant demo. `python -m ingestion.telemetry_simulator`
+(continuous) or with `--once` for a single batch. `MEASUREMENT_NAME` is imported
+by the broker engine so the metric name prefix cannot drift.
 
 ### `lodlive-proxy/jsonp_proxy.py`
 
@@ -139,7 +132,7 @@ A small stdlib-only HTTP proxy that sits in front of Fuseki so the
 ## Prerequisites
 
 - Docker and Docker Compose
-- Python 3.11
+- Python 3.14 (the tested interpreter; the API image uses `python:3.14-slim`)
 - An Anthropic API key (console.anthropic.com)
 
 ## 1. Set up the Python environment
@@ -204,6 +197,9 @@ docker compose up -d
 
 This starts:
 - **VictoriaMetrics** on `localhost:8428` (telemetry storage)
+- **contextbroker-api** on `localhost:8080` (broker engine; OpenAPI docs at
+  `/docs`; endpoints preset for the compose network, override with
+  `FUSEKI_QUERY_ENDPOINT` / `VM_QUERY_ENDPOINT` — see `.env.example`)
 - **Fuseki** on `localhost:3030`, dataset `network-dataset` (intent/topology graph).
   Both images are multi-arch (amd64/arm64), so this works on Apple Silicon and
   other ARM hosts without emulation. The Fuseki admin/query UI is browsable
@@ -212,16 +208,16 @@ This starts:
 Fuseki's write endpoints (`/network-dataset/data`, `/network-dataset/update`)
 require basic auth — username `admin`, password `admin` (set via
 `ADMIN_PASSWORD` in `docker-compose.yml`). The query endpoint
-(`/network-dataset/query`), used by `broker.py`, is unauthenticated.
+(`/network-dataset/query`), used by the broker engine, is unauthenticated.
 
 ## 4. Seed the ontology into Fuseki
 
 ```bash
 source venv/bin/activate
-python seed_graph.py
+python -m ingestion.load_ontologies
 ```
 
-Loads `ontologies/tbox/topology.ttl` — the `intent-core-health-01` requirement
+Validates against `ontologies/shacl` and loads `ontologies/tbox/topology.ttl` — the `intent-core-health-01` requirement
 (zero input drops) on the link between `Router-A`/`GigabitEthernet0/0/0`
 and `Router-B`/`GigabitEthernet0/0/1`.
 
@@ -251,13 +247,13 @@ directly (see `lodlive/lodlive.profile.js` and
 Run once, to check it's working:
 
 ```bash
-python telemetry_simulator.py --once
+python -m ingestion.telemetry_simulator --once
 ```
 
 Run continuously in the background (writes to VictoriaMetrics every 5s):
 
 ```bash
-nohup python telemetry_simulator.py > telemetry.log 2>&1 &
+nohup python -m ingestion.telemetry_simulator > telemetry.log 2>&1 &
 echo $! > telemetry.pid
 ```
 
@@ -268,7 +264,7 @@ By default the simulator emits zero `input_drops` (a compliant demo). Add
 broker report a non-compliant result instead:
 
 ```bash
-python telemetry_simulator.py --inject-drops
+python -m ingestion.telemetry_simulator --inject-drops
 ```
 
 ## 6. Ask the broker
