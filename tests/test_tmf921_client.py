@@ -339,3 +339,37 @@ def test_bounds_nested_uri_list_is_found():
     ttl = PRE + (f'_:c quan:allOf ( ( <{URI}> [ rdf:value "100"^^xsd:decimal ] ) '
                  f'( <{lat}> [ rdf:value "5"^^xsd:decimal ] ) ) .\n')
     assert intent_bounds(_intent(ttl)) == {URI: 100.0, lat: 5.0}
+
+
+# ---------- intent_bounds: complete (HSI-style) intents ----------
+LOGIC = "@prefix log: <http://example.org/logic/> .\n@prefix ex: <http://example.org/ex#> .\n"
+DECL = ("<http://example.org/m#Other> "
+        "<http://tio.models.tmforum.org/tio/v3.6.0/IntentManagementOntology/associatedValueType> "
+        "<http://example.org/Quantity> .\n")
+
+
+def _full(extra=""):
+    return (PRE + LOGIC + "_:a log:allOf ( ex:Check _:c1 ) .\n"
+            "_:m log:match ( ex:Iface ex:state ex:up ) .\n"
+            + cond("atLeast", URI, "100", node="_:c1") + extra)
+
+
+def test_bounds_complete_intent_skips_structural_lists():
+    assert intent_bounds(_intent(_full())) == {URI: 100.0}
+
+
+def test_bounds_allows_metric_declarations():
+    ttl = _full(f"<{URI}> a ex:metric ; <http://tio.models.tmforum.org/tio/v3.6.0/"
+                "IntentManagementOntology/associatedValueType> ex:Quantity .\n")
+    assert intent_bounds(_intent(ttl)) == {URI: 100.0}
+
+
+def test_bounds_still_fails_closed_on_unreadable_condition():
+    # metric-headed list without a value node
+    assert intent_bounds(_intent(_full(f"_:x log:match ( <{URI}> ex:y ) .\n"))) == {}
+    # list carrying rdf:value with three items
+    assert intent_bounds(_intent(_full(
+        f'_:x quan:inRange ( <http://example.org/m#Z> [ rdf:value "1" ] [ rdf:value "2" ] ) .\n'))) == {}
+    # metric used as a non-head list member or object elsewhere
+    assert intent_bounds(_intent(_full(f"_:x log:allOf ( ex:A <{URI}> ) .\n"))) == {}
+    assert intent_bounds(_intent(_full(f"ex:s ex:p <{URI}> .\n"))) == {}

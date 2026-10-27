@@ -20,13 +20,19 @@ from rdflib import BNode, Graph, Literal, URIRef
 from rdflib.namespace import RDF
 
 from broker_engine.validation import REQUEST_TIMEOUT_S, ClientInputError
-from data_contracts.metric_map import ALLOWED_UNITS, check_uri
+from data_contracts.metric_map import ALLOWED_UNITS, broker_metric_for, check_uri
 
 TMF921_BASE_URL = os.environ.get(
     "TMF921_BASE_URL", "http://localhost:8000/tmf-api/intentManagement/v5"
 )
 
 _MAX_TTL_CHARS = 64 * 1024
+# Predicates that merely declare a metric (metric as subject); any other use
+# of a metric URI outside its condition list is unreadable -> fail closed.
+_DECLARATION_PREDICATES = frozenset({
+    RDF.type,
+    URIRef("http://tio.models.tmforum.org/tio/v3.6.0/IntentManagementOntology/associatedValueType"),
+})
 _INTENT_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
 
 
@@ -44,6 +50,9 @@ def intent_bounds(intent) -> dict[str, float]:
     """Metric URI -> numeric bound from an intent's Turtle expression.
 
     Finds every RDF list of exactly two items (URI, node with rdf:value).
+    Other URI-headed lists (log:allOf, log:match, ...) are skipped; a list
+    headed by a known metric or carrying rdf:value that is not exactly that
+    shape is unreadable and gives {}.
     Returns {} on anything unreadable, non-finite, or ambiguous (same metric
     with differing values); never raises.
     """
@@ -62,8 +71,13 @@ def intent_bounds(intent) -> dict[str, float]:
             items = list(g.items(head))
             if not items or not isinstance(items[0], URIRef):
                 continue  # not a condition list (e.g. literal-first)
-            # A URI-headed list must be exactly (URI, node-with-one-rdf:value):
-            # anything else is a condition we cannot read -> fail closed.
+            # A condition is a list headed by a known metric or carrying an
+            # rdf:value. It must be exactly (URI, node-with-one-rdf:value);
+            # anything else is unreadable -> fail closed. Other lists
+            # (log:allOf, log:match, ...) are structure and are skipped.
+            if not (broker_metric_for(str(items[0])) is not None
+                    or any(g.value(i, RDF.value) is not None for i in items[1:])):
+                continue
             if len(items) != 2:
                 return {}
             vals = list(g.objects(items[1], RDF.value))
@@ -82,7 +96,7 @@ def intent_bounds(intent) -> dict[str, float]:
             heads.add(head)
         # A recognised metric URI may appear nowhere else in the expression.
         for s_, p_, o_ in g:
-            if str(s_) in out or str(p_) in out:
+            if str(p_) in out or (str(s_) in out and p_ not in _DECLARATION_PREDICATES):
                 return {}
             if isinstance(o_, URIRef) and str(o_) in out and not (
                     p_ == RDF.first and s_ in heads):
