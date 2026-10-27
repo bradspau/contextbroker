@@ -9,6 +9,7 @@ by other clients (including future-dated ones) cannot be seen. The broker only
 keeps an in-memory per-(intent, metric) high-water mark of what IT pushed and
 refuses to push anything older (or equal with a different value).
 """
+import math
 import re
 import threading
 import time
@@ -99,6 +100,9 @@ def _unpushable(env, ref: datetime) -> str | None:
     q = env.quality
     if q.missing or env.value is None:
         return "missing observation"
+    if isinstance(env.value, bool) or not isinstance(env.value, (int, float)) \
+            or not math.isfinite(env.value):
+        return "invalid observation"
     if q.stale or env.observed_at is None:
         return "stale observation"
     if env.observed_at - ref > FUTURE_SKEW:
@@ -190,7 +194,8 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
     for uri in uris:
         device, interface = binding.sources[uri]
         try:
-            envs[uri] = join(device, interface, mappings[uri].broker_metric, time_window)
+            envs[uri] = join(device, interface, mappings[uri].broker_metric, time_window,
+                              aggregate="last")
         except ClientInputError:
             return rejected("invalid binding")
     all_envs = list(envs.values())

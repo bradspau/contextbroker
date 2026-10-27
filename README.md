@@ -306,7 +306,7 @@ into an image).
    (port 8000, bound to 127.0.0.1).
 3. Create an intent the way `seed_data/seed.sh` in BBF_921_java does, against
    `localhost:8000`. The bound must carry `quan:unit "Mbps"` (inside the bracketed
-   quantity, e.g. `[ rdf:value \"100\"^^xsd:decimal ; quan:unit \"Mbps\" ]`), otherwise the
+   quantity, e.g. `[ rdf:value "100"^^xsd:decimal ; quan:unit "Mbps" ]`), otherwise the
    server reports a unit mismatch. Pattern (placeholders in angle brackets):
    `curl -sf -X POST "$BASE/intent" -H "Content-Type: application/json" -d '{"@type":"Intent","name":"<name>","expression":{"@type":"TurtleExpression","expressionValue":"<turtle>"}}'`
    then activate it:
@@ -320,6 +320,10 @@ into an image).
    HSI metrics to broker metric names such as `downstream_bandwidth_mbps`.
 5. Assess:
    `curl -X POST localhost:8080/context/assess -H 'Content-Type: application/json' -d '{"intent_id":"<id>","time_window":"30m","source":"tmf921"}'`
+
+The value judged on the TMF921 path is the latest sample in the window
+(`last_over_time`), not the window maximum, so an old high value cannot satisfy
+an `atLeast` bound; the graph path keeps `max_over_time`.
 
 Safety behaviour: stale, missing, conflicted, drifted or unpushable evidence gives
 `inconclusive`, never `success`. A partial-evidence assess pushes nothing to the

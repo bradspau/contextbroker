@@ -76,8 +76,9 @@ class FakeClient:
 def make_join(age=10, value=42.0, conflicts=False, missing=False):
     seen = []
 
-    def join(device, interface, metric, window):
+    def join(device, interface, metric, window, **kw):
         seen.append((device, interface, metric, window))
+        join.kw = kw
         obs = None if missing else NOW - timedelta(seconds=age)
         env = build_observed(f"{device}:{interface}", None if missing else value,
                              "victoriametrics", obs, NOW)
@@ -252,7 +253,7 @@ def test_two_metrics_all_pushable_success():
 
 
 def test_two_metrics_one_stale_never_success():
-    def join(device, interface, metric, window):
+    def join(device, interface, metric, window, **kw):
         age = 1000 if metric == "jitter_ms" else 5
         return build_observed(f"{device}:{interface}", 1.0, "vm", NOW - timedelta(seconds=age), NOW)
     c = FakeClient(intent_doc=intent((URI, 100), (URI2, 10)),
@@ -408,7 +409,7 @@ def test_observed_at_reaches_interpret_stale_cap():
 
 
 def test_join_client_input_error_is_invalid_binding():
-    def join(*a):
+    def join(*a, **kw):
         raise ClientInputError("bad")
     out = run(FakeClient(), join)
     assert out["reasons"] == ["invalid binding"]
@@ -494,10 +495,38 @@ def test_oldest_first_server_list_picks_true_newest():
 
 
 def test_input_rejection_paths_not_recorded_and_unknown():
-    def join(*a):
+    def join(*a, **kw):
         raise ClientInputError("bad")
     for out in (run(FakeClient(), join),
                 run(FakeClient(get_exc=ClientInputError("bad"))),
                 run(FakeClient(push_exc=ClientInputError("bad")))):
         assert out["verdict"] == "inconclusive" and out["intent_status"] == "unknown"
         assert src.TMF921_STORE.tracked_count() == 0
+
+
+def test_join_asked_for_last_sample():
+    join = make_join()
+    run(FakeClient(post=[[rep("n", "2026-10-27T12:00:01Z")]]), join)
+    assert join.kw == {"aggregate": "last"}
+
+
+def test_stale_high_window_value_not_pushed():
+    """Window max 150 (20 min ago) vs latest 50: a joiner honouring aggregate='last'
+    returns 50; the old high is never pushed."""
+    def join(device, interface, metric, window, aggregate="max"):
+        value = 50.0 if aggregate == "last" else 150.0
+        return build_observed(f"{device}:{interface}", value, "vm", NOW - timedelta(seconds=60), NOW)
+    c = FakeClient(post=[[rep("n", "2026-10-27T12:00:01Z", "Degraded",
+                              "Conditions not met: atLeast: LatencyMetric: FAIL")]])
+    out = run(c, join)
+    assert c.posts[0][1] == 50.0 and out["verdict"] == "failure"
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), "x", True])
+def test_non_finite_second_metric_means_zero_posts(bad):
+    def join(device, interface, metric, window, **kw):
+        v = bad if metric == "jitter_ms" else 1.0
+        return build_observed(f"{device}:{interface}", v, "vm", NOW - timedelta(seconds=5), NOW)
+    c = two([[rep("a", "2026-10-27T12:00:01Z"), rep("b", "2026-10-27T12:00:02Z")]])
+    out = run(c, join, bindings=BIND2)
+    assert c.posts == [] and out["verdict"] == "inconclusive"

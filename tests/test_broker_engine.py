@@ -150,3 +150,28 @@ def test_safe_token_and_window_reject_trailing_newline():
     with pytest.raises(ClientInputError):
         _validate_token("input_drops\n", "metric")
     assert not _SAFE_WINDOW.match("30m\n")
+
+
+def _join_query(**kw):
+    r = _resp({"data": {"result": [{"value": [TS + 100, "3"]}]}})
+    r2 = _resp({"data": {"result": [{"value": [TS + 100, str(TS)]}]}})
+    now = datetime.fromtimestamp(TS, timezone.utc)
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]) as g:
+        join_observed_metric("r1", "eth0", "utilization", "5m", now=now, **kw)
+    return [c.kwargs["params"]["query"] for c in g.call_args_list]
+
+
+def test_join_default_is_max_over_time():
+    q = _join_query()
+    assert q[0].startswith("max_over_time(") and q[1].startswith("min(tlast_over_time(")
+
+
+def test_join_aggregate_last_uses_last_over_time():
+    q = _join_query(aggregate="last")
+    assert q[0].startswith("last_over_time(") and q[1].startswith("min(tlast_over_time(")
+
+
+def test_join_aggregate_validated():
+    from broker_engine.validation import ClientInputError
+    with pytest.raises(ClientInputError):
+        join_observed_metric("r1", "eth0", "utilization", "5m", aggregate="x}")

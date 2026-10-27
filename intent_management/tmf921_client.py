@@ -55,15 +55,18 @@ def intent_bounds(intent) -> dict[str, float]:
         g = Graph()
         g.parse(data=ttl, format="turtle")
         out: dict[str, float] = {}
+        heads: set = set()
         for _s, p, head in g:
             if p == RDF.rest or not isinstance(head, BNode) or (head, RDF.first, None) not in g:
                 continue
             items = list(g.items(head))
-            if len(items) != 2 or not isinstance(items[0], URIRef):
-                continue
+            if not items or not isinstance(items[0], URIRef):
+                continue  # not a condition list (e.g. literal-first)
+            # A URI-headed list must be exactly (URI, node-with-one-rdf:value):
+            # anything else is a condition we cannot read -> fail closed.
+            if len(items) != 2:
+                return {}
             vals = list(g.objects(items[1], RDF.value))
-            if not vals:
-                continue
             if len(vals) != 1 or not isinstance(vals[0], Literal):
                 return {}
             py = vals[0].toPython()
@@ -76,6 +79,14 @@ def intent_bounds(intent) -> dict[str, float]:
             if uri in out and out[uri] != num:
                 return {}
             out[uri] = num
+            heads.add(head)
+        # A recognised metric URI may appear nowhere else in the expression.
+        for s_, p_, o_ in g:
+            if str(s_) in out or str(p_) in out:
+                return {}
+            if isinstance(o_, URIRef) and str(o_) in out and not (
+                    p_ == RDF.first and s_ in heads):
+                return {}
         return out
     except Exception:
         return {}

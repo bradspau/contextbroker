@@ -6,7 +6,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPOSE_PATH = ROOT / "docker-compose.yml"
-DOCKERFILE = ROOT / "docker" / "tmf921.Dockerfile"
 PREFLIGHT = ROOT / "scripts" / "tmf921_preflight.sh"
 
 DEFAULT_SERVICES = {
@@ -98,6 +97,10 @@ def test_root_dockerignore_blocks_licensed():
     lines = (ROOT / ".dockerignore").read_text().splitlines()
     assert "ontologies/licensed" in lines
     assert "**/ontology/**/*.ttl" in lines
+    git = [l for l in (ROOT / ".gitignore").read_text().splitlines()
+           if l.startswith(("ontologies/tbox", "!ontologies/tbox", "ontologies/**", "docs/spec/TR29",
+                            "docs/spec/TMF921"))]
+    assert git and all(l in lines for l in git)
 
 
 def test_broker_has_tmf921_url():

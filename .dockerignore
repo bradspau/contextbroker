@@ -11,3 +11,8 @@ lodlive/
 .env
 ontologies/licensed
 **/ontology/**/*.ttl
+ontologies/tbox/*.ttl
+!ontologies/tbox/topology.ttl
+ontologies/**/*.zip
+docs/spec/TR29*.pdf
+docs/spec/TMF921*.pdf

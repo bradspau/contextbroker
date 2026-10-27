@@ -24,18 +24,25 @@ def join_observed_metric(
     time_window: str,
     query_endpoint: str = VM_QUERY_ENDPOINT,
     now: datetime | None = None,
+    aggregate: str = "max",
 ) -> ContextEnvelope:
+    """`aggregate` picks the window value: "max" (default, max_over_time) or
+    "last" (last_over_time: the latest sample, which is what observed_at, the
+    time of the last sample, describes)."""
     _validate_token(device, "device")
     _validate_token(interface, "interface")
     _validate_token(metric_type, "metric_type")
     if not _SAFE_WINDOW.match(time_window):
         raise ClientInputError(f"Unsafe time_window: {time_window!r}")
 
+    if aggregate not in ("max", "last"):
+        raise ClientInputError(f"Unsafe aggregate: {aggregate!r}")
+
     selector = (
         f'{MEASUREMENT_NAME}_{metric_type}'
         f'{{device="{device}", interface="{interface}"}}'
     )
-    promql = f'max_over_time({selector}[{time_window}])'
+    promql = f'{aggregate}_over_time({selector}[{time_window}])'
 
     response = requests.get(query_endpoint, params={"query": promql}, timeout=REQUEST_TIMEOUT_S)
     response.raise_for_status()

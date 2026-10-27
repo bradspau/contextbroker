@@ -313,3 +313,29 @@ def test_base_url_env_override(monkeypatch):
     assert fresh().TMF921_BASE_URL == "http://override.invalid/v5"
     monkeypatch.delenv("TMF921_BASE_URL")
     assert fresh().TMF921_BASE_URL == "http://localhost:8000/tmf-api/intentManagement/v5"
+
+
+def test_bounds_inrange_three_item_list_fails_closed():
+    lat = "http://broadband-forum.org/Intent#LatencyMetric"
+    ttl = PRE + cond("atLeast", URI, "100") + (
+        f'_:r quan:inRange ( <{lat}> [ rdf:value "1"^^xsd:decimal ] '
+        f'[ rdf:value "25"^^xsd:decimal ] ) .\n')
+    assert intent_bounds(_intent(ttl)) == {}
+
+
+def test_bounds_extra_uri_in_non_pair_list_fails_closed():
+    lat = "http://broadband-forum.org/Intent#LatencyMetric"
+    ttl = PRE + cond("atLeast", URI, "100") + f'_:r quan:x ( <{lat}> "a" "b" ) .\n'
+    assert intent_bounds(_intent(ttl)) == {}
+
+
+def test_bounds_metric_uri_elsewhere_fails_closed():
+    ttl = PRE + cond("atLeast", URI, "100") + f'_:r quan:about <{URI}> .\n'
+    assert intent_bounds(_intent(ttl)) == {}
+
+
+def test_bounds_nested_uri_list_is_found():
+    lat = "http://broadband-forum.org/Intent#LatencyMetric"
+    ttl = PRE + (f'_:c quan:allOf ( ( <{URI}> [ rdf:value "100"^^xsd:decimal ] ) '
+                 f'( <{lat}> [ rdf:value "5"^^xsd:decimal ] ) ) .\n')
+    assert intent_bounds(_intent(ttl)) == {URI: 100.0, lat: 5.0}
