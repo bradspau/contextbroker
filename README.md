@@ -1,9 +1,101 @@
 # Autonomous Context Broker
 
-Compares live network telemetry (VictoriaMetrics) against declared intent
-requirements (an OWL/RDFS graph in Apache Jena Fuseki), using Claude's
-tool-calling loop (via the Anthropic SDK) to answer questions like
-*"Is intent-core-health-01 compliant right now?"*
+A context broker for intent-driven network operations. It answers one question
+well: *"what is the state of this thing, how trustworthy is that answer, and does
+it meet the declared intent?"*, for example *"Is intent-core-health-01 compliant
+right now?"*
+
+## What it is trying to achieve
+
+The design principle (spec: `docs/Context-Broker-Updated.md`) is:
+
+> AI proposes; the action-readiness check authorises; controllers execute; assurance verifies.
+
+- **The broker resolves, joins, qualifies and delivers context. It never decides
+  or acts.** It joins declared state (an OWL/RDFS graph in Apache Jena Fuseki) with
+  observed state (telemetry in VictoriaMetrics) and wraps each result in a
+  `ContextEnvelope` that carries quality labels (`stale`, `missing`, `conflicts`) and
+  provenance.
+- **The LLM is not the judge.** A deterministic assurance layer returns
+  `success`, `failure` or `inconclusive`. Stale, missing, conflicted, drifted or
+  unmappable evidence is never `success`. The LLM only explains the verdict.
+- **Refuse unless proven safe.** Anything that could change a network goes through
+  the action-readiness check (`governance_gate`) and the executor
+  (`action_lifecycle`). The action-readiness check fails closed on the things it
+  tests: if the evidence is stale, missing or conflicting, the template is not in the
+  catalogue, the scope does not match, or the loop holds no reservation, the action is
+  refused. It does not yet test identity, approval or validation readiness, so it
+  cannot refuse for those.
+- **Optionally verify against an external TMF921 intent server**
+  ([BBF_921_java](https://github.com/bradspau/BBF_921_java)) so the broker's
+  fresh evidence is judged by an independent intent engine.
+
+It grew from a single-file compliance agent (`broker.py`) into the layered
+structure below by a strangler migration.
+
+## Current state
+
+| Area | Status |
+|---|---|
+| Context envelope, resolvers (SPARQL and PromQL), pruning, freshness handling | Built, unit-tested |
+| Deterministic outcome assurance (`success`/`failure`/`inconclusive`) | Built, unit-tested |
+| REST API (`/context/intent/{id}`, `/context/metric`, `/context/assess`) | Built, unit-tested. Unauthenticated. |
+| Agent harness (Claude tool-calling loop, LM Studio fallback, `broker.py` CLI) | Built, tested with mocks |
+| MCP server | Built and unit-tested, **not mounted** or served by anything |
+| Action-readiness check (`governance_gate`) and executor (`action_lifecycle`) | A library only. The check fails closed on evidence freshness, catalogue membership, scope and loop reservation; it does not test identity or approval. The only controller is `NullController`, so nothing is ever changed on a device. No runtime path submits a proposal. |
+| TMF921 verification (`"source":"tmf921"`) | Built. Pushes fresh observations to the intent server, reads its reports, and maps them to a verdict. Opt-in. The default `graph` path is unchanged. |
+| Intent / decision / loop / artefact stores | In-memory |
+| LQM, System 1 / investigation models, state reconciliation, syslog parsing | Stubs |
+| Redpanda, Qdrant, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
+
+The test suite has 488 tests (`pytest`). The work is on local `master` and has
+not been pushed or reviewed upstream.
+
+## Demo status
+
+What has been run, and what has not.
+
+**Verified live (containers, TMF921 path).** Against a running `tmf921-server`
+container, with samples written into VictoriaMetrics:
+
+| Scenario | Result |
+|---|---|
+| Fresh value above the bound | `success` |
+| Fresh value below the bound | `failure` |
+| Sample 10 minutes old | `inconclusive` ("stale observation"), nothing pushed |
+| Two conflicting series | `inconclusive` ("conflicting observation"), nothing pushed |
+| Re-assess after a `failure` | `inconclusive` ("intent bound drifted") |
+
+**Not turnkey.**
+- The telemetry simulator does not emit the five HSI metrics
+  (`downstream_bandwidth_mbps`, `upstream_bandwidth_mbps`, `latency_ms`,
+  `jitter_ms`, `packet_loss_percent`), so the TMF921 demo needs samples written to
+  VictoriaMetrics directly.
+- The first assess on a new series can read "missing" for a few seconds
+  (VictoriaMetrics lag).
+- The TMF921 server needs the licensed TM Forum ontology files, which are not in
+  this repo. Mount them read-only from your own copy (see below).
+
+**Not yet run.**
+- The LLM agent (`broker.py`) end to end with a real API key. It is tested with
+  mocks only.
+- A live assess of a *complete* HSI intent (with `log:allOf` / `log:match` parts)
+  on the server. The bound reader handles both demo `.ttl` files in unit tests
+  only.
+
+**Known limits of the demo.**
+- After any Degraded evaluation the TMF921 server rewrites the intent's stored
+  bound, so the intent must be re-created and re-pinned to assess again.
+- Every `tmf921` assess writes observations to the intent server, and
+  `POST /context/assess` has no authentication. Do not expose port 8080.
+- Locks and high-water marks are in-process: run a single broker process.
+- Observations pushed by other clients are invisible to the broker.
+
+## Licensing
+
+The TM Forum TIO ontology files and the TR290-292 / TMF921 PDFs are licensed.
+They are git-ignored, never committed, never baked into an image, and only
+bind-mounted read-only into `tmf921-server` at runtime.
 
 ## Architecture
 
@@ -27,7 +119,7 @@ flowchart TB
     Ingest["ingestion.load_ontologies<br/>(SHACL-gated)"] -->|"ontologies/tbox, shacl"| Fuseki
     Sim["ingestion.telemetry_simulator"] -->|"writes every 5s"| VM
 
-    Gate["governance_gate -> action_lifecycle<br/>(fail-closed, NullController)"]
+    Gate["governance_gate -> action_lifecycle<br/>(refuses on unmet checks, NullController)"]
     User -->|"browses"| LodLive["LodLive :8888"] --> Proxy["lodlive-proxy :8081"] --> Fuseki
 ```
 
@@ -45,8 +137,8 @@ flowchart TB
 | `decision_records` | Record store | Decision records |
 | `loop_coordination` | Reservation book to stop concurrent loops acting on the same target | Loop coordination |
 | `artefact_governance` | Action catalogue and model registry | Artefact governance |
-| `governance_gate` | Policy gate (action readiness) and controller interface; only `NullController` exists | Governance gate |
-| `action_lifecycle` | Executor: proposal snapshot, gate check, recheck, fail-closed | Action lifecycle |
+| `governance_gate` | Action-readiness check and controller interface; only `NullController` exists | Governance gate |
+| `action_lifecycle` | Executor: proposal snapshot, readiness check, recheck; the executor fails closed | Action lifecycle |
 | `investigation_workers` | `model_client` protocol with threshold/router stubs; unapproved models rejected | Investigation workers |
 | `state_reconciliation` | Event reconciler (stub) | State reconciliation |
 | `source_federation`, `platform_services` | Placeholders | Not implemented |
@@ -69,13 +161,13 @@ flowchart TB
    validates every TBox file against every SHACL shape file first and posts
    nothing if any violation is found (empty directories are rejected).
 5. `governance_gate` and `action_lifecycle` are a library only: no runtime path builds
-   or submits an `ActionProposal`. The gate is fail-closed and the only controller is
+   or submits an `ActionProposal`. The action-readiness check fails closed on the things it tests, and the only controller is
    `NullController`, so nothing is ever changed on a device. The executor's "recheck"
    re-ages the evidence and re-checks the reservation and catalogue; it does NOT re-read
    current network state, and `ActionTemplate.preconditions` are not evaluated. The
-   gate also does not implement identity, approval or validation-readiness checks from
+   check also does not implement identity, approval or validation-readiness checks from
    the spec.
-6. Freshness is fail-closed: a telemetry value whose last-sample time cannot be
+6. The freshness check fails closed: a telemetry value whose last-sample time cannot be
    established (timestamp query fails, is empty or unparseable) is marked
    `quality.stale`, and across several matching series the oldest sample is judged.
 7. `stateCategory`, `validFrom` and `validTo` are declared in the TBox/SHACL but are
@@ -336,7 +428,7 @@ run a single broker process. Observations pushed by other clients are invisible 
 Known behaviours / troubleshooting:
 - The first assess right after a new series appears can return `inconclusive`
   "missing observation": VictoriaMetrics does not expose very recent samples
-  immediately (observed live, about 2-15 s). Retry; it fails closed.
+  immediately (observed live, about 2-15 s). Retry; the TMF921 assess fails closed (returns `inconclusive`) in the meantime.
 - If `HOST_INTENT_BINDINGS` points at a file that does not exist before
   `docker compose up`, Docker creates a DIRECTORY there and every tmf921 assess
   returns 200 `inconclusive` "invalid binding" with no detail. Create the file first
