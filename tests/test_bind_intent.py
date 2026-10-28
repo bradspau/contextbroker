@@ -2,6 +2,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 import rdflib
 
 from ingestion import bind_intent
@@ -34,7 +35,8 @@ def _ok_post():
     return r
 
 
-def _run(tmp_path, args, *, iris=(IFACE_IRI,), intent=INTENT, client_exc=None):
+def _run(tmp_path, args, *, iris=(IFACE_IRI,), intent=INTENT, client_exc=None,
+         existing=False, update_fails=False, query_json=None):
     """Run main() with the TMF921 client and requests mocked."""
     client = Mock()
     if client_exc:
@@ -45,7 +47,23 @@ def _run(tmp_path, args, *, iris=(IFACE_IRI,), intent=INTENT, client_exc=None):
 
     def fake_post(url, **kw):
         posts.append((url, kw))
-        return _sparql_reply(iris) if url.endswith("/query") else _ok_post()
+        if url.endswith("/update"):
+            if update_fails:
+                raise requests.ConnectionError("x")
+            return _ok_post()
+        if url.endswith("/query"):
+            if "ServiceBinding" in kw["data"]["query"]:
+                r = Mock()
+                r.raise_for_status = Mock()
+                r.json.return_value = {"results": {"bindings": [{"b": {}}] if existing else []}}
+                return r
+            if query_json is not None:
+                r = Mock()
+                r.raise_for_status = Mock()
+                r.json.return_value = query_json
+                return r
+            return _sparql_reply(iris)
+        return _ok_post()
 
     with patch.object(bind_intent, "Tmf921Client", return_value=client), \
             patch("requests.post", side_effect=fake_post):
@@ -76,14 +94,14 @@ def test_render_refuses_metric_without_placement():
 def test_refuses_when_bounds_unreadable(tmp_path):
     code, posts = _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0"], intent={"expression": {}})
     assert code != 0
-    assert posts == []
+    assert _writes(posts) == []
     assert not (tmp_path / "abox").exists()
 
 
 def test_refuses_when_a_metric_has_no_placement(tmp_path):
     code, posts = _run(tmp_path, [])
     assert code != 0
-    assert posts == []
+    assert _writes(posts) == []
     assert not (tmp_path / "abox").exists()
 
 
@@ -100,7 +118,7 @@ def test_writes_nothing_on_refusal(tmp_path):
                  ["--place", "LatencyMetric=ol't1/pon0"]):
         code, posts = _run(tmp_path, args)
         assert code != 0
-        assert posts == []
+        assert _writes(posts) == []
         assert not (tmp_path / "abox").exists()
 
 
@@ -156,7 +174,7 @@ def test_load_failure_is_reported_as_written_not_loaded(tmp_path, capsys):
 
     def fake_post(url, **kw):
         if url.endswith("/query"):
-            return _sparql_reply([IFACE_IRI])
+            return _sparql_reply([] if "ServiceBinding" in kw["data"]["query"] else [IFACE_IRI])
         raise rq.ConnectionError("boom-secret")
 
     with patch.object(bind_intent, "Tmf921Client", return_value=client), \
@@ -166,3 +184,80 @@ def test_load_failure_is_reported_as_written_not_loaded(tmp_path, capsys):
     err = capsys.readouterr().err
     assert code == 1
     assert "did not accept" in err and "boom-secret" not in err
+
+
+def _writes(posts):
+    return [p for p in posts if not p[0].endswith("/query")]
+
+
+def test_refuses_existing_binding_without_replace(tmp_path, capsys):
+    code, posts = _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0"], existing=True)
+    assert code != 0
+    assert _writes(posts) == []
+    assert not (tmp_path / "abox").exists()
+    assert "--replace" in capsys.readouterr().err
+
+
+def test_replace_deletes_then_posts_in_order(tmp_path):
+    code, posts = _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0", "--replace"], existing=True)
+    assert code == 0
+    w = _writes(posts)
+    assert [u.rsplit("/", 1)[1] for u, _ in w] == ["update", "data"]
+    update = w[0][1]["data"].decode()
+    assert 'ServiceBinding' in update and '"intent-1"' in update
+    assert "olt1" not in update and "pon0" not in update
+    assert w[0][1]["headers"]["Content-Type"] == "application/sparql-update"
+    assert (tmp_path / "abox" / "intent-1.ttl").exists()
+
+
+def test_replace_delete_failure_writes_and_posts_nothing(tmp_path):
+    code, posts = _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0", "--replace"],
+                       existing=True, update_fails=True)
+    assert code != 0
+    assert [u.rsplit("/", 1)[1] for u, _ in _writes(posts)] == ["update"]
+    assert not (tmp_path / "abox").exists()
+
+
+def test_write_only_replace_never_deletes(tmp_path):
+    code, posts = _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0", "--replace", "--write-only"],
+                       existing=True)
+    assert code == 0
+    assert _writes(posts) == []
+    assert (tmp_path / "abox" / "intent-1.ttl").exists()
+
+
+def test_malformed_sparql_json_is_refused(tmp_path, capsys):
+    code, posts = _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0"], query_json={"nope": 1})
+    assert code != 0
+    assert not (tmp_path / "abox").exists()
+    assert "Refused" in capsys.readouterr().err
+
+
+def test_metric_map_error_is_refused(tmp_path, capsys):
+    with patch.object(bind_intent, "load_metric_map", side_effect=ValueError("secret")):
+        code, _ = _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0"])
+    err = capsys.readouterr().err
+    assert code != 0 and "Refused" in err and "secret" not in err
+    assert not (tmp_path / "abox").exists()
+
+
+def test_shacl_parse_error_is_refused(tmp_path, capsys):
+    with patch.object(bind_intent, "validate_shapes", side_effect=Exception("parse")):
+        code, posts = _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0"])
+    assert code != 0 and "Refused" in capsys.readouterr().err
+    assert _writes(posts) == []
+    assert not (tmp_path / "abox").exists()
+
+
+def test_render_unusable_uri_raises_binderror():
+    with pytest.raises(BindError):
+        render_binding("intent-1", {"not a uri": 1.0}, {"not a uri": ("a", "b")}, {("a", "b"): IFACE_IRI})
+
+
+@pytest.mark.parametrize("value", [0.1, 99.95])
+def test_pin_roundtrips_non_integer_bounds(value):
+    ttl = render_binding("intent-1", {LAT: value}, {LAT: ("olt1", "pon0")},
+                         {("olt1", "pon0"): IFACE_IRI})
+    g = rdflib.Graph().parse(data=ttl, format="turtle")
+    ns = rdflib.Namespace("http://example.org/network-ontology#")
+    assert g.value(ns["binding-intent-1-LatencyMetric"], ns.pinnedBound).toPython() == value

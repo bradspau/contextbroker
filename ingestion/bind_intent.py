@@ -65,13 +65,19 @@ def render_binding(intent_id, bounds, placements, interface_iris) -> str:
              "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .", ""]
     names = set()
     for uri, bound in sorted(bounds.items()):
-        check_uri(uri)
+        try:
+            check_uri(uri)
+        except ValueError:
+            raise BindError("a metric URI is not usable") from None
         if uri not in placements:
             raise BindError(f"no placement for {_short_name(uri)}")
         iri = interface_iris.get(placements[uri])
         if iri is None:
             raise BindError(f"no interface for {_short_name(uri)}")
-        check_uri(iri, "interface iri")
+        try:
+            check_uri(iri, "interface iri")
+        except ValueError:
+            raise BindError("the interface IRI in the graph is not usable") from None
         name = _binding_name(intent_id, uri)
         if name in names:
             raise BindError("two metrics share a short name")
@@ -96,8 +102,6 @@ def parse_place(spec: str) -> tuple[str, str, str]:
         _check_token(iface, "interface")
     except ValueError:
         raise BindError(f"unsafe value in --place: {spec!r}") from None
-    if "/" in device:
-        raise BindError(f"unsafe value in --place: {spec!r}")
     return short, device, iface
 
 
@@ -115,8 +119,11 @@ def find_interface(device: str, iface: str, query_endpoint: str) -> str:
                          headers={"Accept": "application/sparql-results+json"},
                          timeout=REQUEST_TIMEOUT_S)
     resp.raise_for_status()
-    rows = resp.json()["results"]["bindings"]
-    iris = {r["i"]["value"] for r in rows if r.get("i", {}).get("type") == "uri"}
+    try:
+        rows = resp.json()["results"]["bindings"]
+        iris = {r["i"]["value"] for r in rows if r["i"]["type"] == "uri"}
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise BindError("the network graph returned an unusable answer") from None
     if not iris:
         raise BindError(f"interface {device}/{iface} is not in the topology")
     if len(iris) > 1:
@@ -124,15 +131,70 @@ def find_interface(device: str, iface: str, query_endpoint: str) -> str:
     return iris.pop()
 
 
+def _post_sparql(query_endpoint, sparql):
+    resp = requests.post(query_endpoint, data={"query": sparql},
+                         headers={"Accept": "application/sparql-results+json"},
+                         timeout=REQUEST_TIMEOUT_S)
+    resp.raise_for_status()
+    try:
+        return resp.json()["results"]["bindings"]
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise BindError("the network graph returned an unusable answer") from None
+
+
+def binding_exists(intent_id: str, query_endpoint: str) -> bool:
+    _check_intent_id(intent_id)  # only the validated id enters the query
+    rows = _post_sparql(query_endpoint, f"""
+    PREFIX : <{NS}>
+    SELECT ?b WHERE {{ ?b a :ServiceBinding ; :forIntent "{intent_id}" . }}
+    """)
+    return bool(rows)
+
+
+def delete_bindings(intent_id: str, update_endpoint: str, auth=("admin", "admin")) -> None:
+    """Delete every :ServiceBinding node for the intent, with all its triples."""
+    _check_intent_id(intent_id)
+    update = f"""
+    PREFIX : <{NS}>
+    DELETE {{ ?b ?p ?o }} WHERE {{
+      ?b a :ServiceBinding ; :forIntent "{intent_id}" ; ?p ?o .
+    }}
+    """
+    try:
+        resp = requests.post(update_endpoint, data=update.encode("utf-8"),
+                             headers={"Content-Type": "application/sparql-update"},
+                             auth=auth, timeout=REQUEST_TIMEOUT_S)
+        resp.raise_for_status()
+    except requests.RequestException:
+        raise BindError("the existing binding could not be deleted") from None
+
+
+def derive_update_endpoint(data_endpoint: str) -> str:
+    base = data_endpoint.rstrip("/")
+    return (base[: -len("/data")] if base.endswith("/data") else base) + "/update"
+
+
 def bind(intent_id, place_specs, *, abox_dir=DEFAULT_ABOX_DIR, write_only=False,
          query_endpoint=FUSEKI_QUERY_ENDPOINT, data_endpoint=DEFAULT_DATA_ENDPOINT,
-         client=None) -> tuple[Path, bool]:
-    """Returns (path written, loaded). Raises BindError before writing anything."""
+         client=None, replace=False, update_endpoint=None) -> tuple[Path, bool]:
+    """Returns (path written, loaded). Raises BindError before writing anything.
+
+    An existing binding for the intent is refused unless replace is set. With
+    replace (and not write_only) the old binding nodes are deleted from the
+    network graph after the new one validates and before anything is written.
+    write_only only reads Fuseki, so it never deletes.
+    """
     _check_intent_id(intent_id)
+    exists = binding_exists(intent_id, query_endpoint)
+    if exists and not replace:
+        raise BindError("a binding for this intent already exists; use --replace to replace it")
     bounds = intent_bounds((client or Tmf921Client()).get_intent(intent_id))
     if not bounds:
         raise BindError("the intent's bounds could not be read")
-    mmap = load_metric_map()
+    try:
+        mmap = load_metric_map()
+    except ValueError:
+        raise BindError("the metric map could not be read") from None
     by_short: dict[str, list[str]] = {}
     for uri in bounds:
         by_short.setdefault(_short_name(uri), []).append(uri)
@@ -160,9 +222,15 @@ def bind(intent_id, place_specs, *, abox_dir=DEFAULT_ABOX_DIR, write_only=False,
         probe = Path(tmp) / "binding.ttl"
         probe.write_text(ttl, encoding="utf-8")
         for s in shapes:
-            ok, _report = validate_shapes(probe, s)
+            try:
+                ok, _report = validate_shapes(probe, s)
+            except Exception:
+                raise BindError("the binding could not be validated") from None
             if not ok:
                 raise BindError("the binding failed SHACL validation")
+
+    if exists and replace and not write_only:
+        delete_bindings(intent_id, update_endpoint or derive_update_endpoint(data_endpoint))
 
     out_dir = Path(abox_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -185,11 +253,20 @@ def main(argv=None) -> int:
                     metavar="METRIC=DEVICE/INTERFACE")
     ap.add_argument("--write-only", action="store_true")
     ap.add_argument("--abox-dir", type=Path, default=DEFAULT_ABOX_DIR)
-    ap.add_argument("--endpoint", default=DEFAULT_DATA_ENDPOINT)
+    ap.add_argument("--endpoint", default=DEFAULT_DATA_ENDPOINT, help="Fuseki data endpoint")
+    ap.add_argument("--query-endpoint", default=FUSEKI_QUERY_ENDPOINT,
+                    help="Fuseki query endpoint (default FUSEKI_QUERY_ENDPOINT)")
+    ap.add_argument("--update-endpoint", default=None,
+                    help="Fuseki update endpoint (default: derived from --endpoint)")
+    ap.add_argument("--replace", action="store_true",
+                    help="replace an existing binding for the intent (deletes the old one "
+                         "from Fuseki first; with --write-only nothing is deleted)")
     args = ap.parse_args(argv)
     try:
         out, loaded = bind(args.intent_id, args.place, abox_dir=args.abox_dir,
-                           write_only=args.write_only, data_endpoint=args.endpoint)
+                           write_only=args.write_only, data_endpoint=args.endpoint,
+                           query_endpoint=args.query_endpoint, replace=args.replace,
+                           update_endpoint=args.update_endpoint)
     except LoadError as exc:
         print(f"Wrote {exc.path} but the network graph did not accept it. "
               "Nothing was loaded; fix the cause and load the file again.", file=sys.stderr)

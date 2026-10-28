@@ -24,7 +24,7 @@ print(json.dumps({"@type": "Intent", "name": sys.argv[2],
                   "expression": {"@type": "TurtleExpression", "expressionValue": ttl}}))
 ' "$ttl_path" "$name")"
 
-if ! response="$(curl -sf -X POST "$base/intent" -H "Content-Type: application/json" -d "$body")"; then
+if ! response="$(printf '%s' "$body" | curl -sf -X POST "$base/intent" -H "Content-Type: application/json" --data-binary @-)"; then
   echo "error: the intent server refused or could not be reached at $base" >&2
   exit 1
 fi
