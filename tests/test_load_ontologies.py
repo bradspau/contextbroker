@@ -149,6 +149,24 @@ def test_non_numeric_pin_is_rejected(tmp_path):
     assert "pinnedBound" in report
 
 
+def test_integer_pin_is_rejected(tmp_path):
+    ok, report = validate_shapes(_abox_file(tmp_path, _binding(pins=("5",))), SHAPES)
+    assert ok is False
+    assert "pinnedBound" in report
+
+
+def test_service_binding_shape_rejects_missing_intent(tmp_path):
+    ok, report = validate_shapes(_abox_file(tmp_path, _binding(forIntent=False)), SHAPES)
+    assert ok is False
+    assert "forIntent" in report
+
+
+def test_service_binding_shape_rejects_missing_metric(tmp_path):
+    ok, report = validate_shapes(_abox_file(tmp_path, _binding(forMetric=False)), SHAPES)
+    assert ok is False
+    assert "forMetric" in report
+
+
 def test_abox_failure_loads_nothing(tmp_path):
     _abox_file(tmp_path, _binding(iface=False))
     with patch("requests.post") as post:
