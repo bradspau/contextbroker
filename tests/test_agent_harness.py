@@ -482,3 +482,66 @@ def test_execute_tool_routes_tmf921_source():
 def test_system_prompt_mentions_tmf921_rule():
     assert "source=tmf921" in tools.SYSTEM_PROMPT
     assert 'assess_intent(intent_id, time_window, source="graph"|"tmf921"' in tools.SYSTEM_PROMPT
+
+
+# ---------- LLM_BACKEND switch ----------
+@pytest.fixture(autouse=True)
+def _default_backend(monkeypatch):
+    # load_dotenv() never overrides a variable that is already set, so a
+    # developer's .env cannot change which backend these tests exercise.
+    monkeypatch.setenv("LLM_BACKEND", "claude")
+
+
+def _lm_final(text):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=None))]
+    )
+
+
+def test_backend_lmstudio_never_contacts_claude(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "lmstudio")
+    fake_claude = Mock()
+    fake_lm = Mock()
+    fake_lm.chat.completions.create.return_value = _lm_final("local answer")
+
+    with patch.object(workflow, "_build_client") as build_claude:
+        result = run_agent("q", client=fake_claude, model="m",
+                           fallback_client=fake_lm, fallback_model="local-model")
+
+    assert result == "local answer"
+    fake_claude.messages.create.assert_not_called()
+    build_claude.assert_not_called()
+    assert fake_lm.chat.completions.create.call_args.kwargs["model"] == "local-model"
+
+
+def test_backend_lmstudio_requires_model(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "lmstudio")
+    monkeypatch.delenv("LMSTUDIO_MODEL", raising=False)
+    with patch.object(workflow, "load_dotenv"), pytest.raises(RuntimeError, match="LMSTUDIO_MODEL"):
+        run_agent("q", fallback_client=Mock())
+
+
+def test_backend_lmstudio_reads_model_from_env(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "lmstudio")
+    monkeypatch.setenv("LMSTUDIO_MODEL", "env-model")
+    fake_lm = Mock()
+    fake_lm.chat.completions.create.return_value = _lm_final("ok")
+    run_agent("q", fallback_client=fake_lm)
+    assert fake_lm.chat.completions.create.call_args.kwargs["model"] == "env-model"
+
+
+@pytest.mark.parametrize("value", ["openai", "LM STUDIO", "lmstudio;claude"])
+def test_backend_unknown_value_is_rejected(monkeypatch, value):
+    monkeypatch.setenv("LLM_BACKEND", value)
+    fake_claude = Mock()
+    with pytest.raises(ValueError, match="LLM_BACKEND"):
+        run_agent("q", client=fake_claude, model="m")
+    fake_claude.messages.create.assert_not_called()
+
+
+@pytest.mark.parametrize("value", ["", "  ", "Claude"])
+def test_backend_blank_or_mixed_case_uses_claude(monkeypatch, value):
+    monkeypatch.setenv("LLM_BACKEND", value)
+    fake_claude = Mock()
+    fake_claude.messages.create.return_value = _response([_text_block("claude answer")])
+    assert run_agent("q", client=fake_claude, model="m") == "claude answer"

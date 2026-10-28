@@ -93,6 +93,25 @@ def _run_lmstudio(user_prompt: str, client: OpenAI, model: str) -> str:
     return f"Unable to reach a final answer after {MAX_ITERATIONS} tool-calling iterations."
 
 
+def _lmstudio_model(fallback_model: str | None, reason: str) -> str:
+    if fallback_model:
+        return fallback_model
+    load_dotenv()
+    model = os.environ.get("LMSTUDIO_MODEL")
+    if not model:
+        raise RuntimeError(f"{reason} and LMSTUDIO_MODEL is not set in .env — "
+                           "cannot use LM Studio.") from None
+    return model
+
+
+def _backend() -> str:
+    load_dotenv()
+    backend = os.environ.get("LLM_BACKEND", "claude").strip().lower() or "claude"
+    if backend not in ("claude", "lmstudio"):
+        raise ValueError(f"LLM_BACKEND must be 'claude' or 'lmstudio', got {backend!r}")
+    return backend
+
+
 def run_agent(
     user_prompt: str,
     client: anthropic.Anthropic | None = None,
@@ -100,6 +119,15 @@ def run_agent(
     fallback_client: OpenAI | None = None,
     fallback_model: str | None = None,
 ) -> str:
+    """LLM_BACKEND=claude (default): Claude, falling back to LM Studio when its
+    API is unreachable. LLM_BACKEND=lmstudio: LM Studio only, Claude is never
+    contacted. Any other value raises ValueError."""
+    if _backend() == "lmstudio":
+        lm_model = _lmstudio_model(fallback_model, "LLM_BACKEND=lmstudio")
+        if fallback_client is None:
+            fallback_client = _build_lmstudio_client()
+        return _run_lmstudio(user_prompt, fallback_client, lm_model)
+
     if client is None:
         client = _build_client()
     if model is None:
@@ -112,14 +140,7 @@ def run_agent(
         # Claude's API is unreachable (network/DNS/timeout) — fall back to a
         # local LM Studio server. Auth and rate-limit errors are NOT caught
         # here, so a misconfigured API key still fails loudly.
+        lm_model = _lmstudio_model(fallback_model, "Claude API is unreachable")
         if fallback_client is None:
             fallback_client = _build_lmstudio_client()
-        if fallback_model is None:
-            load_dotenv()
-            fallback_model = os.environ.get("LMSTUDIO_MODEL")
-            if not fallback_model:
-                raise RuntimeError(
-                    "Claude API is unreachable and LMSTUDIO_MODEL is not set in .env — "
-                    "cannot fall back to LM Studio."
-                ) from None
-        return _run_lmstudio(user_prompt, fallback_client, fallback_model)
+        return _run_lmstudio(user_prompt, fallback_client, lm_model)

@@ -280,6 +280,17 @@ LMSTUDIO_BASE_URL=http://<lm-studio-host>:1234/v1
 LMSTUDIO_MODEL=<model-name-as-shown-in-lm-studio>
 ```
 
+To use LM Studio **instead of** Claude (Claude is then never contacted, and no
+Anthropic key is needed), also set:
+
+```
+LLM_BACKEND=lmstudio
+```
+
+`LLM_BACKEND` is `claude` (default; Claude with the LM Studio fallback below) or
+`lmstudio`. Any other value raises an error. With `lmstudio`, `LMSTUDIO_MODEL` is
+required. The model must support OpenAI-style tool calling.
+
 `LMSTUDIO_BASE_URL` defaults to `http://localhost:1234/v1` if unset.
 `LMSTUDIO_MODEL` has no default — the fallback raises a clear error if it's
 unset when Claude is unreachable, rather than guessing a model name.
