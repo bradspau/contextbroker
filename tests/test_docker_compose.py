@@ -20,7 +20,18 @@ def test_docker_compose_defines_victoriametrics_and_fuseki():
     fuseki_command = services["fuseki"]["command"]
     assert isinstance(fuseki_command, list)
     assert fuseki_command[0] == "java"
-    assert fuseki_command[-3:] == ["--update", "--mem", "/network-dataset"]
+    assert fuseki_command[-1] == "/network-dataset"
+    assert "--update" in fuseki_command
+
+
+def test_fuseki_dataset_is_persistent():
+    content = yaml.safe_load(COMPOSE_PATH.read_text())
+    fuseki = content["services"]["fuseki"]
+
+    assert "--mem" not in fuseki["command"]
+    assert any(a.startswith("--loc=") for a in fuseki["command"])
+    assert any(v.startswith("fuseki-data:") for v in fuseki["volumes"])
+    assert "fuseki-data" in content["volumes"]
 
 
 def _env_as_dict(env):

@@ -85,7 +85,6 @@ container, with samples written into VictoriaMetrics:
   only.
 
 **Known limits of the demo.**
-- The network graph (Fuseki) is in memory and must be reloaded after a restart.
 - After any Degraded evaluation the TMF921 server rewrites the intent's stored
   bound, so the intent must be re-created and re-pinned to assess again.
 - Every `tmf921` assess writes observations to the intent server, and
@@ -128,7 +127,7 @@ flowchart TB
     end
 
     subgraph Net["Network side"]
-        Fuseki[("Jena Fuseki server :3030, instance 1<br/>NETWORK GRAPH, in memory<br/>lost on restart, reload with load_ontologies<br/>topology and OperationalIntent")]
+        Fuseki[("Jena Fuseki server :3030, instance 1<br/>NETWORK GRAPH, TDB2 store<br/>persistent volume fuseki-data<br/>topology and OperationalIntent")]
         VM[("VictoriaMetrics :8428<br/>telemetry")]
         Sim["telemetry_simulator"]
         Load["load_ontologies<br/>SHACL-gated"]
@@ -183,7 +182,7 @@ The solution has two graphs that are **not** merged, queried together or kept in
 |---|---|---|
 | Jena instance | Instance 1: a standalone Fuseki server (`fuseki` container, port 3030) | Instance 2: Jena embedded in the `tmf921-server` Java app (its own container, REST on 127.0.0.1:8000) |
 | Dataset | `network-dataset` | a TDB2 store at `/app/tdb2-data` |
-| Persistence | **in memory (`--mem`): lost when the container restarts**, so rerun `python -m ingestion.load_ontologies` | Docker volume `tdb2-tmf921`, survives restarts |
+| Persistence | Docker volume `fuseki-data` (TDB2), survives restarts | Docker volume `tdb2-tmf921`, survives restarts |
 | Ontology | our own small one in `ontologies/tbox/topology.ttl` | the licensed TM Forum TIO ontology (never in this repo) |
 | Holds | devices, interfaces, topology links, and `OperationalIntent` (metric, operator, target) | service intents (e.g. HSI bandwidth and latency) and their reports |
 | Broker access | direct SPARQL | REST only |
@@ -412,10 +411,10 @@ Validates against `ontologies/shacl` and loads `ontologies/tbox/topology.ttl` â€
 (zero input drops) on the link between `Router-A`/`GigabitEthernet0/0/0`
 and `Router-B`/`GigabitEthernet0/0/1`.
 
-> **Note: the network graph is in memory.** Fuseki runs with `--mem`, so the loaded
-> ontology is lost whenever the `fuseki` container restarts (including
-> `docker compose down`/`up`). Rerun `python -m ingestion.load_ontologies` afterwards.
-> Until then, topology and intent lookups find nothing.
+> **Note: the network graph is persistent.** Fuseki stores it in TDB2 on the
+> `fuseki-data` volume, so the loaded ontology survives container restarts and
+> `docker compose down`/`up`. Run `python -m ingestion.load_ontologies` once, and
+> again only after deleting the volume (`docker compose down -v`).
 
 ### Optional: explore the graph visually (LodLive)
 

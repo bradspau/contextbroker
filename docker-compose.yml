@@ -15,7 +15,9 @@ services:
       - "3030:3030"
     environment:
       - ADMIN_PASSWORD=admin
-    command: ["java", "-cp", "*:/javalibs/*", "org.apache.jena.fuseki.main.cmds.FusekiServerCmd", "--update", "--mem", "/network-dataset"]
+    command: ["java", "-cp", "*:/javalibs/*", "org.apache.jena.fuseki.main.cmds.FusekiServerCmd", "--update", "--tdb2", "--loc=/fuseki-base/databases", "/network-dataset"]
+    volumes:
+      - fuseki-data:/fuseki-base/databases
     restart: unless-stopped
 
   lodlive-proxy:
@@ -88,4 +90,5 @@ services:
 
 volumes:
   vm-data:
+  fuseki-data:
   tdb2-tmf921:
