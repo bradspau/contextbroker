@@ -158,7 +158,9 @@ def test_intent_envelope_shape():
 def test_mcp_tool_names():
     server = main.build_mcp_server()
     names = {t.name for t in asyncio.run(server.list_tools())}
-    assert names == {"query_intent_state_requirements", "query_tsdb_metrics", "assess_intent"}
+    assert names == {"query_intent_state_requirements", "query_tsdb_metrics", "assess_intent",
+                     "query_metric_history", "query_interfaces_with_nonzero",
+                     "query_interface_neighbours"}
 
 
 def test_mcp_assess_tool_call():

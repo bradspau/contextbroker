@@ -40,6 +40,7 @@ structure below by a strangler migration.
 | Context envelope, resolvers (SPARQL and PromQL), pruning, freshness handling | Built, unit-tested |
 | Deterministic outcome assurance (`success`/`failure`/`inconclusive`) | Built, unit-tested |
 | REST API (`/context/intent/{id}`, `/context/metric`, `/context/assess`) | Built, unit-tested. Unauthenticated. |
+| Operations queries, no intent needed (`metric-history`, `interfaces-nonzero`, `neighbours`; REST, MCP and agent tools) | Built, unit-tested, run live against Fuseki, VictoriaMetrics and LM Studio |
 | Agent harness (Claude tool-calling loop, LM Studio fallback, `broker.py` CLI) | Built, tested with mocks |
 | MCP server | Built and unit-tested, **not mounted** or served by anything |
 | Action-readiness check (`governance_gate`) and executor (`action_lifecycle`) | A library only. The check fails closed on evidence freshness, catalogue membership, scope and loop reservation; it does not test identity or approval. The only controller is `NullController`, so nothing is ever changed on a device. No runtime path submits a proposal. |
@@ -394,6 +395,34 @@ python broker.py "Is intent-core-health-01 compliant right now?"
 The broker reads the intent's requirement from Fuseki, reads the observed
 metric from VictoriaMetrics, and deterministically computes the verdict
 (success / failure / inconclusive); the LLM only explains that verdict.
+
+## Operations queries (no intent needed)
+
+Network operations questions are not fulfilment questions. These read-only queries
+return context with `quality` labels and **never a verdict**; they work for any device
+or interface, whether or not an intent covers it. `assess_intent` is the tool for
+"is this declared requirement met", not the general one.
+
+| Question | REST | Agent / MCP tool |
+|---|---|---|
+| What were the min, max and last values of a metric on an interface? | `GET /context/metric-history?device=&interface=&metric_type=&time_window=[&as_of=]` | `query_metric_history` |
+| Which interfaces of a device had a non-zero value (e.g. `input_drops`)? | `GET /context/interfaces-nonzero?device=&metric_type=&time_window=[&as_of=&limit=]` | `query_interfaces_with_nonzero` |
+| What is at the other end of this interface's links? | `GET /context/neighbours?device=&interface=` | `query_interface_neighbours` |
+
+- `time_window` and `as_of` use the same `5m`/`1h` format as above (`as_of` up to 30 days).
+- **No data is never zero.** An interface or device with no samples in the window is
+  `quality.missing`, not an empty "none had drops". An unknown interface in the
+  topology graph is `quality.missing`; a known one with no links has an empty list.
+- `quality.stale` means the latest sample is more than 5 minutes older than the moment
+  evaluated. A past-window query over old data is therefore flagged stale even though
+  the numbers are right: stale means "not current", not "wrong".
+- `interfaces-nonzero` counts a negative value as non-zero, sorts worst first, and
+  returns at most `limit` (default 50, maximum 200) with `truncated` set when cut.
+- Neighbours are the **declared** topology in Fuseki (state `configured`), not
+  discovered state, and the graph currently holds only the Router-A/Router-B link.
+- Metric history and non-zero queries read the telemetry's metric names
+  (`interface_metrics_<metric_type>`), so they cover whatever the simulator or a real
+  feed writes there.
 
 ## Asking about the past
 

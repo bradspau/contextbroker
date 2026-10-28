@@ -3,12 +3,16 @@ import json
 
 import requests
 
+from broker_engine import operations
 from broker_engine.assess import assess_intent
 from broker_engine.sparql_resolver import resolve_intent
 from broker_engine.tsdb_joiner import VM_QUERY_ENDPOINT, join_observed_metric
 from broker_engine.validation import ClientInputError, IntentNotFound
 
 query_intent_state_requirements = resolve_intent
+query_metric_history = operations.metric_history
+query_interfaces_with_nonzero = operations.interfaces_with_nonzero
+query_interface_neighbours = operations.interface_neighbours
 
 
 def query_tsdb_metrics(
@@ -24,9 +28,9 @@ def query_tsdb_metrics(
     ).to_dict()
 
 
-SYSTEM_PROMPT = """You are a network compliance agent. You have three tools:
+SYSTEM_PROMPT = """You are a network operations assistant. Many questions are about the state of the network and have nothing to do with an intent; use the tool that fits the question. You have these tools:
 
-- assess_intent(intent_id, time_window, source="graph"|"tmf921", default graph): the primary tool. The broker deterministically
+- assess_intent(intent_id, time_window, source="graph"|"tmf921", default graph): the tool for questions about a declared intent. The broker deterministically
   resolves the intent, reads telemetry for every interface, and evaluates compliance. It
   returns a verdict ("success", "failure" or "inconclusive"), per-interface results,
   reasons, supporting context and dropped_count.
@@ -45,6 +49,12 @@ To answer a compliance question, call assess_intent and then EXPLAIN the verdict
 returned, citing the per_interface results and reasons. Please do not compute compliance yourself: never compare observed values to targets on your own or override the verdict.
 You may use the other two tools only to look up supporting detail.
 
+- query_metric_history(device, interface, metric_type, time_window, as_of): min, max, last and sample count of one metric over a window, now or in the past.
+- query_interfaces_with_nonzero(device, metric_type, time_window, as_of, limit): which interfaces of a device had a non-zero value in the window.
+- query_interface_neighbours(device, interface): the interfaces at the other end of the declared topology links.
+
+Use assess_intent only when asked whether a declared intent or requirement is met. For other questions ("what happened on...", "which interfaces had...", "what is connected to...") use the query tools and report what they return. These results carry no verdict; do not call anything compliant or non-compliant from them. In all of them quality.missing means there is no data (never zero or none), and quality.stale means the latest sample is old.
+
 A query_tsdb_metrics result with quality.stale true or quality.missing true (or a
 null value) is NOT a current observation: never report it as current or compliant, and
 never treat its value as an observed zero; report compliance as unknown.
@@ -61,6 +71,12 @@ TIME_WINDOW = {
     "type": "string",
     "pattern": r"^[0-9]+[smhd]$",
     "description": 'Look-back window: digits then s, m, h or d, e.g. "5m" or "1h". Not ISO-8601 ("PT1H" is rejected).',
+}
+
+AS_OF = {
+    "type": "string",
+    "pattern": r"^[0-9]+[smhd]$",
+    "description": 'Evaluate as of this long ago, e.g. "10m" for "10 minutes ago" (up to 30d). Omit for now. For assess_intent, graph source only.',
 }
 
 TOOLS = [
@@ -88,6 +104,45 @@ TOOLS = [
         },
     },
     {
+        "name": "query_metric_history",
+        "description": "Min, max, last value and sample count of one metric on one interface over a window, optionally as it stood in the past. No intent is needed and nothing is judged. quality.missing means no data, not zero.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "device": {"type": "string"},
+                "interface": {"type": "string"},
+                "metric_type": {"type": "string"},
+                "time_window": TIME_WINDOW,
+                "as_of": AS_OF,
+            },
+            "required": ["device", "interface", "metric_type", "time_window"],
+        },
+    },
+    {
+        "name": "query_interfaces_with_nonzero",
+        "description": "Which interfaces of a device had a non-zero value of a metric (e.g. input_drops) in the window, worst first. quality.missing means the device reported no data, not that every interface is zero.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "device": {"type": "string"},
+                "metric_type": {"type": "string"},
+                "time_window": TIME_WINDOW,
+                "as_of": AS_OF,
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            },
+            "required": ["device", "metric_type", "time_window"],
+        },
+    },
+    {
+        "name": "query_interface_neighbours",
+        "description": "The interfaces at the other end of the declared topology links of an interface. Declared topology, not discovered state; quality.missing means the interface is not in the graph.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"device": {"type": "string"}, "interface": {"type": "string"}},
+            "required": ["device", "interface"],
+        },
+    },
+    {
         "name": "assess_intent",
         "description": "Deterministically assess an intent against observed telemetry; returns verdict, per-interface results, reasons and pruned context.",
         "input_schema": {
@@ -96,11 +151,7 @@ TOOLS = [
                 "intent_id": {"type": "string"},
                 "time_window": TIME_WINDOW,
                 "source": {"type": "string", "enum": ["graph", "tmf921"], "default": "graph"},
-                "as_of": {
-                    "type": "string",
-                    "pattern": r"^[0-9]+[smhd]$",
-                    "description": 'Assess as of this long ago, e.g. "10m" for "10 minutes ago" (up to 30d). Omit for now. graph source only.',
-                },
+                "as_of": AS_OF,
                 "mode": {
                     "type": "string",
                     "enum": ["at", "within"],
