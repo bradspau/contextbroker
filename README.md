@@ -560,7 +560,9 @@ into an image).
    Use one `--place <MetricShortName>=<device>/<interface>` per metric in the intent
    (the short name is the part of the metric URI after `#`). `--write-only` writes the
    file without loading it. If the intent already has a binding in the graph the tool
-   refuses unless you pass `--replace`, which deletes the old binding from Fuseki first. The tool refuses, writing and loading nothing, if the
+   refuses unless you pass `--replace`, which writes the new file, then removes the old
+   binding from Fuseki, then loads the new one. If that load fails the intent has no
+   binding until the file is loaded again. The tool refuses, writing and loading nothing, if the
    bounds cannot be read, a metric has no placement or no metric-map entry, or the
    interface is not in the topology. The metric map
    (`data_contracts/metric_map.json`, `METRIC_MAP_PATH`) maps the five HSI metrics to

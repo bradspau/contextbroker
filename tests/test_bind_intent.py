@@ -198,9 +198,19 @@ def test_refuses_existing_binding_without_replace(tmp_path, capsys):
     assert "--replace" in capsys.readouterr().err
 
 
-def test_replace_deletes_then_posts_in_order(tmp_path):
-    code, posts = _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0", "--replace"], existing=True)
+def test_replace_writes_then_deletes_then_posts_in_order(tmp_path):
+    f = tmp_path / "abox" / "intent-1.ttl"
+    seen = {}
+    real = bind_intent.delete_bindings
+
+    def spy(*a, **k):
+        seen["file_existed"] = f.exists()
+        return real(*a, **k)
+
+    with patch.object(bind_intent, "delete_bindings", side_effect=spy):
+        code, posts = _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0", "--replace"], existing=True)
     assert code == 0
+    assert seen["file_existed"] is True
     w = _writes(posts)
     assert [u.rsplit("/", 1)[1] for u, _ in w] == ["update", "data"]
     update = w[0][1]["data"].decode()
@@ -210,12 +220,11 @@ def test_replace_deletes_then_posts_in_order(tmp_path):
     assert (tmp_path / "abox" / "intent-1.ttl").exists()
 
 
-def test_replace_delete_failure_writes_and_posts_nothing(tmp_path):
+def test_replace_delete_failure_posts_nothing(tmp_path):
     code, posts = _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0", "--replace"],
                        existing=True, update_fails=True)
     assert code != 0
     assert [u.rsplit("/", 1)[1] for u, _ in _writes(posts)] == ["update"]
-    assert not (tmp_path / "abox").exists()
 
 
 def test_write_only_replace_never_deletes(tmp_path):
@@ -261,3 +270,40 @@ def test_pin_roundtrips_non_integer_bounds(value):
     g = rdflib.Graph().parse(data=ttl, format="turtle")
     ns = rdflib.Namespace("http://example.org/network-ontology#")
     assert g.value(ns["binding-intent-1-LatencyMetric"], ns.pinnedBound).toPython() == value
+
+
+def test_write_oserror_leaves_old_binding_intact(tmp_path, capsys):
+    (tmp_path / "abox").write_text("i am a file, not a directory")
+    code, posts = _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0", "--replace"], existing=True)
+    assert code != 0
+    assert _writes(posts) == []
+    assert "Refused" in capsys.readouterr().err
+
+
+def test_post_failure_after_replace_says_no_binding(tmp_path, capsys):
+    client = Mock()
+    client.get_intent.return_value = INTENT
+
+    def fake_post(url, **kw):
+        if url.endswith("/query"):
+            ex = "ServiceBinding" in kw["data"]["query"]
+            return _binding_reply() if ex else _sparql_reply([IFACE_IRI])
+        if url.endswith("/update"):
+            return _ok_post()
+        raise requests.ConnectionError("boom-secret")
+
+    with patch.object(bind_intent, "Tmf921Client", return_value=client), \
+            patch("requests.post", side_effect=fake_post):
+        code = main(["intent-1", "--abox-dir", str(tmp_path / "abox"), "--replace",
+                     "--place", "LatencyMetric=olt1/pon0"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "removed" in err and "no binding" in err and "load_ontologies" in err
+    assert "boom-secret" not in err
+
+
+def _binding_reply():
+    r = Mock()
+    r.raise_for_status = Mock()
+    r.json.return_value = {"results": {"bindings": [{"b": {}}]}}
+    return r

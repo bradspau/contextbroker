@@ -39,9 +39,11 @@ NS = "http://example.org/network-ontology#"
 class LoadError(Exception):
     """The file was written but the network graph did not accept it."""
 
-    def __init__(self, path):
+    def __init__(self, path, removed=False, delete_failed=False):
         super().__init__("load failed")
         self.path = path
+        self.removed = removed
+        self.delete_failed = delete_failed
 
 
 class BindError(ValueError):
@@ -229,19 +231,26 @@ def bind(intent_id, place_specs, *, abox_dir=DEFAULT_ABOX_DIR, write_only=False,
             if not ok:
                 raise BindError("the binding failed SHACL validation")
 
-    if exists and replace and not write_only:
-        delete_bindings(intent_id, update_endpoint or derive_update_endpoint(data_endpoint))
-
     out_dir = Path(abox_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{intent_id}.ttl"
-    out.write_text(ttl, encoding="utf-8")
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out.write_text(ttl, encoding="utf-8")
+    except OSError:
+        raise BindError("cannot write the binding file") from None
     if write_only:
         return out, False
+    removed = False
+    if exists and replace:
+        try:
+            delete_bindings(intent_id, update_endpoint or derive_update_endpoint(data_endpoint))
+        except BindError:
+            raise LoadError(out, removed=False, delete_failed=True) from None
+        removed = True
     try:
         load_ttl_to_fuseki(out, data_endpoint)
     except requests.RequestException:
-        raise LoadError(out) from None
+        raise LoadError(out, removed=removed) from None
     return out, True
 
 
@@ -268,8 +277,17 @@ def main(argv=None) -> int:
                            query_endpoint=args.query_endpoint, replace=args.replace,
                            update_endpoint=args.update_endpoint)
     except LoadError as exc:
-        print(f"Wrote {exc.path} but the network graph did not accept it. "
-              "Nothing was loaded; fix the cause and load the file again.", file=sys.stderr)
+        if exc.removed:
+            print(f"Wrote {exc.path}. The old binding was removed and the new one was not "
+                  "accepted, so this intent currently has no binding (the broker will return "
+                  "inconclusive, no binding for intent, until the file is loaded). Load the "
+                  "file again with python -m ingestion.load_ontologies.", file=sys.stderr)
+        elif exc.delete_failed:
+            print(f"Wrote {exc.path} but the old binding could not be deleted. Nothing was "
+                  "deleted or loaded; the old binding is unchanged.", file=sys.stderr)
+        else:
+            print(f"Wrote {exc.path} but the network graph did not accept it. "
+                  "Nothing was loaded; fix the cause and load the file again.", file=sys.stderr)
         return 1
     except BindError as exc:
         print(f"Refused: {exc}. Nothing was written or loaded.", file=sys.stderr)
