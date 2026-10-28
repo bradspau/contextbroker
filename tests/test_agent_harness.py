@@ -545,3 +545,15 @@ def test_backend_blank_or_mixed_case_uses_claude(monkeypatch, value):
     fake_claude = Mock()
     fake_claude.messages.create.return_value = _response([_text_block("claude answer")])
     assert run_agent("q", client=fake_claude, model="m") == "claude answer"
+
+
+def test_time_window_format_is_declared_to_the_model():
+    import re
+    for tool in tools.TOOLS:
+        window = tool["input_schema"]["properties"].get("time_window")
+        if window is None:
+            continue
+        assert "5m" in window["description"]
+        assert re.match(window["pattern"], "5m") and re.match(window["pattern"], "1h")
+        assert not re.match(window["pattern"], "PT1H")
+    assert "PT1H" in tools.SYSTEM_PROMPT and '"5m"' in tools.SYSTEM_PROMPT

@@ -36,6 +36,8 @@ SYSTEM_PROMPT = """You are a network compliance agent. You have three tools:
   value of a metric over a recent time window (drill-down only). It returns a context
   envelope: "value", "observed_at" and "quality" {"stale", "missing", "conflicts"}.
 
+time_window is digits plus s, m, h or d (for example "5m" or "1h"), never ISO-8601 such as "PT1H".
+
 To answer a compliance question, call assess_intent and then EXPLAIN the verdict it
 returned, citing the per_interface results and reasons. Please do not compute compliance yourself: never compare observed values to targets on your own or override the verdict.
 You may use the other two tools only to look up supporting detail.
@@ -49,6 +51,14 @@ never report the intent as compliant; report compliance as unknown due to missin
 unreliable telemetry.
 
 With assess_intent source=tmf921 the verdict still comes from the broker's deterministic checks combined with the intent server's handling state; explain it and never compute or override it, and an "inconclusive" verdict means evidence was stale, missing, conflicted, drifted or unavailable and must never be presented as compliant."""
+
+# The broker accepts only digits followed by s, m, h or d (e.g. "5m", "1h");
+# ISO-8601 durations such as "PT1H" are rejected as an unsafe time_window.
+TIME_WINDOW = {
+    "type": "string",
+    "pattern": r"^[0-9]+[smhd]$",
+    "description": 'Look-back window: digits then s, m, h or d, e.g. "5m" or "1h". Not ISO-8601 ("PT1H" is rejected).',
+}
 
 TOOLS = [
     {
@@ -69,7 +79,7 @@ TOOLS = [
                 "device": {"type": "string"},
                 "interface": {"type": "string"},
                 "metric_type": {"type": "string"},
-                "time_window": {"type": "string"},
+                "time_window": TIME_WINDOW,
             },
             "required": ["device", "interface", "metric_type", "time_window"],
         },
@@ -81,7 +91,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "intent_id": {"type": "string"},
-                "time_window": {"type": "string"},
+                "time_window": TIME_WINDOW,
                 "source": {"type": "string", "enum": ["graph", "tmf921"], "default": "graph"},
             },
             "required": ["intent_id", "time_window"],
