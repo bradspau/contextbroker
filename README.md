@@ -126,7 +126,7 @@ flowchart TB
     end
 
     subgraph Net["Network side"]
-        Fuseki[("Fuseki :3030<br/>NETWORK GRAPH<br/>topology and OperationalIntent")]
+        Fuseki[("Jena Fuseki server :3030, instance 1<br/>NETWORK GRAPH, in memory<br/>lost on restart, reload with load_ontologies<br/>topology and OperationalIntent")]
         VM[("VictoriaMetrics :8428<br/>telemetry")]
         Sim["telemetry_simulator"]
         Load["load_ontologies<br/>SHACL-gated"]
@@ -134,7 +134,7 @@ flowchart TB
     end
 
     subgraph Svc["Service intent side (compose profile tmf921)"]
-        T921[("tmf921-server :8000<br/>TMF921 GRAPH<br/>TIO ontology and service intents")]
+        T921[("tmf921-server :8000, Jena instance 2<br/>Java app with embedded Jena, TDB2 store<br/>persistent volume tdb2-tmf921<br/>TMF921 GRAPH: TIO ontology and service intents")]
         Onto[/"licensed TIO ontology files<br/>read-only mount, never in an image or this repo"/]
     end
 
@@ -169,7 +169,9 @@ The solution has two graphs that are **not** merged, queried together or kept in
 
 | | Network graph | TMF921 graph |
 |---|---|---|
-| Where | Fuseki, dataset `network-dataset` | Jena store inside `tmf921-server` |
+| Jena instance | Instance 1: a standalone Fuseki server (`fuseki` container, port 3030) | Instance 2: Jena embedded in the `tmf921-server` Java app (its own container, REST on 127.0.0.1:8000) |
+| Dataset | `network-dataset` | a TDB2 store at `/app/tdb2-data` |
+| Persistence | **in memory (`--mem`): lost when the container restarts**, so rerun `python -m ingestion.load_ontologies` | Docker volume `tdb2-tmf921`, survives restarts |
 | Ontology | our own small one in `ontologies/tbox/topology.ttl` | the licensed TM Forum TIO ontology (never in this repo) |
 | Holds | devices, interfaces, topology links, and `OperationalIntent` (metric, operator, target) | service intents (e.g. HSI bandwidth and latency) and their reports |
 | Broker access | direct SPARQL | REST only |
