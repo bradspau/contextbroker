@@ -29,8 +29,10 @@ def test_fuseki_dataset_is_persistent():
     fuseki = content["services"]["fuseki"]
 
     assert "--mem" not in fuseki["command"]
-    assert any(a.startswith("--loc=") for a in fuseki["command"])
-    assert any(v.startswith("fuseki-data:") for v in fuseki["volumes"])
+    assert "--tdb2" in fuseki["command"]
+    loc = next(a for a in fuseki["command"] if a.startswith("--loc="))[len("--loc="):]
+    mounts = [v.split(":")[1] for v in fuseki["volumes"] if v.startswith("fuseki-data:")]
+    assert mounts and loc.rstrip("/") == mounts[0].rstrip("/")
     assert "fuseki-data" in content["volumes"]
 
 
