@@ -37,7 +37,8 @@ def ttl(uri, val):
 
 
 def intent(*pairs):
-    return {"expression": {"expressionValue": "\n".join(ttl(u, v) for u, v in pairs)}}
+    return {"lifecycleStatus": "ACTIVE",
+            "expression": {"expressionValue": "\n".join(ttl(u, v) for u, v in pairs)}}
 
 
 class FakeClient:
@@ -284,3 +285,47 @@ def test_assess_intent_tmf921_without_temporal_arguments_takes_push_path():
         assert assess_intent(IID, "5m", source="tmf921", join=join) == {"p": 1}
     t.assert_not_called()
     push.assert_called_once_with(IID, "5m", join=join)
+
+
+# ---------- lifecycle ----------
+def _with_status(**kw):
+    d = intent((LAT, 100))
+    d.pop("lifecycleStatus")
+    d.update(kw)
+    return d
+
+
+@pytest.mark.parametrize("doc,status", [
+    (_with_status(lifecycleStatus="TERMINATED"), "TERMINATED"),
+    (_with_status(lifecycleStatus="ACKNOWLEDGED"), "ACKNOWLEDGED"),
+    (_with_status(lifecycleStatus="SUSPENDED"), "SUSPENDED"),
+    (_with_status(), "unknown"),
+    (_with_status(lifecycleStatus="evil <script> http://leak"), "unknown"),
+    (_with_status(lifecycleStatus=None), "unknown"),
+])
+def test_non_active_intent_is_inconclusive_before_telemetry(doc, status):
+    join = make_join({("latency_ms", "last"): 1.0})
+    client = FakeClient(doc=doc)
+    out = run(client=client, join=join)
+    assert out["verdict"] == "inconclusive" and out["reasons"] == ["intent not active"]
+    assert out["intent_status"] == status
+    assert join.calls == []
+    assert client.posts == [] and client.lists == 0 and not src._MARKS
+    assert "leak" not in str(out) and "script" not in str(out)
+
+
+def test_active_intent_still_assessed():
+    out = run(join=make_join({("latency_ms", "last"): 1.0}))
+    assert out["verdict"] == "success" and out["intent_status"] == "active"
+
+
+def test_conflicting_series_behind_one_bound_is_inconclusive():
+    def join(device, interface, metric, window, **kw):
+        ref = kw["now"] - timedelta(minutes=10)
+        env = build_observed(f"{device}:{interface}", 1.0, "victoriametrics",
+                             ref - timedelta(seconds=10), ref)
+        env.quality.conflicts.append("multiple series")
+        return env
+    for mode in (None, "within"):
+        out = run(join=join, mode=mode)
+        assert out["verdict"] == "inconclusive"

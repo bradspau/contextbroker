@@ -26,8 +26,8 @@ The design principle (spec: `docs/Context-Broker-Updated.md`) is:
   catalogue, the scope does not match, or the loop holds no reservation, the action is
   refused. It does not yet test identity, approval or validation readiness, so it
   cannot refuse for those.
-- **Optionally verify against an external TMF921 intent server**
-  ([BBF_921_java](https://github.com/bradspau/BBF_921_java)) so the broker's
+- **Verify against an external TMF921 intent server** (the default source;
+  [BBF_921_java](https://github.com/bradspau/BBF_921_java)) so the broker's
   fresh evidence is judged by an independent intent engine.
 
 It grew from a single-file compliance agent (`broker.py`) into the layered
@@ -49,7 +49,7 @@ structure below by a strangler migration.
 | LQM, System 1 / investigation models, state reconciliation, syslog parsing | Stubs |
 | Redpanda, Qdrant, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 692 tests passing plus 15 live TMF921 tests that are skipped
+The test suite has 708 tests passing plus 15 live TMF921 tests that are skipped
 unless `TMF921_LIVE=1` (`pytest`). The work is on local `master` and has
 not been pushed or reviewed upstream.
 
@@ -155,7 +155,8 @@ flowchart TB
         AssessT["assess_intent source=tmf921 (default)<br/>modes: now (push), as_of, within (read-only)<br/>(tmf921_source.py)"]
         Join["tsdb_joiner and sparql_resolver<br/>ContextEnvelope with quality labels"]
         Assure["outcome_assurance<br/>deterministic success, failure, inconclusive"]
-        Bind["intent_bindings.json and metric_map.json<br/>the only link between the two graphs"]
+        Bind["metric_map.json and the intent_bindings.json fallback<br/>the binding in the network graph wins"]
+        BindCli["bind_intent CLI<br/>reads bounds from TMF921, writes :ServiceBinding"]
         MCP["MCP server<br/>built, not mounted"]
     end
 
@@ -187,6 +188,9 @@ flowchart TB
     AssessG --> Assure
     AssessT --> Join
     AssessT --> Bind
+    AssessT -->|"binding lookup"| Fuseki
+    BindCli -->|"reads current bounds"| T921
+    BindCli -->|"writes :ServiceBinding"| Fuseki
     Join -->|"SPARQL"| Fuseki
     Join -->|"PromQL"| VM
 
@@ -196,7 +200,7 @@ flowchart TB
     Onto -.->|"bind mount :ro"| T921
 
     Sim -->|"writes every 5s"| VM
-    Load -->|"tbox, shacl"| Fuseki
+    Load -->|"tbox, shacl, abox"| Fuseki
     User -->|"browses"| Lod --> Fuseki
 ```
 
@@ -222,10 +226,12 @@ The solution has two graphs that are **not** merged, queried together or kept in
 | Used by | the neighbours query and the bindings; `source: "graph"` (deprecated) | `source: "tmf921"` (the default) |
 
 "Intent" means a different thing in each: a simple requirement on a link in the network
-graph, and a service intent in the TMF921 graph. The only connection is
-`data_contracts/intent_bindings.json`, a hand-maintained, pinned file that maps a TMF921
-intent and metric URI to a device, an interface and an expected bound, plus
-`data_contracts/metric_map.json` for metric names. Nothing yet answers "which interfaces
+graph, and a service intent in the TMF921 graph. They are connected by bindings. A
+binding lives in the network graph as a `:ServiceBinding` resource (written with
+`python -m ingestion.bind_intent`) that maps a TMF921 intent and metric URI to a device,
+an interface and a pinned bound. `data_contracts/intent_bindings.json` is only the
+deprecated fallback, consulted when the network graph has no binding for that intent;
+the graph binding wins. `data_contracts/metric_map.json` maps metric URIs to metric names. Nothing yet answers "which interfaces
 carry this service" from a graph.
 
 ### Module map
@@ -237,7 +243,8 @@ carry this service" from a graph.
 | `outcome_assurance` | Deterministic, three-valued intent verdict (the LLM is not the judge) | Outcome assurance |
 | `agent_harness` | Tool-calling LLM loop (Claude, LM Studio fallback); `broker.py` is a thin CLI shim over it | Agent harness |
 | `ontologies` | `tbox/` topology + intent ontology, `shacl/` shapes | Ontology / knowledge layer |
-| `ingestion` | `load_ontologies` (SHACL-gated load into Fuseki), `telemetry_simulator`, `syslog_parser` | Ingestion |
+| `ingestion` | `load_ontologies` (SHACL-gated load of tbox and abox into Fuseki), `bind_intent` (writes a `:ServiceBinding` to `ontologies/abox/` and Fuseki), `telemetry_simulator`, `syslog_parser` | Ingestion |
+| `ontologies/abox` | One `:ServiceBinding` Turtle file per bound TMF921 intent, written by `bind_intent` | Ontology / knowledge layer |
 | `intent_management` | Intent store | Intent management |
 | `decision_records` | Record store | Decision records |
 | `loop_coordination` | Reservation book to stop concurrent loops acting on the same target | Loop coordination |
@@ -263,7 +270,7 @@ carry this service" from a graph.
 3. `outcome_assurance` computes the success / failure / inconclusive verdict
    deterministically from the envelopes; the LLM only explains it.
 4. Ontologies are loaded with `python -m ingestion.load_ontologies`, which
-   validates every TBox file against every SHACL shape file first and posts
+   validates every TBox file and every ABox binding file against every SHACL shape file first and posts
    nothing if any violation is found (empty directories are rejected).
 5. `governance_gate` and `action_lifecycle` are a library only: no runtime path builds
    or submits an `ActionProposal`. The action-readiness check fails closed on the things it tests, and the only controller is
@@ -303,7 +310,7 @@ SHACL-gated loader. `load_ttl_to_fuseki(ttl_path, data_endpoint, auth)` `POST`s 
 Turtle file to Fuseki's Graph Store endpoint (`/network-dataset/data`, basic auth
 `admin`/`admin`, matching `ADMIN_PASSWORD` in `docker-compose.yml`).
 `python -m ingestion.load_ontologies` (options `--tbox-dir`, `--shacl-dir`,
-`--endpoint`) validates then loads `ontologies/tbox/*.ttl`. The legacy
+`--abox-dir`, `--endpoint`) validates then loads `ontologies/tbox/*.ttl` and the bindings in `ontologies/abox/*.ttl`. The legacy
 `python seed_graph.py [ttl] [endpoint]` still works as a shim and loads a single
 file without SHACL validation.
 
@@ -445,14 +452,17 @@ source venv/bin/activate
 python -m ingestion.load_ontologies
 ```
 
-Validates against `ontologies/shacl` and loads `ontologies/tbox/topology.ttl` — the `intent-core-health-01` requirement
+Validates against `ontologies/shacl` and loads `ontologies/tbox/topology.ttl` and any bindings in `ontologies/abox/` — the `intent-core-health-01` requirement
 (zero input drops) on the link between `Router-A`/`GigabitEthernet0/0/0`
 and `Router-B`/`GigabitEthernet0/0/1`.
 
 > **Note: the network graph is persistent.** Fuseki stores it in TDB2 on the
 > `fuseki-data` volume, so the loaded ontology survives container restarts and
 > `docker compose down`/`up`. Run `python -m ingestion.load_ontologies` once, and
-> again only after deleting the volume (`docker compose down -v`).
+> again only after deleting the `fuseki-data` volume. Do not use `docker compose down -v`,
+> which also deletes `tdb2-tmf921` and `vm-data`. Remove only the Fuseki volume:
+> `docker compose -p <project> stop fuseki && docker volume rm <project>_fuseki-data`,
+> then `docker compose -p <project> up -d fuseki` and reload.
 
 ### Optional: explore the graph visually (LodLive)
 
@@ -584,7 +594,7 @@ two optional arguments. With neither, the assessment is a current one.
 ## Using an external TMF921 intent server
 
 The broker can take the intent (and its handling state) from a TMF921 server
-(BBF_921_java) instead of the ontology graph. The server runs as an opt-in
+(BBF_921_java), the default source, rather than from the network graph. The server runs as an opt-in
 compose service (profile `tmf921`); the licensed TM Forum TIO ontology files stay
 on the host and are only bind-mounted read-only (never committed, never baked
 into an image).
@@ -653,10 +663,17 @@ Known behaviours / troubleshooting:
   "missing observation": VictoriaMetrics does not expose very recent samples
   immediately (observed live, about 2-15 s). Retry; the TMF921 assess fails closed (returns `inconclusive`) in the meantime.
 - If `HOST_INTENT_BINDINGS` points at a file that does not exist before
-  `docker compose up`, Docker creates a DIRECTORY there and every tmf921 assess
-  returns 200 `inconclusive` "invalid binding" with no detail. Create the file first
+  `docker compose up`, Docker creates a DIRECTORY there. That now affects only
+  intents with no binding in the network graph: their tmf921 assess returns 200
+  `inconclusive` "invalid binding" with no detail. Create the file first
   (`cp data_contracts/intent_bindings.json <path>`). A malformed bindings file gives
-  the same result.
+  the same result for those intents.
+- Past-window assessments on the deprecated graph source treat a `+Inf` telemetry
+  value as finite (the TMF921 paths reject non-finite values); the graph source is
+  being retired.
+- Fuseki (port 3030) and lodlive-proxy (8081) are published on all interfaces with
+  update enabled and default credentials; the pinned bounds in the network graph are
+  trusted by the drift check, so do not expose these ports.
 - The TMF921 server writes two Degraded reports for a new intent (creation and
   activation) before any observation, so a freshly activated intent shows 2 reports
   and a Degraded state until an observation arrives.

@@ -260,7 +260,11 @@ def main(argv=None) -> int:
     ap.add_argument("intent_id")
     ap.add_argument("--place", action="append", default=[],
                     metavar="METRIC=DEVICE/INTERFACE")
-    ap.add_argument("--write-only", action="store_true")
+    ap.add_argument("--write-only", action="store_true",
+                    help="write the file only, do not load it. A file written for a replaced "
+                         "binding must be loaded with `bind_intent --replace`, not "
+                         "load_ontologies: load_ontologies only adds triples to the persistent "
+                         "store and would leave two pins on the node")
     ap.add_argument("--abox-dir", type=Path, default=DEFAULT_ABOX_DIR)
     ap.add_argument("--endpoint", default=DEFAULT_DATA_ENDPOINT, help="Fuseki data endpoint")
     ap.add_argument("--query-endpoint", default=FUSEKI_QUERY_ENDPOINT,

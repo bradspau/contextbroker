@@ -372,13 +372,19 @@ def assess_tmf921_as_of(
         return result(Outcome.INCONCLUSIVE, ["invalid binding"], status="unknown")
     client = client or Tmf921Client()
     try:
-        ok = _bounds_match(client.get_intent(intent_id), binding)
+        doc = client.get_intent(intent_id)
+        ok = _bounds_match(doc, binding)
     except ClientInputError:
         return result(Outcome.INCONCLUSIVE, ["invalid binding"], status="unknown")
     except Exception:  # Tmf921Error and anything unexpected: no server text
         return result(Outcome.INCONCLUSIVE, ["intent server unavailable"])
     if not ok:
         return result(Outcome.INCONCLUSIVE, ["intent bound drifted"], status="unknown")
+
+    life = doc.get("lifecycleStatus") if isinstance(doc, dict) else None
+    if life != "ACTIVE":  # before any telemetry is read; server text is never echoed
+        known = life if life in ("ACKNOWLEDGED", "SUSPENDED", "TERMINATED") else "unknown"
+        return result(Outcome.INCONCLUSIVE, ["intent not active"], status=known)
 
     per, reasons, envs, outcomes = [], [], [], set()
     for uri, bound in binding.bounds.items():

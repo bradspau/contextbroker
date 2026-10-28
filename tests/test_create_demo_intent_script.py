@@ -15,7 +15,7 @@ SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "create_demo_inten
 INTENT_ID = "11111111-2222-3333-4444-555555555555"
 
 
-def _server(patch_status=200, patch_lifecycle="ACTIVE"):
+def _server(patch_status=200, patch_lifecycle="ACTIVE", post_reply=None):
     calls = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -36,7 +36,8 @@ def _server(patch_status=200, patch_lifecycle="ACTIVE"):
 
         def do_POST(self):
             calls.append(("POST", self.path, self._body()))
-            self._reply(201, {"id": INTENT_ID, "lifecycleStatus": "ACKNOWLEDGED"})
+            self._reply(201, post_reply if post_reply is not None else
+                        {"id": INTENT_ID, "lifecycleStatus": "ACKNOWLEDGED"})
 
         def do_PATCH(self):
             calls.append(("PATCH", self.path, self._body()))
@@ -86,3 +87,22 @@ def test_script_fails_when_activation_does_not_take(ttl, status, lifecycle):
     assert out.returncode != 0
     # The id is still printed on stderr so the half-made intent can be found.
     assert INTENT_ID in out.stderr
+
+
+@pytest.mark.parametrize("reply", [
+    {"lifecycleStatus": "ACKNOWLEDGED", "note": "SERVERLEAK"},
+    {"id": "../x", "note": "SERVERLEAK"},
+    {"id": "a b", "note": "SERVERLEAK"},
+    {"id": "a'b\"c", "note": "SERVERLEAK"},
+    {"id": 7, "note": "SERVERLEAK"},
+])
+def test_script_refuses_missing_or_unsafe_id(ttl, reply):
+    srv, calls = _server(post_reply=reply)
+    try:
+        out = _run(srv, ttl)
+    finally:
+        srv.shutdown()
+    assert out.returncode != 0
+    assert [c[0] for c in calls] == ["POST"]  # no PATCH
+    assert "SERVERLEAK" not in out.stdout + out.stderr
+    assert "../x" not in out.stdout + out.stderr
