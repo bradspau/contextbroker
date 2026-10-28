@@ -49,7 +49,8 @@ structure below by a strangler migration.
 | LQM, System 1 / investigation models, state reconciliation, syslog parsing | Stubs |
 | Redpanda, Qdrant, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 488 tests (`pytest`). The work is on local `master` and has
+The test suite has 692 tests passing plus 15 live TMF921 tests that are skipped
+unless `TMF921_LIVE=1` (`pytest`). The work is on local `master` and has
 not been pushed or reviewed upstream.
 
 ## Demo status
@@ -67,26 +68,57 @@ container, with samples written into VictoriaMetrics:
 | Two conflicting series | `inconclusive` ("conflicting observation"), nothing pushed |
 | Re-assess after a `failure` | `inconclusive` ("intent bound drifted") |
 
+**HSI demo end to end on TMF921 alone (verified live 2026-10-28).** The complete
+public HSI demo intent (BBF_921_java `seed_data/hsi_demo_intent.ttl`, with its
+`log:allOf` / `log:match` parts and five quantity conditions), the simulator as
+the only telemetry source, all five metrics bound to `Router-A/GigabitEthernet0/0/0`:
+
+```bash
+# Fuseki, VictoriaMetrics and tmf921-server running; ontology loaded once
+python -m ingestion.load_ontologies
+bash scripts/create_demo_intent.sh <BBF_921_java>/seed_data/hsi_demo_intent.ttl "HSI demo"
+P=Router-A/GigabitEthernet0/0/0
+python -m ingestion.bind_intent <intent_id> --place LatencyMetric=$P --place JitterMetric=$P \
+  --place PacketLossMetric=$P --place DownstreamBandwidthMetric=$P --place UpstreamBandwidthMetric=$P
+python -m ingestion.telemetry_simulator --hsi          # or --hsi-breach for latency 40-60 ms
+# wait ~20 s for VictoriaMetrics, then assess with source "tmf921";
+# past questions add as_of ("10m") and mode ("at" or "within")
+```
+
+| Step | Result |
+|---|---|
+| Compliant samples, current assess | `success` |
+| `--hsi-breach` (latency 40.5 ms vs 25 ms), current assess | `failure`, reason "bound violated" (names no metric, see limits) |
+| Re-assess the same intent after that `failure` | `inconclusive` ("intent bound drifted"): the server had rewritten the latency bound 25 to 40.535 |
+| New intent (new id) and new binding, compliant samples | `success` |
+| `mode=within`, 5 m window containing the breach | `failure`, "LatencyMetric: ... observed 59.22 does not satisfy <= 25.0" |
+| `as_of=10m`, `mode=at`, instant in the compliant period | `success` |
+| `as_of=10m`, `mode=at`, instant in the breach period | `failure`, LatencyMetric observed 47.994 |
+| `as_of=10m`, `mode=within`, window containing the breach | `failure`, LatencyMetric observed 58.848 |
+| Restart `fuseki` and `tmf921-server`, no reload | binding (five pinned bounds) and intent (`ACTIVE`, bounds intact) still there; fresh assess `success` |
+
 **Not turnkey.**
-- The telemetry simulator does not emit the five HSI metrics
-  (`downstream_bandwidth_mbps`, `upstream_bandwidth_mbps`, `latency_ms`,
-  `jitter_ms`, `packet_loss_percent`), so the TMF921 demo needs samples written to
-  VictoriaMetrics directly.
 - The first assess on a new series can read "missing" for a few seconds
-  (VictoriaMetrics lag).
+  (VictoriaMetrics lag); wait about 20 s after starting the simulator.
 - The TMF921 server needs the licensed TM Forum ontology files, which are not in
   this repo. Mount them read-only from your own copy (see below).
 
 **Not yet run.**
 - The LLM agent (`broker.py`) end to end with a real API key. It is tested with
   mocks only.
-- A live assess of a *complete* HSI intent (with `log:allOf` / `log:match` parts)
-  on the server. The bound reader handles both demo `.ttl` files in unit tests
-  only.
 
 **Known limits of the demo.**
 - After any Degraded evaluation the TMF921 server rewrites the intent's stored
-  bound, so the intent must be re-created and re-pinned to assess again.
+  bound, so the intent must be re-created (new id) and bound again to assess
+  again. `bind_intent --replace` on the same intent pins the rewritten bound.
+- A current-moment `tmf921` `failure` says only "bound violated": the server's
+  JSON reason (`40.535 ms < 25 ms: FAIL`) names no metric. The failing condition
+  is only in its TR290 report (`icm:about bbf:Lat_Check`). The past-question
+  assess names the metric because the broker judges it.
+- Operators: for latency, jitter and packet loss the server is strict (`<`) while
+  `metric_map.json` says `<=`, so a value exactly at the bound is judged
+  differently by the past-question assess (`success`) and the server (`failure`).
+  Bandwidth (`>=`) agrees. See `tests/test_tmf921_live.py`.
 - Every current-moment `tmf921` assess (no `as_of`, no `mode`) writes observations
   to the intent server, and
   `POST /context/assess` has no authentication. Do not expose port 8080.
@@ -282,7 +314,12 @@ and `Router-B`/`GigabitEthernet0/0/1` (`in_octets`, `out_octets`, `input_drops`)
 as InfluxDB line protocol under the `interface_metrics` measurement and writes it
 to VictoriaMetrics (`/write`) every 5s. `input_drops` is `0` unless
 `--inject-drops` is given (~5% chance of 1-20 per sample), which drives the
-compliant-vs-non-compliant demo. `python -m ingestion.telemetry_simulator`
+compliant-vs-non-compliant demo. `--hsi` also emits the five HSI metrics as floats
+(`latency_ms`, `jitter_ms`, `packet_loss_percent`, `downstream_bandwidth_mbps`,
+`upstream_bandwidth_mbps`), with values sized for the public HSI demo intent
+(BBF_921_java `seed_data/hsi_demo_intent.ttl`); `--hsi-breach` (implies `--hsi`)
+puts latency at 40-60 ms, above that intent's 25 ms bound, and keeps the other
+four compliant. `python -m ingestion.telemetry_simulator`
 (continuous) or with `--once` for a single batch. `MEASUREMENT_NAME` is imported
 by the broker engine so the metric name prefix cannot drift.
 
@@ -463,6 +500,9 @@ broker report a non-compliant result instead:
 python -m ingestion.telemetry_simulator --inject-drops
 ```
 
+For the TMF921 HSI demo add `--hsi` (compliant HSI metrics) or `--hsi-breach`
+(latency above the demo intent's 25 ms bound); see [Demo status](#demo-status).
+
 ## 6. Ask the broker
 
 ```bash
@@ -555,11 +595,12 @@ into an image).
 3. Create the intent from a Turtle file. The bound must carry `quan:unit "Mbps"`
    (inside the bracketed quantity, e.g. `[ rdf:value "100"^^xsd:decimal ; quan:unit "Mbps" ]`),
    otherwise the server reports a unit mismatch. The helper posts the file to the
-   server and prints the new intent id (`TMF921_BASE_URL` overrides the default
-   `http://localhost:8000/tmf-api/intentManagement/v5`):
+   server, activates the new intent (`PATCH .../intent/<intent_id>` with
+   `{"lifecycleStatus": "ACTIVE"}`) and prints its id (`TMF921_BASE_URL` overrides
+   the default `http://localhost:8000/tmf-api/intentManagement/v5`):
    `bash scripts/create_demo_intent.sh <path-to-intent.ttl>`
-   Activate it the way `seed_data/seed.sh` in BBF_921_java does
-   (`PATCH .../intent/<intent_id>` with `{"lifecycleStatus": "ACTIVE"}`).
+   Activation matters: the server stores observations posted to an `ACKNOWLEDGED`
+   intent but never evaluates them, so the assess would end "no new report".
    The helper is for the demo only; the broker has no create call.
 4. Bind the intent to an interface. This reads the intent's current bounds from
    the TMF921 server, checks the interface exists in the network graph, validates
@@ -578,7 +619,12 @@ into an image).
    (`data_contracts/metric_map.json`, `METRIC_MAP_PATH`) maps the five HSI metrics to
    broker metric names such as `downstream_bandwidth_mbps` and gives each an
    `operator` (`<=` or `>=`), which the past-question assess needs; an entry
-   without a known operator makes the metric map fail to load.
+   without a known operator makes the metric map fail to load. Checked against the
+   live server on 2026-10-28 (`tests/test_tmf921_live.py`): `>=` matches the
+   server for both bandwidth metrics, but for latency, jitter and packet loss the
+   server's `quan:smaller` is strict, so a value exactly at the bound is `failure`
+   on the server and `success` in the broker's past-question assess. The map has
+   not been changed yet.
    The older bindings file (`data_contracts/intent_bindings.json`, ships as `{}`,
    mount your own with `HOST_INTENT_BINDINGS`, read-only) is the deprecated
    fallback, used only when the network graph holds no binding for the intent.
@@ -594,7 +640,11 @@ Safety behaviour: stale, missing, conflicted, drifted or unpushable evidence giv
 server. The server's Flow 3 rewrites an intent's stored bound after any Degraded
 evaluation, so after a `failure` the same intent reports "intent bound drifted"
 (`inconclusive`) until it is re-created and re-pinned; this is server-side behaviour
-to raise with its owner. Per-intent locks and high-water marks are in-process, so
+to raise with its owner. Re-create it with `create_demo_intent.sh` (a new id) and
+bind the new id. Do not use `bind_intent --replace` on the drifted intent: it
+re-pins whatever bound the server now holds, which is the rewritten one (verified
+live: the latency bound 25 became the observed 40.535 and `--replace` pinned
+40.535 without a warning). Per-intent locks and high-water marks are in-process, so
 run a single broker process. Observations pushed by other clients are invisible to the broker.
 
 Known behaviours / troubleshooting:
