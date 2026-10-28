@@ -85,6 +85,7 @@ container, with samples written into VictoriaMetrics:
   only.
 
 **Known limits of the demo.**
+- The network graph (Fuseki) is in memory and must be reloaded after a restart.
 - After any Degraded evaluation the TMF921 server rewrites the intent's stored
   bound, so the intent must be re-created and re-pinned to assess again.
 - Every `tmf921` assess writes observations to the intent server, and
@@ -399,6 +400,11 @@ python -m ingestion.load_ontologies
 Validates against `ontologies/shacl` and loads `ontologies/tbox/topology.ttl` — the `intent-core-health-01` requirement
 (zero input drops) on the link between `Router-A`/`GigabitEthernet0/0/0`
 and `Router-B`/`GigabitEthernet0/0/1`.
+
+> **Note: the network graph is in memory.** Fuseki runs with `--mem`, so the loaded
+> ontology is lost whenever the `fuseki` container restarts (including
+> `docker compose down`/`up`). Rerun `python -m ingestion.load_ontologies` afterwards.
+> Until then, topology and intent lookups find nothing.
 
 ### Optional: explore the graph visually (LodLive)
 
