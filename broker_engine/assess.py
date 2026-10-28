@@ -5,6 +5,7 @@ from fastapi.encoders import jsonable_encoder
 
 from broker_engine.pruner import prune
 from broker_engine.sparql_resolver import resolve_intent
+from broker_engine.temporal import temporal_observation
 from broker_engine.tsdb_joiner import join_observed_metric
 from broker_engine.validation import _SAFE_WINDOW, ClientInputError, _validate_token, window_seconds
 from data_contracts.envelope import build_observed
@@ -87,7 +88,7 @@ def assess_intent(
         key = (iface["device"], iface["interface_name"])
         try:
             if temporal:
-                observations[key] = _temporal_observation(
+                observations[key] = temporal_observation(
                     join, iface["device"], iface["interface_name"], intent, time_window,
                     mode, as_of, now)
             else:
@@ -124,26 +125,3 @@ def assess_intent(
         })
     return jsonable_encoder(out)
 
-
-_WORST_CASE = {"<": "max", "<=": "max", ">": "min", ">=": "min"}
-
-
-def _temporal_observation(join, device, interface, intent, time_window, mode, as_of, now):
-    metric = intent["metric"]
-    kw = {"as_of": as_of, "now": now}
-    if mode == "at":
-        return join(device, interface, metric, time_window, aggregate="last", **kw)
-    op, target = intent.get("operator"), intent.get("target_value")
-    if op != "==":
-        # <, <= breach at the maximum; >, >= at the minimum. An unknown operator
-        # falls through to max and the evaluator reports it as inconclusive.
-        return join(device, interface, metric, time_window,
-                    aggregate=_WORST_CASE.get(op, "max"), **kw)
-    # "== target" is breached by a sample on either side: look at both extremes.
-    hi = join(device, interface, metric, time_window, aggregate="max", **kw)
-    lo = join(device, interface, metric, time_window, aggregate="min", **kw)
-    for env in (hi, lo):
-        q = env.quality
-        if env.value is None or q.missing or q.stale or q.conflicts:
-            return env  # unusable evidence must not be hidden by the other extreme
-    return hi if hi.value != target else lo
