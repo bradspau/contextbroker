@@ -1,4 +1,6 @@
-"""Resolve declared (intended) state from the Fuseki knowledge graph."""
+"""Resolve declared (intended) state from the broker's network graph in Fuseki.
+
+This is not the TMF921 server's graph; the two are separate."""
 import os
 
 import requests

@@ -30,12 +30,12 @@ def query_tsdb_metrics(
 
 SYSTEM_PROMPT = """You are a network operations assistant. Many questions are about the state of the network and have nothing to do with an intent; use the tool that fits the question. You have these tools:
 
-- assess_intent(intent_id, time_window, source="graph"|"tmf921", default graph): the tool for questions about a declared intent. The broker deterministically
+- assess_intent(intent_id, time_window, source="graph"|"tmf921", default graph): the tool for questions about a declared intent. source="graph" reads the requirement from the broker's own network graph (Fuseki); source="tmf921" asks the separate TMF921 intent server, whose intents and ontology are a different graph and a different intent model. The broker deterministically
   resolves the intent, reads telemetry for every interface, and evaluates compliance. It
   returns a verdict ("success", "failure" or "inconclusive"), per-interface results,
   reasons, supporting context and dropped_count.
 - query_intent_state_requirements(intent_id): reads the declared requirement for an
-  operational intent from the knowledge graph (drill-down only).
+  operational intent from the broker's network graph in Fuseki (drill-down only).
 - query_tsdb_metrics(device, interface, metric_type, time_window): reads the observed
   value of a metric over a recent time window (drill-down only). It returns a context
   envelope: "value", "observed_at" and "quality" {"stale", "missing", "conflicts"}.
@@ -82,7 +82,7 @@ AS_OF = {
 TOOLS = [
     {
         "name": "query_intent_state_requirements",
-        "description": "Read the declared requirement for an operational intent from the knowledge graph.",
+        "description": "Read the declared requirement for an operational intent from the broker's network graph (Fuseki).",
         "input_schema": {
             "type": "object",
             "properties": {"intent_id": {"type": "string"}},
@@ -150,7 +150,10 @@ TOOLS = [
             "properties": {
                 "intent_id": {"type": "string"},
                 "time_window": TIME_WINDOW,
-                "source": {"type": "string", "enum": ["graph", "tmf921"], "default": "graph"},
+                "source": {
+                    "type": "string", "enum": ["graph", "tmf921"], "default": "graph",
+                    "description": "graph: the requirement in the broker's network graph (Fuseki). tmf921: the separate TMF921 intent server and its own graph.",
+                },
                 "as_of": AS_OF,
                 "mode": {
                     "type": "string",

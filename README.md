@@ -44,7 +44,7 @@ structure below by a strangler migration.
 | Agent harness (Claude tool-calling loop, LM Studio fallback, `broker.py` CLI) | Built, tested with mocks |
 | MCP server | Built and unit-tested, **not mounted** or served by anything |
 | Action-readiness check (`governance_gate`) and executor (`action_lifecycle`) | A library only. The check fails closed on evidence freshness, catalogue membership, scope and loop reservation; it does not test identity or approval. The only controller is `NullController`, so nothing is ever changed on a device. No runtime path submits a proposal. |
-| TMF921 verification (`"source":"tmf921"`) | Built. Pushes fresh observations to the intent server, reads its reports, and maps them to a verdict. Opt-in. The default `graph` path is unchanged. |
+| TMF921 verification (`"source":"tmf921"`) | Built. Pushes fresh observations to the intent server, reads its reports, and maps them to a verdict. Opt-in. The default `graph` source (the network graph in Fuseki) is unchanged. |
 | Intent / decision / loop / artefact stores | In-memory |
 | LQM, System 1 / investigation models, state reconciliation, syslog parsing | Stubs |
 | Redpanda, Qdrant, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
@@ -106,23 +106,81 @@ engine serves bounded, quality-labelled context; it never decides or acts.
 
 ```mermaid
 flowchart TB
-    User(["User"]) -->|"CLI prompt"| Harness["agent_harness<br/>(broker.py shim)"]
-    Harness -->|"answer"| User
-    Harness -->|"messages.create()"| Claude["Claude API"]
-    Harness -.->|"on APIConnectionError"| LMStudio["LM Studio (local fallback)"]
+    User(["User or operator"])
+    Client(["REST client"])
 
-    Harness -->|"in-process import"| Engine["broker_engine<br/>(FastAPI app + MCP server built, see below)"]
-    Engine --> Resolver["sparql_resolver / tsdb_joiner<br/>ContextEnvelope (data_contracts)"]
-    Resolver -->|"SPARQL"| Fuseki["Fuseki :3030"]
-    Resolver -->|"PromQL"| VM["VictoriaMetrics :8428"]
-    Engine --> Assurance["outcome_assurance<br/>deterministic verdict"]
+    subgraph Agent["Agent harness (agent_harness)"]
+        Harness["broker.py CLI and tool-calling loop<br/>tools: assess_intent, 3 operations queries,<br/>query_tsdb_metrics, query_intent_state_requirements"]
+    end
+    LLM["LLM_BACKEND=claude: Claude API<br/>(LM Studio only on a connection error)<br/>LLM_BACKEND=lmstudio: LM Studio only"]
 
-    Ingest["ingestion.load_ontologies<br/>(SHACL-gated)"] -->|"ontologies/tbox, shacl"| Fuseki
-    Sim["ingestion.telemetry_simulator"] -->|"writes every 5s"| VM
+    subgraph Broker["Context broker (broker_engine, in contextbroker-api :8080)"]
+        direction TB
+        Ops["Operations queries, no intent needed<br/>metric history, non-zero interfaces, neighbours<br/>(operations.py)"]
+        AssessG["assess_intent source=graph<br/>modes: now, as_of, within"]
+        AssessT["assess_intent source=tmf921<br/>(tmf921_source.py)"]
+        Join["tsdb_joiner and sparql_resolver<br/>ContextEnvelope with quality labels"]
+        Assure["outcome_assurance<br/>deterministic success, failure, inconclusive"]
+        Bind["intent_bindings.json and metric_map.json<br/>the only link between the two graphs"]
+        MCP["MCP server<br/>built, not mounted"]
+    end
 
-    Gate["governance_gate -> action_lifecycle<br/>(refuses on unmet checks, NullController)"]
-    User -->|"browses"| LodLive["LodLive :8888"] --> Proxy["lodlive-proxy :8081"] --> Fuseki
+    subgraph Net["Network side"]
+        Fuseki[("Fuseki :3030<br/>NETWORK GRAPH<br/>topology and OperationalIntent")]
+        VM[("VictoriaMetrics :8428<br/>telemetry")]
+        Sim["telemetry_simulator"]
+        Load["load_ontologies<br/>SHACL-gated"]
+        Lod["LodLive :8888 via lodlive-proxy :8081"]
+    end
+
+    subgraph Svc["Service intent side (compose profile tmf921)"]
+        T921[("tmf921-server :8000<br/>TMF921 GRAPH<br/>TIO ontology and service intents")]
+        Onto[/"licensed TIO ontology files<br/>read-only mount, never in an image or this repo"/]
+    end
+
+    subgraph NotWired["Library only, no runtime path calls it"]
+        Gate["governance_gate and action_lifecycle<br/>NullController, changes nothing"]
+    end
+
+    User -->|"question"| Harness
+    Harness <-->|"tool calls"| LLM
+    Harness -->|"in-process import"| Broker
+    Client -->|"HTTP"| Broker
+
+    Ops --> Join
+    AssessG --> Join
+    AssessG --> Assure
+    AssessT --> Join
+    AssessT --> Bind
+    Join -->|"SPARQL"| Fuseki
+    Join -->|"PromQL"| VM
+
+    AssessT -->|"REST: read intent, push observations, read reports"| T921
+    Onto -.->|"bind mount :ro"| T921
+
+    Sim -->|"writes every 5s"| VM
+    Load -->|"tbox, shacl"| Fuseki
+    User -->|"browses"| Lod --> Fuseki
 ```
+
+### Two separate graphs
+
+The solution has two graphs that are **not** merged, queried together or kept in sync:
+
+| | Network graph | TMF921 graph |
+|---|---|---|
+| Where | Fuseki, dataset `network-dataset` | Jena store inside `tmf921-server` |
+| Ontology | our own small one in `ontologies/tbox/topology.ttl` | the licensed TM Forum TIO ontology (never in this repo) |
+| Holds | devices, interfaces, topology links, and `OperationalIntent` (metric, operator, target) | service intents (e.g. HSI bandwidth and latency) and their reports |
+| Broker access | direct SPARQL | REST only |
+| Used by | `source: "graph"` and the neighbours query | `source: "tmf921"` |
+
+"Intent" means a different thing in each: a simple requirement on a link in the network
+graph, and a service intent in the TMF921 graph. The only connection is
+`data_contracts/intent_bindings.json`, a hand-maintained, pinned file that maps a TMF921
+intent and metric URI to a device, an interface and an expected bound, plus
+`data_contracts/metric_map.json` for metric names. Nothing yet answers "which interfaces
+carry this service" from a graph.
 
 ### Module map
 
@@ -150,7 +208,7 @@ flowchart TB
    them over REST or MCP). Separately, `broker_engine.main:app` serves a REST API
    (`GET /context/intent/{id}`, `GET /context/metric`, `POST /context/assess`) via
    `uvicorn broker_engine.main:app`. `POST /context/assess` also accepts
-   `"source":"tmf921"` (default `"graph"`) to assess via the TMF921 intent server.
+   `"source":"tmf921"` (default `"graph"`, which reads the requirement from the network graph in Fuseki) to assess via the separate TMF921 intent server and its own graph.
    An MCP server is built and unit-tested (`broker_engine.main.build_mcp_server()`)
    but is NOT mounted on that app and nothing serves it; to use it you would have
    to run it yourself, e.g. `build_mcp_server().run()`.
@@ -447,7 +505,7 @@ two optional arguments. With neither, behaviour is unchanged.
   graph keeps no history, so if the target changed since then, the past answer is
   judged against today's target.
 - A historical assessment never updates the intent's current fulfilment state.
-- Only the `graph` source supports this; `source: "tmf921"` rejects both arguments.
+- Only the `graph` source (the network graph in Fuseki) supports this; `source: "tmf921"` rejects both arguments.
 - Data must still be in VictoriaMetrics (default retention is about a month); with no
   sample in the period the result is `inconclusive` ("missing observation"), never `success`.
 - The default (neither argument) still uses the window maximum at the current moment,
@@ -485,7 +543,7 @@ into an image).
 
 The value judged on the TMF921 path is the latest sample in the window
 (`last_over_time`), not the window maximum, so an old high value cannot satisfy
-an `atLeast` bound; the graph path keeps `max_over_time`.
+an `atLeast` bound; the `graph` source keeps `max_over_time`.
 
 Safety behaviour: stale, missing, conflicted, drifted or unpushable evidence gives
 `inconclusive`, never `success`. A partial-evidence assess pushes nothing to the

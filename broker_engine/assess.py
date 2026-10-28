@@ -33,9 +33,11 @@ def assess_intent(
     then prune only the context returned. `resolve`/`join` default to the real
     resolver/joiner (looked up at call time so patches apply).
 
-    `source` is "graph" (default; the graph-resolved intent path) or "tmf921"
-    (intent handling state from the TMF921 intent server combined with the
-    broker's deterministic checks). For "tmf921", `max_entities` is ignored.
+    `source` is "graph" (default; the requirement in the broker's network graph
+    in Fuseki) or "tmf921" (the separate TMF921 intent server and its own graph:
+    its intent handling state combined with the broker's deterministic checks).
+    The two graphs and their notion of "intent" are separate; see
+    data_contracts/intent_bindings.py for the only link. For "tmf921", `max_entities` is ignored.
     Any other value raises ClientInputError.
 
     Temporal queries (graph source only; with neither argument the behaviour is
