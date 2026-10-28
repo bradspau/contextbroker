@@ -13,6 +13,29 @@ ROUTERS = [
 ]
 POST_INTERVAL_SECONDS = 5
 
+# HSI service metrics (--hsi). The ranges were sized for the public HSI demo
+# intent (BBF_921_java seed_data/hsi_demo_intent.ttl): downstream >= 100 Mbps,
+# upstream >= 20 Mbps, latency < 25 ms, jitter < 3 ms, packet loss < 0.1 %.
+# They are plain numbers here, not read from that file; if the demo intent's
+# bounds change, change these too.
+HSI_DEMO_BOUNDS = {
+    "downstream_bandwidth_mbps": 100.0,
+    "upstream_bandwidth_mbps": 20.0,
+    "latency_ms": 25.0,
+    "jitter_ms": 3.0,
+    "packet_loss_percent": 0.1,
+}
+# Compliant ranges, each well inside its bound.
+HSI_COMPLIANT_RANGES = {
+    "latency_ms": (8.0, 15.0),
+    "jitter_ms": (0.5, 1.5),
+    "packet_loss_percent": (0.0, 0.05),
+    "downstream_bandwidth_mbps": (150.0, 250.0),
+    "upstream_bandwidth_mbps": (30.0, 50.0),
+}
+# --hsi-breach: latency well above the 25 ms bound; the other four stay compliant.
+HSI_BREACH_LATENCY_RANGE = (40.0, 60.0)
+
 
 def format_line_protocol(device: str, interface: str, metrics: dict, timestamp_ns: int) -> str:
     tags = f"device={device},interface={interface}"
@@ -20,22 +43,35 @@ def format_line_protocol(device: str, interface: str, metrics: dict, timestamp_n
     return f"{MEASUREMENT_NAME},{tags} {fields} {timestamp_ns}"
 
 
-def generate_metrics(rng: random.Random, inject_drops: bool = False) -> dict:
+def generate_metrics(rng: random.Random, inject_drops: bool = False, hsi: bool = False,
+                     hsi_breach: bool = False) -> dict:
+    """Interface counters, plus the five HSI metrics as floats when `hsi` is set.
+
+    `hsi_breach` (only with `hsi`) puts latency above the demo intent's bound.
+    """
     if inject_drops:
         input_drops = 0 if rng.random() > 0.05 else rng.randint(1, 20)
     else:
         input_drops = 0
-    return {
+    metrics = {
         "in_octets": rng.randint(1_000_000, 5_000_000),
         "out_octets": rng.randint(1_000_000, 5_000_000),
         "input_drops": input_drops,
     }
+    if hsi:
+        for field, (low, high) in HSI_COMPLIANT_RANGES.items():
+            metrics[field] = round(rng.uniform(low, high), 3)
+        if hsi_breach:
+            metrics["latency_ms"] = round(rng.uniform(*HSI_BREACH_LATENCY_RANGE), 3)
+    return metrics
 
 
-def build_payload(rng: random.Random, inject_drops: bool = False) -> str:
+def build_payload(rng: random.Random, inject_drops: bool = False, hsi: bool = False,
+                  hsi_breach: bool = False) -> str:
     timestamp_ns = time.time_ns()
     lines = [
-        format_line_protocol(device, interface, generate_metrics(rng, inject_drops), timestamp_ns)
+        format_line_protocol(device, interface,
+                             generate_metrics(rng, inject_drops, hsi, hsi_breach), timestamp_ns)
         for device, interface in ROUTERS
     ]
     return "\n".join(lines)
@@ -46,10 +82,11 @@ def post_metrics(write_endpoint: str, payload: str) -> None:
     response.raise_for_status()
 
 
-def run(write_endpoint: str = WRITE_ENDPOINT, once: bool = False, inject_drops: bool = False) -> None:
+def run(write_endpoint: str = WRITE_ENDPOINT, once: bool = False, inject_drops: bool = False,
+        hsi: bool = False, hsi_breach: bool = False) -> None:
     rng = random.Random()
     while True:
-        post_metrics(write_endpoint, build_payload(rng, inject_drops))
+        post_metrics(write_endpoint, build_payload(rng, inject_drops, hsi, hsi_breach))
         if once:
             return
         time.sleep(POST_INTERVAL_SECONDS)
@@ -65,5 +102,18 @@ if __name__ == "__main__":
         action="store_true",
         help="Randomly inject nonzero input_drops (5%% chance per sample) to demo the non-compliant path",
     )
+    parser.add_argument(
+        "--hsi",
+        action="store_true",
+        help="Also emit the five HSI metrics (latency_ms, jitter_ms, packet_loss_percent, "
+        "downstream_bandwidth_mbps, upstream_bandwidth_mbps), compliant with the HSI demo intent",
+    )
+    parser.add_argument(
+        "--hsi-breach",
+        action="store_true",
+        help="With the HSI metrics, put latency_ms above the demo intent's 25 ms bound "
+        "(implies --hsi)",
+    )
     args = parser.parse_args()
-    run(once=args.once, inject_drops=args.inject_drops)
+    run(once=args.once, inject_drops=args.inject_drops, hsi=args.hsi or args.hsi_breach,
+        hsi_breach=args.hsi_breach)
