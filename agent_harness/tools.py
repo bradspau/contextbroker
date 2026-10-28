@@ -35,7 +35,8 @@ SYSTEM_PROMPT = """You are a network operations assistant. Many questions are ab
   returns a verdict ("success", "failure" or "inconclusive"), per-interface results,
   reasons, supporting context and dropped_count.
 - query_intent_state_requirements(intent_id): reads the declared requirement for an
-  operational intent from the broker's network graph in Fuseki (drill-down only).
+  operational intent from the broker's network graph in Fuseki (drill-down only; graph
+  OperationalIntent only, not for TMF921 intents).
 - query_tsdb_metrics(device, interface, metric_type, time_window): reads the observed
   value of a metric over a recent time window (drill-down only). It returns a context
   envelope: "value", "observed_at" and "quality" {"stale", "missing", "conflicts"}.

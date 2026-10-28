@@ -119,7 +119,8 @@ python -m ingestion.telemetry_simulator --hsi          # or --hsi-breach for lat
   against the server on 2026-10-28; another intent could use a different comparison
   for the same metric.
 - Every current-moment `tmf921` assess (no `as_of`, no `mode`) writes observations
-  to the intent server, and
+  to the intent server. This is now the default, so a request with no `source` does it
+  too, and
   `POST /context/assess` has no authentication. Do not expose port 8080.
 - Locks and high-water marks are in-process: run a single broker process.
 - Observations pushed by other clients are invisible to the broker.
@@ -543,7 +544,7 @@ or interface, whether or not an intent covers it. `assess_intent` is the tool fo
 ## Asking about the past
 
 `assess_intent` (REST `POST /context/assess`, the MCP tool and the agent tool) takes
-two optional arguments. With neither, behaviour is unchanged.
+two optional arguments. With neither, the assessment is a current one.
 
 | Question | Arguments |
 |---|---|
@@ -629,7 +630,7 @@ into an image).
    mount your own with `HOST_INTENT_BINDINGS`, read-only) is the deprecated
    fallback, used only when the network graph holds no binding for the intent.
 5. Assess:
-   `curl -X POST localhost:8080/context/assess -H 'Content-Type: application/json' -d '{"intent_id":"<id>","time_window":"30m"}'`
+   `curl -X POST localhost:8080/context/assess -H 'Content-Type: application/json' -d '{"intent_id":"<id>","time_window":"30m"}'` (the default source `tmf921` pushes observations to the intent server)
 
 The value judged on the TMF921 path is the latest sample in the window
 (`last_over_time`), not the window maximum, so an old high value cannot satisfy
