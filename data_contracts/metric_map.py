@@ -4,13 +4,20 @@ Data lives in metric_map.json (override with env METRIC_MAP_PATH). Format:
 
     [{"broker_metric": "latency_ms",
       "metric_uri": "http://broadband-forum.org/Intent#LatencyMetric",
-      "unit": "ms"}, ...]
+      "unit": "ms", "operator": "<="}, ...]
 
-Only URIs and units are stored, no ontology text. The five BBF HSI metrics use
+`operator` (one of < <= == >= >) is the direction in which the metric's bound is
+met: the TMF921 intent carries only the bound value (intent_bounds), so the
+temporal TMF921 assess takes the direction from here. The current values
+(latency, jitter, packet loss "<="; bandwidths ">=") are the broker's assumption
+about the BBF HSI intents, not read from the server.
+
+Only URIs, units and operators are stored, no ontology text. The five BBF HSI metrics use
 new broker metric names (not emitted by the telemetry simulator yet):
 downstream_bandwidth_mbps, upstream_bandwidth_mbps, latency_ms, jitter_ms,
-packet_loss_percent. A missing file yields an empty map; any malformed content
-raises ValueError (fail closed).
+packet_loss_percent. A missing file yields an empty map; any malformed content,
+including an entry without a known operator, makes load_metric_map raise
+ValueError (the metric map fails closed).
 """
 import json
 import os
@@ -22,6 +29,7 @@ from broker_engine.validation import _SAFE_TOKEN
 
 URI_RE = re.compile(r"^https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+\Z")
 ALLOWED_UNITS = frozenset({"Mbps", "Gbps", "ms", "us", "percent"})
+ALLOWED_OPERATORS = frozenset({"<", "<=", "==", ">=", ">"})
 DEFAULT_PATH = Path(__file__).with_name("metric_map.json")
 
 
@@ -30,6 +38,9 @@ class MetricMapping:
     broker_metric: str
     metric_uri: str
     unit: str | None
+    # Always set by load_metric_map. None only when built directly without one;
+    # the temporal TMF921 assess then reports the metric as inconclusive.
+    operator: str | None = None
 
 
 def _check_token(value, label: str) -> str:
@@ -65,11 +76,14 @@ def load_metric_map(path: Path | None = None) -> dict[str, MetricMapping]:
         unit = item.get("unit")
         if unit is not None and (not isinstance(unit, str) or unit not in ALLOWED_UNITS):
             raise ValueError(f"unit not allowed: {unit!r}")
+        operator = item.get("operator")
+        if not isinstance(operator, str) or operator not in ALLOWED_OPERATORS:
+            raise ValueError(f"operator missing or not allowed: {operator!r}")
         if uri in out:
             raise ValueError(f"duplicate metric_uri: {uri}")
         if any(m.broker_metric == broker for m in out.values()):
             raise ValueError(f"duplicate broker_metric: {broker}")
-        out[uri] = MetricMapping(broker, uri, unit)
+        out[uri] = MetricMapping(broker, uri, unit, operator)
     return out
 
 

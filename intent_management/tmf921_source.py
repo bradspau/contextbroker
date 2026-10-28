@@ -1,6 +1,10 @@
 """Assess an intent through the TMF921 server: bind, push, poll, interpret.
 
-Fail closed: stale, missing, conflicted, future-dated or unmappable evidence is
+`assess_tmf921_as_of` is the read-only temporal variant (as_of, mode): it reads
+the bounds from the intent now, evaluates telemetry at a past instant or over a
+window in the broker, and pushes nothing.
+
+The TMF921 assess fails closed: stale, missing, conflicted, future-dated or unmappable evidence is
 never a success, and nothing is pushed unless every bound metric is pushable.
 Server text never reaches the result (fixed reason strings only).
 
@@ -20,9 +24,10 @@ from fastapi.encoders import jsonable_encoder
 
 from broker_engine.binding_resolver import resolve_binding
 from broker_engine.pruner import prune
+from broker_engine.temporal import temporal_observation
 from broker_engine.tsdb_joiner import join_observed_metric
-from broker_engine.validation import _SAFE_WINDOW, ClientInputError
-from data_contracts.envelope import DEFAULT_MAX_AGE_S
+from broker_engine.validation import _SAFE_WINDOW, ClientInputError, window_seconds
+from data_contracts.envelope import DEFAULT_MAX_AGE_S, build_observed
 from data_contracts.intent_bindings import IntentBinding, load_bindings
 from data_contracts.metric_map import load_metric_map
 from intent_management.store import IntentStore
@@ -31,7 +36,7 @@ from intent_management.tmf921_client import (
     _check_intent_id,
     intent_bounds,
 )
-from outcome_assurance.evaluate import Outcome
+from outcome_assurance.evaluate import OPERATORS, Outcome, evaluate_intent
 from outcome_assurance.tmf921_report import _short_name, interpret_report
 
 MAX_TRACKED_OUTCOMES = 1024
@@ -298,3 +303,125 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
             return done(Outcome.INCONCLUSIVE, ["intent bound drifted"], envs=all_envs,
                         status="unknown")
     return done(outcome, reasons, per, all_envs)
+
+
+TEMPORAL_REQUIREMENT = "bounds read now from the TMF921 intent (no history is kept)"
+
+
+def assess_tmf921_as_of(
+    intent_id: str,
+    time_window: str,
+    *,
+    as_of: str | None,
+    mode: str | None,
+    client: Tmf921Client | None = None,
+    join=None,
+    now: datetime | None = None,
+    metric_map=None,
+    bindings=None,
+) -> dict:
+    """Temporal assess of a TMF921 intent: judged in the broker, nothing pushed.
+
+    `as_of` ("10m") is an offset back from now; `mode` is "at" (the default: the
+    last sample at that instant, judged fresh relative to it) or "within" (the
+    worst case over `time_window` ending then, in the direction of each bound's
+    operator from metric_map.json). `mode` without `as_of` ends now.
+
+    The TMF921 server keeps no history of bounds, so the bounds are read now from
+    the intent (after the same drift check against the pinned binding as the push
+    path) and applied to the past telemetry. The server is never asked to judge a
+    past instant: its reports describe only what was pushed to it.
+
+    Read-only: no observation is pushed, no high-water mark is written and the
+    stored fulfilment outcome is not updated (`last_outcome` is that stored value,
+    read once). No per-intent lock is taken: the lock in assess_via_tmf921 orders
+    the push/mark/report sequence, none of which happens here, and a concurrent
+    push only changes which stored outcome is reported as `last_outcome`.
+
+    The temporal TMF921 assess fails closed: unmapped metrics, a metric without an
+    operator, drifted bounds, an unreachable server or binding store, and missing,
+    stale, conflicting or non-finite evidence are never a success. Reasons are
+    fixed strings; server text never reaches the result.
+    """
+    # Caller input first: a bad value is a client error before any I/O.
+    _check_intent_id(intent_id)
+    if not isinstance(time_window, str) or not _SAFE_WINDOW.match(time_window):
+        raise ClientInputError(f"Unsafe time_window: {time_window!r}")
+    if mode not in (None, "at", "within"):
+        raise ClientInputError(f"Unknown mode: {mode!r}")
+    offset_s = window_seconds(as_of, "as_of") if as_of is not None else 0
+    mode = mode or "at"
+    now = now or _utcnow()
+    at = now - timedelta(seconds=offset_s)
+    join = join or join_observed_metric
+    prev = TMF921_STORE.last_outcome(intent_id)
+    previous = prev.value if prev else None
+
+    def result(outcome, reasons, per=None, envs=(), status="active"):
+        out = _result(outcome, reasons, per, envs, previous, status)
+        out.update(jsonable_encoder({"mode": mode, "as_of": as_of, "evaluated_at": at,
+                                     "requirement": TEMPORAL_REQUIREMENT}))
+        return out
+
+    binding, reason = _binding_for(intent_id, bindings)
+    if binding is None:
+        return result(Outcome.INCONCLUSIVE, [reason], status="unknown")
+    try:
+        metric_map = load_metric_map() if metric_map is None else metric_map
+    except ValueError:
+        return result(Outcome.INCONCLUSIVE, ["invalid binding"], status="unknown")
+    client = client or Tmf921Client()
+    try:
+        ok = _bounds_match(client.get_intent(intent_id), binding)
+    except ClientInputError:
+        return result(Outcome.INCONCLUSIVE, ["invalid binding"], status="unknown")
+    except Exception:  # Tmf921Error and anything unexpected: no server text
+        return result(Outcome.INCONCLUSIVE, ["intent server unavailable"])
+    if not ok:
+        return result(Outcome.INCONCLUSIVE, ["intent bound drifted"], status="unknown")
+
+    per, reasons, envs, outcomes = [], [], [], set()
+    for uri, bound in binding.bounds.items():
+        name = _short_name(uri)
+        device, interface = binding.sources.get(uri, (None, None))
+        mapping = metric_map.get(uri)
+        if mapping is None or device is None:
+            problem = f"unmapped metric: {name}"
+        elif mapping.operator not in OPERATORS:
+            problem = f"no operator for metric: {name}"
+        else:
+            problem = None
+        if problem:
+            outcomes.add(Outcome.INCONCLUSIVE)
+            reasons.append(problem)
+            per.append({"condition": name, "device": device, "interface_name": interface,
+                        "outcome": Outcome.INCONCLUSIVE.value, "observed": None,
+                        "reason": problem})
+            continue
+        spec = {"metric": mapping.broker_metric, "operator": mapping.operator,
+                "target_value": bound,
+                "interfaces": [{"device": device, "interface_name": interface}]}
+        try:
+            env = temporal_observation(join, device, interface, spec, time_window, mode,
+                                       as_of, now)
+        except ClientInputError:
+            # A binding identifier the joiner refuses: this metric is inconclusive.
+            env = build_observed(f"{device}:{interface}", None, "victoriametrics", None, at)
+            env.quality.conflicts.append("invalid interface identifier")
+        if isinstance(env.value, float) and not math.isfinite(env.value):
+            env.quality.conflicts.append("invalid observation")  # e.g. +Inf from the TSDB
+        envs.append(env)
+        verdict = evaluate_intent(spec, {(device, interface): env})
+        outcomes.add(verdict.outcome)
+        reasons.extend(f"{name}: {r}" for r in verdict.reasons)
+        per.extend({"condition": name, **p,
+                    "reason": f"{name}: {p['reason']}" if p["reason"] else None}
+                   for p in verdict.per_interface)
+
+    if Outcome.FAILURE in outcomes:
+        outcome = Outcome.FAILURE
+    elif Outcome.INCONCLUSIVE in outcomes or not outcomes:
+        outcome = Outcome.INCONCLUSIVE
+    else:
+        outcome = Outcome.SUCCESS
+    return result(outcome, reasons, per, envs)

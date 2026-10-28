@@ -12,7 +12,7 @@ def _w(tmp_path, data):
 
 
 def _e(**kw):
-    d = {"broker_metric": "latency_ms", "metric_uri": URI, "unit": "ms"}
+    d = {"broker_metric": "latency_ms", "metric_uri": URI, "unit": "ms", "operator": "<="}
     d.update(kw)
     return d
 
@@ -21,6 +21,10 @@ def test_load_metric_map_ok():
     m = load_metric_map()
     assert len(m) == 5
     assert m[URI].broker_metric == "latency_ms" and m[URI].unit == "ms"
+    # Controller's assumption (ruling R4); Task 6 verifies it against the live server.
+    ops = {v.broker_metric: v.operator for v in m.values()}
+    assert ops == {"latency_ms": "<=", "jitter_ms": "<=", "packet_loss_percent": "<=",
+                   "downstream_bandwidth_mbps": ">=", "upstream_bandwidth_mbps": ">="}
 
 
 def test_unknown_unit_rejected(tmp_path):
@@ -83,3 +87,23 @@ def test_unit_wrong_type_rejected(tmp_path, unit):
 @pytest.mark.parametrize("unit", ["Mbps", "Gbps", "ms", "us", "percent", None])
 def test_accepted_units(tmp_path, unit):
     assert load_metric_map(_w(tmp_path, [_e(unit=unit)]))[URI].unit == unit
+
+
+def test_operator_required(tmp_path):
+    entry = _e()
+    del entry["operator"]
+    with pytest.raises(ValueError):
+        load_metric_map(_w(tmp_path, [entry]))
+    with pytest.raises(ValueError):
+        load_metric_map(_w(tmp_path, [_e(operator=None)]))
+
+
+@pytest.mark.parametrize("op", ["=", "!=", "=<", "lt", "<= ", "<=\n", 1, ["<="], ""])
+def test_operator_must_be_known(tmp_path, op):
+    with pytest.raises(ValueError):
+        load_metric_map(_w(tmp_path, [_e(operator=op)]))
+
+
+@pytest.mark.parametrize("op", ["<", "<=", "==", ">=", ">"])
+def test_accepted_operators(tmp_path, op):
+    assert load_metric_map(_w(tmp_path, [_e(operator=op)]))[URI].operator == op

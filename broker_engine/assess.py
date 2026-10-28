@@ -10,7 +10,7 @@ from broker_engine.tsdb_joiner import join_observed_metric
 from broker_engine.validation import _SAFE_WINDOW, ClientInputError, _validate_token, window_seconds
 from data_contracts.envelope import build_observed
 from intent_management.store import IntentStore
-from intent_management.tmf921_source import assess_via_tmf921
+from intent_management.tmf921_source import assess_tmf921_as_of, assess_via_tmf921
 from outcome_assurance.evaluate import Outcome, evaluate_intent
 
 DEFAULT_MAX_ENTITIES = 50
@@ -41,14 +41,16 @@ def assess_intent(
     data_contracts/intent_bindings.py for the only link. For "tmf921", `max_entities` is ignored.
     Any other value raises ClientInputError.
 
-    Temporal queries (graph source only; with neither argument the behaviour is
+    Temporal queries (both sources; with neither argument the behaviour is
     unchanged). `as_of` ("10m") evaluates as of that long ago, up to 30d.
     `mode` is "at" (default when as_of is set): the latest sample at that
     instant, which must be fresh relative to it. "within": the worst case over
     the `time_window` ending at that instant (now if no as_of), so a breach
     anywhere in it counts. The requirement is always the intent's current
-    definition (the graph keeps no history), and a historical assessment never
-    updates the intent's current fulfilment state."""
+    definition (neither graph keeps history), and a historical assessment never
+    updates the intent's current fulfilment state. For "tmf921" the bounds are
+    read now from the TMF921 intent and the broker judges the past telemetry
+    itself: nothing is pushed to the server (see assess_tmf921_as_of)."""
     if source not in ("graph", "tmf921"):
         raise ClientInputError(f"Unknown source: {source!r}")
     if mode not in (None, "at", "within"):
@@ -58,7 +60,8 @@ def assess_intent(
     temporal = as_of is not None or mode is not None
     if source == "tmf921":
         if temporal:
-            raise ClientInputError("as_of and mode are not supported for source=tmf921")
+            return assess_tmf921_as_of(intent_id, time_window, as_of=as_of, mode=mode,
+                                       join=join)
         return assess_via_tmf921(intent_id, time_window, join=join)
     mode = (mode or "at") if temporal else None
     join = join or join_observed_metric

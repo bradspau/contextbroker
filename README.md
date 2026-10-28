@@ -87,7 +87,8 @@ container, with samples written into VictoriaMetrics:
 **Known limits of the demo.**
 - After any Degraded evaluation the TMF921 server rewrites the intent's stored
   bound, so the intent must be re-created and re-pinned to assess again.
-- Every `tmf921` assess writes observations to the intent server, and
+- Every current-moment `tmf921` assess (no `as_of`, no `mode`) writes observations
+  to the intent server, and
   `POST /context/assess` has no authentication. Do not expose port 8080.
 - Locks and high-water marks are in-process: run a single broker process.
 - Observations pushed by other clients are invisible to the broker.
@@ -119,7 +120,7 @@ flowchart TB
         direction TB
         Ops["Operations queries, no intent needed<br/>metric history, non-zero interfaces, neighbours<br/>(operations.py)"]
         AssessG["assess_intent source=graph<br/>modes: now, as_of, within"]
-        AssessT["assess_intent source=tmf921<br/>(tmf921_source.py)"]
+        AssessT["assess_intent source=tmf921<br/>modes: now (push), as_of, within (read-only)<br/>(tmf921_source.py)"]
         Join["tsdb_joiner and sparql_resolver<br/>ContextEnvelope with quality labels"]
         Assure["outcome_assurance<br/>deterministic success, failure, inconclusive"]
         Bind["intent_bindings.json and metric_map.json<br/>the only link between the two graphs"]
@@ -523,7 +524,16 @@ two optional arguments. With neither, behaviour is unchanged.
   graph keeps no history, so if the target changed since then, the past answer is
   judged against today's target.
 - A historical assessment never updates the intent's current fulfilment state.
-- Only the `graph` source (the network graph in Fuseki) supports this; `source: "tmf921"` rejects both arguments.
+- Both sources support this. For `source: "tmf921"` the broker reads the bounds now
+  from the TMF921 intent (after the same drift check against the pinned binding, so
+  a drifted bound is `inconclusive`), takes each bound's direction from the
+  `operator` in `data_contracts/metric_map.json` (latency, jitter, packet loss `<=`;
+  bandwidths `>=`, the broker's assumption, not read from the server) and judges
+  the past telemetry itself. The TMF921 server keeps no history and is never asked
+  about the past: nothing is pushed, no high-water mark is written and the stored
+  outcome is not updated. `requirement` says "bounds read now from the TMF921 intent
+  (no history is kept)", `per_interface` has one entry per bound metric (`condition`
+  is the metric's short name), and one failing metric fails the whole intent.
 - Data must still be in VictoriaMetrics (default retention is about a month); with no
   sample in the period the result is `inconclusive` ("missing observation"), never `success`.
 - The default (neither argument) still uses the window maximum at the current moment,
@@ -566,7 +576,9 @@ into an image).
    bounds cannot be read, a metric has no placement or no metric-map entry, or the
    interface is not in the topology. The metric map
    (`data_contracts/metric_map.json`, `METRIC_MAP_PATH`) maps the five HSI metrics to
-   broker metric names such as `downstream_bandwidth_mbps`.
+   broker metric names such as `downstream_bandwidth_mbps` and gives each an
+   `operator` (`<=` or `>=`), which the past-question assess needs; an entry
+   without a known operator makes the metric map fail to load.
    The older bindings file (`data_contracts/intent_bindings.json`, ships as `{}`,
    mount your own with `HOST_INTENT_BINDINGS`, read-only) is the deprecated
    fallback, used only when the network graph holds no binding for the intent.

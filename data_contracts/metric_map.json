@@ -1,7 +1,7 @@
 [
-  {"broker_metric": "downstream_bandwidth_mbps", "metric_uri": "http://broadband-forum.org/Intent#DownstreamBandwidthMetric", "unit": "Mbps"},
-  {"broker_metric": "upstream_bandwidth_mbps", "metric_uri": "http://broadband-forum.org/Intent#UpstreamBandwidthMetric", "unit": "Mbps"},
-  {"broker_metric": "latency_ms", "metric_uri": "http://broadband-forum.org/Intent#LatencyMetric", "unit": "ms"},
-  {"broker_metric": "jitter_ms", "metric_uri": "http://broadband-forum.org/Intent#JitterMetric", "unit": "ms"},
-  {"broker_metric": "packet_loss_percent", "metric_uri": "http://broadband-forum.org/Intent#PacketLossMetric", "unit": "percent"}
+  {"broker_metric": "downstream_bandwidth_mbps", "metric_uri": "http://broadband-forum.org/Intent#DownstreamBandwidthMetric", "unit": "Mbps", "operator": ">="},
+  {"broker_metric": "upstream_bandwidth_mbps", "metric_uri": "http://broadband-forum.org/Intent#UpstreamBandwidthMetric", "unit": "Mbps", "operator": ">="},
+  {"broker_metric": "latency_ms", "metric_uri": "http://broadband-forum.org/Intent#LatencyMetric", "unit": "ms", "operator": "<="},
+  {"broker_metric": "jitter_ms", "metric_uri": "http://broadband-forum.org/Intent#JitterMetric", "unit": "ms", "operator": "<="},
+  {"broker_metric": "packet_loss_percent", "metric_uri": "http://broadband-forum.org/Intent#PacketLossMetric", "unit": "percent", "operator": "<="}
 ]

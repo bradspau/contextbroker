@@ -167,10 +167,14 @@ def test_bad_temporal_arguments_are_client_errors(kw):
     assert not join.calls
 
 
-def test_tmf921_source_rejects_temporal_arguments():
-    for kw in ({"as_of": "10m"}, {"mode": "within"}):
-        with pytest.raises(ClientInputError):
-            assess_intent("i1", "5m", source="tmf921", **kw)
+def test_tmf921_source_routes_temporal_arguments():
+    with patch.object(assess_mod, "assess_tmf921_as_of", return_value={"verdict": "success"}) as t, \
+            patch.object(assess_mod, "assess_via_tmf921") as push:
+        for kw in ({"as_of": "10m"}, {"mode": "within"}):
+            assert assess_intent("i1", "5m", source="tmf921", **kw) == {"verdict": "success"}
+    push.assert_not_called()
+    assert [c.kwargs["as_of"] for c in t.call_args_list] == ["10m", None]
+    assert [c.kwargs["mode"] for c in t.call_args_list] == [None, "within"]
 
 
 # ---------- plumbing ----------

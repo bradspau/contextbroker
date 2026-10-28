@@ -53,7 +53,8 @@ def build_mcp_server():
         as_of: str | None = None, mode: Literal["at", "within"] | None = None,
     ) -> dict:
         """Assess an intent against observed telemetry and return verdict plus pruned context.
-        as_of ("10m") assesses as of that long ago; mode "within" checks the whole window."""
+        as_of ("10m") assesses as of that long ago; mode "within" checks the whole window.
+        Both work for source graph and tmf921 (tmf921: bounds read now, nothing pushed)."""
         return assess(intent_id, time_window, source=source, as_of=as_of, mode=mode)
 
     @server.tool()

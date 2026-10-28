@@ -41,7 +41,7 @@ SYSTEM_PROMPT = """You are a network operations assistant. Many questions are ab
   envelope: "value", "observed_at" and "quality" {"stale", "missing", "conflicts"}.
 
 For a past question use assess_intent's as_of ("was it compliant 10 minutes ago" is as_of="10m", mode="at"; "was it ever non-compliant in the last 30 minutes" is time_window="30m", mode="within").
-The requirement judged is always the intent's current definition, and as_of works only for source=graph. Say which moment the verdict describes (the evaluated_at field).
+as_of and mode work for both sources. The requirement judged is always the intent's current definition (for source=tmf921 the bounds are read now from the TMF921 intent; nothing is pushed to the server for a past question). Say which moment the verdict describes (the evaluated_at field).
 
 time_window is digits plus s, m, h or d (for example "5m" or "1h"), never ISO-8601 such as "PT1H".
 
@@ -76,7 +76,7 @@ TIME_WINDOW = {
 AS_OF = {
     "type": "string",
     "pattern": r"^[0-9]+[smhd]$",
-    "description": 'Evaluate as of this long ago, e.g. "10m" for "10 minutes ago" (up to 30d). Omit for now. For assess_intent, graph source only.',
+    "description": 'Evaluate as of this long ago, e.g. "10m" for "10 minutes ago" (up to 30d). Omit for now. For assess_intent, works for both sources.',
 }
 
 TOOLS = [
