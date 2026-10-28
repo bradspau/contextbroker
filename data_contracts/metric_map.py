@@ -4,16 +4,17 @@ Data lives in metric_map.json (override with env METRIC_MAP_PATH). Format:
 
     [{"broker_metric": "latency_ms",
       "metric_uri": "http://broadband-forum.org/Intent#LatencyMetric",
-      "unit": "ms", "operator": "<="}, ...]
+      "unit": "ms", "operator": "<"}, ...]
 
 `operator` (one of < <= == >= >) is the direction in which the metric's bound is
 met: the TMF921 intent carries only the bound value (intent_bounds), so the
 temporal TMF921 assess takes the direction from here. The current values
-(latency, jitter, packet loss "<="; bandwidths ">=") are the broker's assumption
-about the BBF HSI intents, not read from the server.
+(latency, jitter, packet loss "<", strict; bandwidths ">=") were verified against
+the live TMF921 server on 2026-10-28 (tests/test_tmf921_live.py: a value exactly
+at a quan:smaller bound fails on the server).
 
 Only URIs, units and operators are stored, no ontology text. The five BBF HSI metrics use
-new broker metric names (not emitted by the telemetry simulator yet):
+new broker metric names (emitted by the telemetry simulator with --hsi):
 downstream_bandwidth_mbps, upstream_bandwidth_mbps, latency_ms, jitter_ms,
 packet_loss_percent. A missing file yields an empty map; any malformed content,
 including an entry without a known operator, makes load_metric_map raise

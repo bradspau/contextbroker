@@ -21,9 +21,10 @@ def test_load_metric_map_ok():
     m = load_metric_map()
     assert len(m) == 5
     assert m[URI].broker_metric == "latency_ms" and m[URI].unit == "ms"
-    # Controller's assumption (ruling R4); Task 6 verifies it against the live server.
+    # Verified against the live TMF921 server on 2026-10-28 (tests/test_tmf921_live.py):
+    # quan:smaller is strict, so a value exactly at the bound fails.
     ops = {v.broker_metric: v.operator for v in m.values()}
-    assert ops == {"latency_ms": "<=", "jitter_ms": "<=", "packet_loss_percent": "<=",
+    assert ops == {"latency_ms": "<", "jitter_ms": "<", "packet_loss_percent": "<",
                    "downstream_bandwidth_mbps": ">=", "upstream_bandwidth_mbps": ">="}
 
 

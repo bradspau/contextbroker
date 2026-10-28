@@ -21,8 +21,8 @@ LAT = "http://broadband-forum.org/Intent#LatencyMetric"
 JIT = "http://broadband-forum.org/Intent#JitterMetric"
 DOWN = "http://broadband-forum.org/Intent#DownstreamBandwidthMetric"
 IID = "hsi-demo-1"
-MMAP = {LAT: MetricMapping("latency_ms", LAT, "ms", "<="),
-        JIT: MetricMapping("jitter_ms", JIT, "ms", "<="),
+MMAP = {LAT: MetricMapping("latency_ms", LAT, "ms", "<"),
+        JIT: MetricMapping("jitter_ms", JIT, "ms", "<"),
         DOWN: MetricMapping("downstream_bandwidth_mbps", DOWN, "Mbps", ">=")}
 B_LAT = {IID: IntentBinding(IID, {LAT: ("olt1", "pon0/1")}, {LAT: 100.0})}
 B_TWO = {IID: IntentBinding(IID, {LAT: ("olt1", "pon0/1"), JIT: ("olt1", "pon0/2")},
@@ -121,7 +121,7 @@ def test_within_mode_finds_a_breach_in_the_window():
     assert out["verdict"] == "failure" and out["mode"] == "within"
     assert out["per_interface"][0]["observed"] == 150.0
     assert out["reasons"] == [
-        "LatencyMetric: olt1/pon0/1: observed 150.0 does not satisfy <= 100.0"]
+        "LatencyMetric: olt1/pon0/1: observed 150.0 does not satisfy < 100.0"]
 
 
 def test_within_without_as_of_ends_now():
@@ -174,7 +174,7 @@ def test_one_failing_metric_fails_the_whole_intent():
     assert by["LatencyMetric"]["outcome"] == "success"
     assert by["JitterMetric"]["outcome"] == "failure"
     assert by["JitterMetric"]["interface_name"] == "pon0/2"
-    assert out["reasons"] == ["JitterMetric: olt1/pon0/2: observed 25.0 does not satisfy <= 10.0"]
+    assert out["reasons"] == ["JitterMetric: olt1/pon0/2: observed 25.0 does not satisfy < 10.0"]
 
 
 def test_failure_outranks_inconclusive_and_inconclusive_outranks_success():

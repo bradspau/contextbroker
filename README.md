@@ -91,7 +91,7 @@ python -m ingestion.telemetry_simulator --hsi          # or --hsi-breach for lat
 | `--hsi-breach` (latency 40.5 ms vs 25 ms), current assess | `failure`, reason "bound violated" (names no metric, see limits) |
 | Re-assess the same intent after that `failure` | `inconclusive` ("intent bound drifted"): the server had rewritten the latency bound 25 to 40.535 |
 | New intent (new id) and new binding, compliant samples | `success` |
-| `mode=within`, 5 m window containing the breach | `failure`, "LatencyMetric: ... observed 59.22 does not satisfy <= 25.0" |
+| `mode=within`, 5 m window containing the breach | `failure`, "LatencyMetric: ... observed 59.22 does not satisfy < 25.0" |
 | `as_of=10m`, `mode=at`, instant in the compliant period | `success` |
 | `as_of=10m`, `mode=at`, instant in the breach period | `failure`, LatencyMetric observed 47.994 |
 | `as_of=10m`, `mode=within`, window containing the breach | `failure`, LatencyMetric observed 58.848 |
@@ -115,10 +115,9 @@ python -m ingestion.telemetry_simulator --hsi          # or --hsi-breach for lat
   JSON reason (`40.535 ms < 25 ms: FAIL`) names no metric. The failing condition
   is only in its TR290 report (`icm:about bbf:Lat_Check`). The past-question
   assess names the metric because the broker judges it.
-- Operators: for latency, jitter and packet loss the server is strict (`<`) while
-  `metric_map.json` says `<=`, so a value exactly at the bound is judged
-  differently by the past-question assess (`success`) and the server (`failure`).
-  Bandwidth (`>=`) agrees. See `tests/test_tmf921_live.py`.
+- The operator for past-window verdicts comes from metric_map.json, verified live
+  against the server on 2026-10-28; another intent could use a different comparison
+  for the same metric.
 - Every current-moment `tmf921` assess (no `as_of`, no `mode`) writes observations
   to the intent server, and
   `POST /context/assess` has no authentication. Do not expose port 8080.
@@ -567,8 +566,9 @@ two optional arguments. With neither, behaviour is unchanged.
 - Both sources support this. For `source: "tmf921"` the broker reads the bounds now
   from the TMF921 intent (after the same drift check against the pinned binding, so
   a drifted bound is `inconclusive`), takes each bound's direction from the
-  `operator` in `data_contracts/metric_map.json` (latency, jitter, packet loss `<=`;
-  bandwidths `>=`, the broker's assumption, not read from the server) and judges
+  `operator` in `data_contracts/metric_map.json` (latency, jitter, packet loss `<`;
+  bandwidths `>=`; verified live against the server on 2026-10-28, not read from
+  each intent) and judges
   the past telemetry itself. The TMF921 server keeps no history and is never asked
   about the past: nothing is pushed, no high-water mark is written and the stored
   outcome is not updated. `requirement` says "bounds read now from the TMF921 intent
@@ -613,18 +613,18 @@ into an image).
    file without loading it. If the intent already has a binding in the graph the tool
    refuses unless you pass `--replace`, which writes the new file, then removes the old
    binding from Fuseki, then loads the new one. If that load fails the intent has no
-   binding until the file is loaded again. The tool refuses, writing and loading nothing, if the
+   binding until the file is loaded again. `--replace` pins whatever bound the server
+   currently holds, so never use it on an intent that reported "intent bound
+   drifted"; create a new intent instead. The tool refuses, writing and loading nothing, if the
    bounds cannot be read, a metric has no placement or no metric-map entry, or the
    interface is not in the topology. The metric map
    (`data_contracts/metric_map.json`, `METRIC_MAP_PATH`) maps the five HSI metrics to
    broker metric names such as `downstream_bandwidth_mbps` and gives each an
-   `operator` (`<=` or `>=`), which the past-question assess needs; an entry
-   without a known operator makes the metric map fail to load. Checked against the
-   live server on 2026-10-28 (`tests/test_tmf921_live.py`): `>=` matches the
-   server for both bandwidth metrics, but for latency, jitter and packet loss the
-   server's `quan:smaller` is strict, so a value exactly at the bound is `failure`
-   on the server and `success` in the broker's past-question assess. The map has
-   not been changed yet.
+   `operator`, which the past-question assess needs: `<` (strict) for latency,
+   jitter and packet loss, `>=` for both bandwidths. An entry without a known
+   operator makes the metric map fail to load. The operators were checked against
+   the live server on 2026-10-28 (`tests/test_tmf921_live.py`): the server's
+   `quan:smaller` is strict, so a value exactly at the bound is a `failure`.
    The older bindings file (`data_contracts/intent_bindings.json`, ships as `{}`,
    mount your own with `HOST_INTENT_BINDINGS`, read-only) is the deprecated
    fallback, used only when the network graph holds no binding for the intent.
