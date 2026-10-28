@@ -46,7 +46,9 @@ def _eval_one(op, target, env: ContextEnvelope | None) -> tuple[Outcome, object,
                 f"unresolved conflicts: {'; '.join(env.quality.conflicts)}")
     if not _is_number(observed) or not _is_number(target):
         return Outcome.INCONCLUSIVE, observed, f"not comparable: {observed!r} vs {target!r}"
-    return (Outcome.SUCCESS if fn(observed, target) else Outcome.FAILURE), observed, None
+    if fn(observed, target):
+        return Outcome.SUCCESS, observed, None
+    return Outcome.FAILURE, observed, f"observed {observed} does not satisfy {op} {target}"
 
 
 def evaluate_intent(intent: dict, observations: dict[tuple[str, str], ContextEnvelope]) -> Verdict:

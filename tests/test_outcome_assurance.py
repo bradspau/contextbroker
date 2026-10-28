@@ -99,3 +99,17 @@ def test_conflicted_observation_is_inconclusive_not_success_or_failure():
     assert v.outcome == Outcome.INCONCLUSIVE
     assert "unresolved conflicts" in v.reasons[0]
     assert "multiple series" in v.reasons[0]
+
+
+def test_failure_states_why():
+    v = evaluate_intent(intent(), {("r1", "e0"): env(5), ("r2", "e1"): env(0)})
+    failed = v.per_interface[0]
+    assert failed["outcome"] == "failure"
+    assert failed["reason"] == "r1/e0: observed 5 does not satisfy == 0.0"
+    assert v.reasons == [failed["reason"]]
+    assert v.per_interface[1]["reason"] is None  # success carries no reason
+
+
+def test_failure_reason_uses_operator_and_target():
+    v = evaluate_intent(intent(op="<=", target=2), {("r1", "e0"): env(3.5)})
+    assert v.per_interface[0]["reason"] == "r1/e0: observed 3.5 does not satisfy <= 2"
