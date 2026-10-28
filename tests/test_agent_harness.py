@@ -351,7 +351,7 @@ def test_system_prompt_forbids_own_verdict():
 def test_assess_intent_tool_registered_and_rejects_extra_args():
     names = {t["name"] for t in tools.TOOLS}
     assert "assess_intent" in names
-    assert tools._TOOL_ALLOWED_ARGS["assess_intent"] == {"intent_id", "time_window", "source"}
+    assert tools._TOOL_ALLOWED_ARGS["assess_intent"] == {"intent_id", "time_window", "source", "as_of", "mode"}
     assert {t["function"]["name"] for t in tools.TOOLS_OPENAI} == names
     with patch("agent_harness.tools.assess_intent") as mock_tool:
         content, is_error = tools.execute_tool(

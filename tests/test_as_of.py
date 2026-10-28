@@ -1,0 +1,203 @@
+"""Temporal queries: as_of (point-in-time) and mode=within (worst case over a past window)."""
+from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock, patch
+
+import pytest
+
+from broker_engine import assess as assess_mod
+from broker_engine.assess import assess_intent
+from broker_engine.tsdb_joiner import join_observed_metric
+from broker_engine.validation import ClientInputError, MAX_AS_OF_S, window_seconds
+from data_contracts.envelope import ContextEnvelope, Quality, StateCategory
+
+NOW = datetime(2026, 10, 28, 12, 0, 0, tzinfo=timezone.utc)
+AT = NOW - timedelta(minutes=10)
+
+
+def _resp(payload):
+    r = Mock()
+    r.json.return_value = payload
+    r.raise_for_status.return_value = None
+    return r
+
+
+# ---------- validation ----------
+def test_window_seconds():
+    assert window_seconds("90s", "as_of") == 90
+    assert window_seconds("10m", "as_of") == 600
+    assert window_seconds("2h", "as_of") == 7200
+    assert window_seconds("0s", "as_of") == 0
+
+
+@pytest.mark.parametrize("bad", ["PT10M", "10", "m", "-5m", "10m\n", "1.5h", "", "10 m",
+                                 f"{MAX_AS_OF_S + 1}s", "99999d"])
+def test_window_seconds_rejects(bad):
+    with pytest.raises(ClientInputError):
+        window_seconds(bad, "as_of")
+
+
+# ---------- joiner ----------
+def test_join_as_of_queries_at_the_past_instant_and_judges_freshness_there():
+    ts = AT.timestamp() - 30  # sample 30 s before the as_of instant
+    r = _resp({"data": {"result": [{"value": [AT.timestamp(), "0"]}]}})
+    r2 = _resp({"data": {"result": [{"value": [AT.timestamp(), str(ts)]}]}})
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]) as g:
+        env = join_observed_metric("r1", "eth0", "input_drops", "5m", now=NOW,
+                                   aggregate="last", as_of="10m")
+    for call in g.call_args_list:
+        assert float(call.kwargs["params"]["time"]) == AT.timestamp()
+    assert g.call_args_list[0].kwargs["params"]["query"].startswith("last_over_time(")
+    assert env.quality.stale is False  # fresh relative to as_of, though 10m old vs now
+    assert env.observed_at == datetime.fromtimestamp(ts, timezone.utc)
+
+
+def test_join_as_of_stale_relative_to_the_as_of_instant():
+    ts = AT.timestamp() - 900
+    r = _resp({"data": {"result": [{"value": [AT.timestamp(), "0"]}]}})
+    r2 = _resp({"data": {"result": [{"value": [AT.timestamp(), str(ts)]}]}})
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]):
+        env = join_observed_metric("r1", "eth0", "input_drops", "30m", now=NOW,
+                                   aggregate="last", as_of="10m")
+    assert env.quality.stale is True
+
+
+def test_join_without_as_of_sends_no_time_param():
+    r = _resp({"data": {"result": [{"value": [NOW.timestamp(), "3"]}]}})
+    r2 = _resp({"data": {"result": [{"value": [NOW.timestamp(), str(NOW.timestamp())]}]}})
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]) as g:
+        join_observed_metric("r1", "eth0", "input_drops", "5m", now=NOW)
+    for call in g.call_args_list:
+        assert "time" not in call.kwargs["params"]
+
+
+def test_join_min_aggregate_allowed_and_bad_as_of_rejected():
+    r = _resp({"data": {"result": []}})
+    with patch("broker_engine.tsdb_joiner.requests.get", return_value=r) as g:
+        join_observed_metric("r1", "eth0", "input_drops", "5m", now=NOW, aggregate="min")
+    assert g.call_args.kwargs["params"]["query"].startswith("min_over_time(")
+    with pytest.raises(ClientInputError):
+        join_observed_metric("r1", "eth0", "input_drops", "5m", now=NOW, as_of="PT10M")
+
+
+# ---------- assess ----------
+def _env(value, eid="r1:e0", stale=False, missing=False, conflicts=()):
+    return ContextEnvelope(eid, StateCategory.OBSERVED, value, "t", AT,
+                           Quality(stale=stale, missing=missing, conflicts=list(conflicts)))
+
+
+def _resolve(op="==", target=0.0):
+    return lambda _id: {"intent_id": "i1", "metric": "input_drops", "operator": op,
+                        "target_value": target, "state": "observed", "source": "s",
+                        "interfaces": [{"device": "r1", "interface_name": "e0"}]}
+
+
+def _join_by_agg(values):
+    """values: {aggregate: value}; records the kwargs it was called with."""
+    calls = []
+
+    def join(device, iface, metric, window, **kw):
+        calls.append(kw)
+        v = values[kw["aggregate"]]
+        return _env(v, missing=v is None)
+    join.calls = calls
+    return join
+
+
+def test_legacy_call_is_unchanged_and_adds_no_temporal_keys():
+    seen = {}
+
+    def join(device, iface, metric, window):  # legacy 4-arg signature
+        seen["ok"] = True
+        return _env(0.0)
+    out = assess_intent("i1", "5m", resolve=_resolve(), join=join)
+    assert seen and out["verdict"] == "success"
+    assert not ({"as_of", "mode", "evaluated_at"} & out.keys())
+
+
+def test_point_in_time_uses_last_sample_at_as_of():
+    join = _join_by_agg({"last": 5.0})
+    out = assess_intent("i1", "5m", resolve=_resolve(), join=join, as_of="10m")
+    assert join.calls[0]["aggregate"] == "last" and join.calls[0]["as_of"] == "10m"
+    assert out["verdict"] == "failure" and out["mode"] == "at" and out["as_of"] == "10m"
+    assert "evaluated_at" in out and out["requirement"].startswith("current")
+
+
+@pytest.mark.parametrize("op,agg", [("<", "max"), ("<=", "max"), (">", "min"), (">=", "min")])
+def test_within_uses_worst_case_aggregate_per_operator(op, agg):
+    join = _join_by_agg({"max": 1.0, "min": 1.0})
+    assess_intent("i1", "30m", resolve=_resolve(op, 0.0), join=join, mode="within", as_of="10m")
+    assert [c["aggregate"] for c in join.calls] == [agg]
+
+
+def test_within_equals_detects_a_breach_below_or_above_target():
+    # any sample differing from 0 breaches "== 0": a low outlier counts as well as a high one
+    up = assess_intent("i1", "30m", resolve=_resolve("==", 0.0),
+                       join=_join_by_agg({"max": 7.0, "min": 0.0}), mode="within")
+    down = assess_intent("i1", "30m", resolve=_resolve("==", 0.0),
+                         join=_join_by_agg({"max": 0.0, "min": -3.0}), mode="within")
+    ok = assess_intent("i1", "30m", resolve=_resolve("==", 0.0),
+                       join=_join_by_agg({"max": 0.0, "min": 0.0}), mode="within")
+    assert (up["verdict"], down["verdict"], ok["verdict"]) == ("failure", "failure", "success")
+    assert up["per_interface"][0]["observed"] == 7.0
+    assert down["per_interface"][0]["observed"] == -3.0
+
+
+def test_within_equals_unusable_evidence_is_inconclusive_not_success():
+    out = assess_intent("i1", "30m", resolve=_resolve("==", 0.0),
+                        join=_join_by_agg({"max": 0.0, "min": None}), mode="within")
+    assert out["verdict"] == "inconclusive"
+
+
+def test_historical_assessment_does_not_touch_current_fulfilment():
+    with patch.object(assess_mod.DEFAULT_STORE, "fulfilment_update") as upd, \
+         patch.object(assess_mod.IntentStore, "fulfilment_update") as upd2:
+        assess_intent("i1", "5m", resolve=_resolve(), join=_join_by_agg({"last": 5.0}), as_of="10m")
+        assess_intent("i1", "5m", resolve=_resolve(), join=_join_by_agg({"max": 5.0, "min": 5.0}),
+                      mode="within")
+    upd.assert_not_called()
+    upd2.assert_not_called()
+
+
+@pytest.mark.parametrize("kw", [{"as_of": "PT10M"}, {"as_of": "10"}, {"mode": "recent"},
+                                {"mode": "AT"}, {"as_of": f"{MAX_AS_OF_S + 1}s"}])
+def test_bad_temporal_arguments_are_client_errors(kw):
+    join = _join_by_agg({"last": 0.0})
+    with pytest.raises(ClientInputError):
+        assess_intent("i1", "5m", resolve=_resolve(), join=join, **kw)
+    assert not join.calls
+
+
+def test_tmf921_source_rejects_temporal_arguments():
+    for kw in ({"as_of": "10m"}, {"mode": "within"}):
+        with pytest.raises(ClientInputError):
+            assess_intent("i1", "5m", source="tmf921", **kw)
+
+
+# ---------- plumbing ----------
+def test_rest_passes_as_of_and_mode_through():
+    from fastapi.testclient import TestClient
+    from broker_engine import main
+    with patch.object(main, "assess", return_value={"verdict": "success"}) as a:
+        c = TestClient(main.app)
+        r = c.post("/context/assess", json={"intent_id": "i1", "time_window": "5m",
+                                            "as_of": "10m", "mode": "within"})
+        assert r.status_code == 200
+        assert a.call_args.kwargs["as_of"] == "10m" and a.call_args.kwargs["mode"] == "within"
+        assert c.post("/context/assess", json={"intent_id": "i1", "time_window": "5m",
+                                               "mode": "bogus"}).status_code == 422
+
+
+def test_agent_tool_declares_and_validates_temporal_arguments():
+    import json
+    from agent_harness import tools
+    props = next(t for t in tools.TOOLS if t["name"] == "assess_intent")["input_schema"]["properties"]
+    assert props["mode"]["enum"] == ["at", "within"] and "10m" in props["as_of"]["description"]
+    assert "as_of" in tools.SYSTEM_PROMPT and "evaluated_at" in tools.SYSTEM_PROMPT
+    with patch.object(tools, "assess_intent", return_value={"verdict": "success"}) as a:
+        content, is_err = tools.execute_tool(
+            "assess_intent", {"intent_id": "i1", "time_window": "5m", "as_of": "10m", "mode": "at"})
+    assert not is_err and a.call_args.kwargs == {"intent_id": "i1", "time_window": "5m",
+                                                   "as_of": "10m", "mode": "at"}
+    content, is_err = tools.execute_tool(
+        "assess_intent", {"intent_id": "i1", "time_window": "5m", "mode": "sometime"})
+    assert is_err and "mode" in json.loads(content)["error"]

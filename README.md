@@ -395,6 +395,36 @@ The broker reads the intent's requirement from Fuseki, reads the observed
 metric from VictoriaMetrics, and deterministically computes the verdict
 (success / failure / inconclusive); the LLM only explains that verdict.
 
+## Asking about the past
+
+`assess_intent` (REST `POST /context/assess`, the MCP tool and the agent tool) takes
+two optional arguments. With neither, behaviour is unchanged.
+
+| Question | Arguments |
+|---|---|
+| Was it compliant 10 minutes ago? | `{"time_window":"2m","as_of":"10m"}` (mode `at`) |
+| Was it ever non-compliant in the last 30 minutes? | `{"time_window":"30m","mode":"within"}` |
+| Was it ever non-compliant in the 5 minutes ending 8 minutes ago? | `{"time_window":"5m","as_of":"8m","mode":"within"}` |
+
+- `as_of` is an offset back from now (`90s`, `10m`, `2h`, `1d`), up to 30 days.
+- `at` (the default when `as_of` is set) uses the latest sample at that moment. It
+  must be fresh relative to that moment, not to now, so a reading from 10 minutes ago
+  is judged on how old it was then. `time_window` is how far before that moment to look.
+- `within` takes the worst case over `time_window` ending then. The worst case depends
+  on the intent's operator: the maximum for `<` and `<=`, the minimum for `>` and `>=`,
+  and for `==` both extremes, so a sample on either side of the target counts.
+- The response adds `mode`, `as_of`, `evaluated_at` (the moment it describes) and
+  `requirement`. The requirement is always the intent's **current** definition: the
+  graph keeps no history, so if the target changed since then, the past answer is
+  judged against today's target.
+- A historical assessment never updates the intent's current fulfilment state.
+- Only the `graph` source supports this; `source: "tmf921"` rejects both arguments.
+- Data must still be in VictoriaMetrics (default retention is about a month); with no
+  sample in the period the result is `inconclusive` ("missing observation"), never `success`.
+- The default (neither argument) still uses the window maximum at the current moment,
+  which is only the worst case for `<`, `<=` and `==` intents. Use `mode: "within"` for
+  an operator-aware worst case.
+
 ## Using an external TMF921 intent server
 
 The broker can take the intent (and its handling state) from a TMF921 server

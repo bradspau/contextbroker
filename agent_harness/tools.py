@@ -36,6 +36,9 @@ SYSTEM_PROMPT = """You are a network compliance agent. You have three tools:
   value of a metric over a recent time window (drill-down only). It returns a context
   envelope: "value", "observed_at" and "quality" {"stale", "missing", "conflicts"}.
 
+For a past question use assess_intent's as_of ("was it compliant 10 minutes ago" is as_of="10m", mode="at"; "was it ever non-compliant in the last 30 minutes" is time_window="30m", mode="within").
+The requirement judged is always the intent's current definition, and as_of works only for source=graph. Say which moment the verdict describes (the evaluated_at field).
+
 time_window is digits plus s, m, h or d (for example "5m" or "1h"), never ISO-8601 such as "PT1H".
 
 To answer a compliance question, call assess_intent and then EXPLAIN the verdict it
@@ -93,6 +96,16 @@ TOOLS = [
                 "intent_id": {"type": "string"},
                 "time_window": TIME_WINDOW,
                 "source": {"type": "string", "enum": ["graph", "tmf921"], "default": "graph"},
+                "as_of": {
+                    "type": "string",
+                    "pattern": r"^[0-9]+[smhd]$",
+                    "description": 'Assess as of this long ago, e.g. "10m" for "10 minutes ago" (up to 30d). Omit for now. graph source only.',
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["at", "within"],
+                    "description": '"at": the latest sample at that moment (default when as_of is set). "within": was it EVER non-compliant during the time_window ending then.',
+                },
             },
             "required": ["intent_id", "time_window"],
         },

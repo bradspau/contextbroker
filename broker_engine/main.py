@@ -15,11 +15,11 @@ from broker_engine.tsdb_joiner import join_observed_metric
 from outcome_assurance.evaluate import evaluate_intent  # noqa: F401
 
 def assess(intent_id: str, time_window: str, max_entities: int = DEFAULT_MAX_ENTITIES,
-           source: str = "graph") -> dict:
+           source: str = "graph", as_of: str | None = None, mode: str | None = None) -> dict:
     """Thin wrapper over assess_intent using this module's resolver/joiner."""
     return assess_intent(
         intent_id, time_window, max_entities,
-        resolve=resolve_intent, join=join_observed_metric, source=source,
+        resolve=resolve_intent, join=join_observed_metric, source=source, as_of=as_of, mode=mode,
     )
 
 
@@ -48,10 +48,12 @@ def build_mcp_server():
 
     @server.tool()
     def assess_intent(
-        intent_id: str, time_window: str, source: Literal["graph", "tmf921"] = "graph"
+        intent_id: str, time_window: str, source: Literal["graph", "tmf921"] = "graph",
+        as_of: str | None = None, mode: Literal["at", "within"] | None = None,
     ) -> dict:
-        """Assess an intent against observed telemetry and return verdict plus pruned context."""
-        return assess(intent_id, time_window, source=source)
+        """Assess an intent against observed telemetry and return verdict plus pruned context.
+        as_of ("10m") assesses as of that long ago; mode "within" checks the whole window."""
+        return assess(intent_id, time_window, source=source, as_of=as_of, mode=mode)
 
     return server
 
@@ -90,6 +92,8 @@ class AssessRequest(BaseModel):
     intent_id: str
     time_window: str
     source: Literal["graph", "tmf921"] = "graph"
+    as_of: str | None = None
+    mode: Literal["at", "within"] | None = None
 
 
 @app.get("/context/intent/{intent_id}", dependencies=[_allow_only()])
@@ -106,4 +110,5 @@ def get_metric(device: str, interface: str, metric_type: str, time_window: str) 
 def post_assess(body: AssessRequest, request: Request) -> dict:
     if request.query_params:
         raise HTTPException(422, "Undeclared query parameter(s)")
-    return assess(body.intent_id, body.time_window, source=body.source)
+    return assess(body.intent_id, body.time_window, source=body.source,
+                  as_of=body.as_of, mode=body.mode)
