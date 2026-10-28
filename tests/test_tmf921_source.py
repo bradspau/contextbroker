@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import requests
 
 import threading
 
@@ -97,6 +98,12 @@ def run(client, join=None, bindings=BIND, mmap=MMAP, iid=IID, window="5m", **kw)
                             **{"monotonic": lambda: 0.0, **kw})
     out["_sleeps"] = sleeps
     return out
+
+
+@pytest.fixture(autouse=True)
+def no_live_graph(monkeypatch):
+    # No test here may reach Fuseki by accident; tests needing a graph result override this.
+    monkeypatch.setattr("intent_management.tmf921_source.resolve_binding", lambda i: None)
 
 
 @pytest.fixture(autouse=True)
@@ -536,8 +543,6 @@ def test_non_finite_second_metric_means_zero_posts(bad):
 
 # --- binding resolution: graph first, JSON fallback (R6) ---
 
-import requests  # noqa: E402
-
 GRAPH_BIND = IntentBinding(IID, {URI: ("olt9", "pon9/9")}, {URI: 100.0})
 
 
@@ -615,3 +620,10 @@ def test_explicit_bindings_never_touch_the_graph(monkeypatch):
     monkeypatch.setattr("intent_management.tmf921_source.resolve_binding", boom)
     assert src._binding_for(IID, BIND) == (BIND[IID], None)
     assert src._binding_for(IID, {}) == (None, "no binding for intent")
+
+
+def test_unsafe_intent_id_propagates_from_binding_for(monkeypatch):
+    from broker_engine.binding_resolver import resolve_binding
+    monkeypatch.setattr("intent_management.tmf921_source.resolve_binding", resolve_binding)
+    with pytest.raises(ClientInputError):
+        src._binding_for("bad id!")

@@ -146,6 +146,8 @@ def _binding_for(intent_id: str, bindings=None) -> tuple[IntentBinding | None, s
         binding = resolve_binding(intent_id)
     except requests.RequestException:  # checked first: includes a non-JSON reply
         binding, unreachable = None, True
+    except ClientInputError:  # unsafe caller input is not a binding problem
+        raise
     except ValueError:
         return None, "invalid binding"
     if binding is not None:
