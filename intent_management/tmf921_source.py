@@ -15,13 +15,15 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+import requests
 from fastapi.encoders import jsonable_encoder
 
+from broker_engine.binding_resolver import resolve_binding
 from broker_engine.pruner import prune
 from broker_engine.tsdb_joiner import join_observed_metric
 from broker_engine.validation import _SAFE_WINDOW, ClientInputError
 from data_contracts.envelope import DEFAULT_MAX_AGE_S
-from data_contracts.intent_bindings import load_bindings
+from data_contracts.intent_bindings import IntentBinding, load_bindings
 from data_contracts.metric_map import load_metric_map
 from intent_management.store import IntentStore
 from intent_management.tmf921_client import (
@@ -124,6 +126,39 @@ def _bounds_match(doc, binding) -> bool:
         and all(current[u] == b for u, b in binding.bounds.items())
 
 
+def _binding_for(intent_id: str, bindings=None) -> tuple[IntentBinding | None, str | None]:
+    """Find the binding for an intent: (binding, None) or (None, fixed reason).
+
+    Reasons: "no binding for intent", "invalid binding", "binding store unavailable".
+    Precedence: an explicit `bindings` mapping is used alone. Otherwise the network
+    graph wins; the JSON file is the fallback when the graph has no binding for the
+    intent. If the graph is unreachable the JSON file is used only if it has the
+    intent, else the reason is "binding store unavailable". A malformed graph
+    binding is "invalid binding" and does not fall back to JSON, so the TMF921
+    assess returns inconclusive instead of silently using a different binding.
+    Fuseki error text is never returned.
+    """
+    if bindings is not None:
+        binding = bindings.get(intent_id)
+        return (binding, None) if binding else (None, "no binding for intent")
+    unreachable = False
+    try:
+        binding = resolve_binding(intent_id)
+    except requests.RequestException:  # checked first: includes a non-JSON reply
+        binding, unreachable = None, True
+    except ValueError:
+        return None, "invalid binding"
+    if binding is not None:
+        return binding, None
+    try:
+        binding = load_bindings().get(intent_id)
+    except ValueError:
+        return None, "binding store unavailable" if unreachable else "invalid binding"
+    if binding is not None:
+        return binding, None
+    return None, "binding store unavailable" if unreachable else "no binding for intent"
+
+
 def assess_via_tmf921(
     intent_id: str,
     time_window: str,
@@ -145,14 +180,13 @@ def assess_via_tmf921(
         raise ClientInputError(f"Unsafe time_window: {time_window!r}")
     join = join or join_observed_metric
 
+    binding, reason = _binding_for(intent_id, bindings)
+    if binding is None:
+        return _result(Outcome.INCONCLUSIVE, [reason], status="unknown")
     try:
-        bindings = load_bindings() if bindings is None else bindings
         metric_map = load_metric_map() if metric_map is None else metric_map
     except ValueError:
         return _result(Outcome.INCONCLUSIVE, ["invalid binding"], status="unknown")
-    binding = bindings.get(intent_id)
-    if binding is None:
-        return _result(Outcome.INCONCLUSIVE, ["no binding for intent"], status="unknown")
     client = client or Tmf921Client()
     with _intent_lock(intent_id):
         return _assess_locked(intent_id, time_window, binding, client, join, now,

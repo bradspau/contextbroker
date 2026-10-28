@@ -1,6 +1,10 @@
 """Per-intent bindings: which device/interface supplies each metric, and the
 bound the intent is expected to carry.
 
+The network graph (`:ServiceBinding` nodes, see broker_engine/binding_resolver.py)
+is the primary source and wins. This JSON file is now the fallback, used when the
+graph has no binding for the intent (or is unreachable and the file has it).
+
 Data lives in intent_bindings.json (override with env INTENT_BINDINGS_PATH);
 it ships as `{}`. Format: intent id -> metric URI -> {device, interface, bound}.
 

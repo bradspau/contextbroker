@@ -167,6 +167,8 @@ def test_invalid_binding_load_error(monkeypatch):
     def boom(*a, **k):
         raise ValueError("duplicate key")
     monkeypatch.setattr("intent_management.tmf921_source.load_bindings", boom)
+    monkeypatch.setattr("intent_management.tmf921_source.resolve_binding",
+                        lambda i: None)
     out = assess_via_tmf921(IID, "5m", client=FakeClient(), join=make_join(),
                             metric_map=MMAP, sleep=lambda s: None)
     assert out["verdict"] == "inconclusive" and out["reasons"] == ["invalid binding"]
@@ -530,3 +532,86 @@ def test_non_finite_second_metric_means_zero_posts(bad):
     c = two([[rep("a", "2026-10-27T12:00:01Z"), rep("b", "2026-10-27T12:00:02Z")]])
     out = run(c, join, bindings=BIND2)
     assert c.posts == [] and out["verdict"] == "inconclusive"
+
+
+# --- binding resolution: graph first, JSON fallback (R6) ---
+
+import requests  # noqa: E402
+
+GRAPH_BIND = IntentBinding(IID, {URI: ("olt9", "pon9/9")}, {URI: 100.0})
+
+
+def _no_json(monkeypatch, data=None):
+    monkeypatch.setattr("intent_management.tmf921_source.load_bindings",
+                        lambda *a, **k: data if data is not None else {})
+
+
+def _assess(c):
+    return assess_via_tmf921(IID, "5m", client=c, join=make_join(), now=NOW,
+                             metric_map=MMAP, sleep=lambda s: None,
+                             monotonic=lambda: 0.0)
+
+
+def test_binding_store_down_is_inconclusive_and_pushes_nothing(monkeypatch):
+    def down(*a, **k):
+        raise requests.ConnectionError("fuseki says: secret detail")
+    monkeypatch.setattr("intent_management.tmf921_source.resolve_binding", down)
+    _no_json(monkeypatch)
+    c = FakeClient()
+    out = _assess(c)
+    assert out["verdict"] == "inconclusive"
+    assert out["reasons"] == ["binding store unavailable"]
+    assert out["intent_status"] == "unknown"
+    assert "secret" not in str(out)
+    assert c.posts == [] and c.gets == 0
+
+
+def test_binding_store_down_falls_back_to_json_when_json_has_intent(monkeypatch):
+    def down(*a, **k):
+        raise requests.ConnectionError("x")
+    monkeypatch.setattr("intent_management.tmf921_source.resolve_binding", down)
+    _no_json(monkeypatch, BIND)
+    assert src._binding_for(IID) == (BIND[IID], None)
+
+
+def test_graph_binding_wins_over_json(monkeypatch):
+    monkeypatch.setattr("intent_management.tmf921_source.resolve_binding",
+                        lambda i: GRAPH_BIND)
+    _no_json(monkeypatch, BIND)
+    assert src._binding_for(IID) == (GRAPH_BIND, None)
+    c = FakeClient()
+    _assess(c)
+    assert c.posts and c.posts[0][0] == URI
+
+
+def test_json_binding_used_when_graph_has_none(monkeypatch):
+    monkeypatch.setattr("intent_management.tmf921_source.resolve_binding",
+                        lambda i: None)
+    _no_json(monkeypatch, BIND)
+    assert src._binding_for(IID) == (BIND[IID], None)
+
+
+def test_no_binding_anywhere(monkeypatch):
+    monkeypatch.setattr("intent_management.tmf921_source.resolve_binding",
+                        lambda i: None)
+    _no_json(monkeypatch)
+    assert src._binding_for(IID) == (None, "no binding for intent")
+
+
+def test_malformed_graph_binding_is_invalid_and_does_not_fall_back(monkeypatch):
+    def bad(*a, **k):
+        raise ValueError("duplicate")
+    monkeypatch.setattr("intent_management.tmf921_source.resolve_binding", bad)
+    _no_json(monkeypatch, BIND)
+    assert src._binding_for(IID) == (None, "invalid binding")
+    c = FakeClient()
+    out = _assess(c)
+    assert out["reasons"] == ["invalid binding"] and c.posts == []
+
+
+def test_explicit_bindings_never_touch_the_graph(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("graph consulted")
+    monkeypatch.setattr("intent_management.tmf921_source.resolve_binding", boom)
+    assert src._binding_for(IID, BIND) == (BIND[IID], None)
+    assert src._binding_for(IID, {}) == (None, "no binding for intent")
