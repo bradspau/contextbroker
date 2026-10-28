@@ -44,7 +44,7 @@ structure below by a strangler migration.
 | Agent harness (Claude tool-calling loop, LM Studio fallback, `broker.py` CLI) | Built, tested with mocks |
 | MCP server | Built and unit-tested, **not mounted** or served by anything |
 | Action-readiness check (`governance_gate`) and executor (`action_lifecycle`) | A library only. The check fails closed on evidence freshness, catalogue membership, scope and loop reservation; it does not test identity or approval. The only controller is `NullController`, so nothing is ever changed on a device. No runtime path submits a proposal. |
-| TMF921 verification (`"source":"tmf921"`) | Built. Pushes fresh observations to the intent server, reads its reports, and maps them to a verdict. Opt-in. The default `graph` source (the network graph in Fuseki) is unchanged. |
+| TMF921 verification (`"source":"tmf921"`, the default) | Built. Pushes fresh observations to the intent server, reads its reports, and maps them to a verdict. The `graph` source (the `OperationalIntent` in the network graph in Fuseki) still works but is deprecated: its response carries a `deprecated` field, and it is slated for removal. |
 | Intent / decision / loop / artefact stores | In-memory |
 | LQM, System 1 / investigation models, state reconciliation, syslog parsing | Stubs |
 | Redpanda, Qdrant, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
@@ -81,7 +81,7 @@ P=Router-A/GigabitEthernet0/0/0
 python -m ingestion.bind_intent <intent_id> --place LatencyMetric=$P --place JitterMetric=$P \
   --place PacketLossMetric=$P --place DownstreamBandwidthMetric=$P --place UpstreamBandwidthMetric=$P
 python -m ingestion.telemetry_simulator --hsi          # or --hsi-breach for latency 40-60 ms
-# wait ~20 s for VictoriaMetrics, then assess with source "tmf921";
+# wait ~20 s for VictoriaMetrics, then assess (tmf921 is the default source);
 # past questions add as_of ("10m") and mode ("at" or "within")
 ```
 
@@ -150,8 +150,8 @@ flowchart TB
     subgraph Broker["Context broker (broker_engine, in contextbroker-api :8080)"]
         direction TB
         Ops["Operations queries, no intent needed<br/>metric history, non-zero interfaces, neighbours<br/>(operations.py)"]
-        AssessG["assess_intent source=graph<br/>modes: now, as_of, within"]
-        AssessT["assess_intent source=tmf921<br/>modes: now (push), as_of, within (read-only)<br/>(tmf921_source.py)"]
+        AssessG["assess_intent source=graph (deprecated)<br/>modes: now, as_of, within"]
+        AssessT["assess_intent source=tmf921 (default)<br/>modes: now (push), as_of, within (read-only)<br/>(tmf921_source.py)"]
         Join["tsdb_joiner and sparql_resolver<br/>ContextEnvelope with quality labels"]
         Assure["outcome_assurance<br/>deterministic success, failure, inconclusive"]
         Bind["intent_bindings.json and metric_map.json<br/>the only link between the two graphs"]
@@ -159,7 +159,7 @@ flowchart TB
     end
 
     subgraph Net["Network side"]
-        Fuseki[("Jena Fuseki server :3030, instance 1<br/>NETWORK GRAPH, TDB2 store<br/>persistent volume fuseki-data<br/>topology and OperationalIntent")]
+        Fuseki[("Jena Fuseki server :3030, instance 1<br/>NETWORK GRAPH, TDB2 store<br/>persistent volume fuseki-data<br/>resources and service bindings<br/>OperationalIntent deprecated")]
         VM[("VictoriaMetrics :8428<br/>telemetry")]
         Sim["telemetry_simulator"]
         Load["load_ontologies<br/>SHACL-gated"]
@@ -216,9 +216,9 @@ The solution has two graphs that are **not** merged, queried together or kept in
 | Dataset | `network-dataset` | a TDB2 store at `/app/tdb2-data` |
 | Persistence | Docker volume `fuseki-data` (TDB2), survives restarts | Docker volume `tdb2-tmf921`, survives restarts |
 | Ontology | our own small one in `ontologies/tbox/topology.ttl` | the licensed TM Forum TIO ontology (never in this repo) |
-| Holds | devices, interfaces, topology links, and `OperationalIntent` (metric, operator, target) | service intents (e.g. HSI bandwidth and latency) and their reports |
+| Holds | resources and service bindings (devices, interfaces, topology links); `OperationalIntent` (metric, operator, target) is deprecated | service intents (e.g. HSI bandwidth and latency) and their reports |
 | Broker access | direct SPARQL | REST only |
-| Used by | `source: "graph"` and the neighbours query | `source: "tmf921"` |
+| Used by | the neighbours query and the bindings; `source: "graph"` (deprecated) | `source: "tmf921"` (the default) |
 
 "Intent" means a different thing in each: a simple requirement on a link in the network
 graph, and a service intent in the TMF921 graph. The only connection is
@@ -252,8 +252,8 @@ carry this service" from a graph.
 1. `agent_harness` imports `broker_engine` functions in-process (it does not call
    them over REST or MCP). Separately, `broker_engine.main:app` serves a REST API
    (`GET /context/intent/{id}`, `GET /context/metric`, `POST /context/assess`) via
-   `uvicorn broker_engine.main:app`. `POST /context/assess` also accepts
-   `"source":"tmf921"` (default `"graph"`, which reads the requirement from the network graph in Fuseki) to assess via the separate TMF921 intent server and its own graph.
+   `uvicorn broker_engine.main:app`. `POST /context/assess` assesses via the separate TMF921 intent server and its own graph by default (`"source":"tmf921"`). The deprecated `"source":"graph"` reads the `OperationalIntent` from the network graph in Fuseki and adds a `deprecated` field to the response. For the legacy demo intent:
+   `curl -X POST localhost:8080/context/assess -H 'Content-Type: application/json' -d '{"intent_id":"intent-core-health-01","time_window":"5m","source":"graph"}'`
    An MCP server is built and unit-tested (`broker_engine.main.build_mcp_server()`)
    but is NOT mounted on that app and nothing serves it; to use it you would have
    to run it yourself, e.g. `build_mcp_server().run()`.
@@ -563,7 +563,7 @@ two optional arguments. With neither, behaviour is unchanged.
   graph keeps no history, so if the target changed since then, the past answer is
   judged against today's target.
 - A historical assessment never updates the intent's current fulfilment state.
-- Both sources support this. For `source: "tmf921"` the broker reads the bounds now
+- Both sources support this. For the default `source: "tmf921"` the broker reads the bounds now
   from the TMF921 intent (after the same drift check against the pinned binding, so
   a drifted bound is `inconclusive`), takes each bound's direction from the
   `operator` in `data_contracts/metric_map.json` (latency, jitter, packet loss `<`;
@@ -629,7 +629,7 @@ into an image).
    mount your own with `HOST_INTENT_BINDINGS`, read-only) is the deprecated
    fallback, used only when the network graph holds no binding for the intent.
 5. Assess:
-   `curl -X POST localhost:8080/context/assess -H 'Content-Type: application/json' -d '{"intent_id":"<id>","time_window":"30m","source":"tmf921"}'`
+   `curl -X POST localhost:8080/context/assess -H 'Content-Type: application/json' -d '{"intent_id":"<id>","time_window":"30m"}'`
 
 The value judged on the TMF921 path is the latest sample in the window
 (`last_over_time`), not the window maximum, so an old high value cannot satisfy

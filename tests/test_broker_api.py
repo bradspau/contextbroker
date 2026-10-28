@@ -65,7 +65,7 @@ def test_prune_zero_max():
 def test_assess_happy_path():
     with patch("broker_engine.main.resolve_intent", return_value=INTENT), \
          patch("broker_engine.main.join_observed_metric", side_effect=fake_join):
-        r = client.post("/context/assess", json={"intent_id": "I1", "time_window": "5m"})
+        r = client.post("/context/assess", json={"intent_id": "I1", "time_window": "5m", "source": "graph"})
     assert r.status_code == 200
     body = r.json()
     assert body["verdict"] == "success"
@@ -81,12 +81,12 @@ def test_assess_verdict_independent_of_pruning():
         return build_observed("r2:e1", 10.0, "vm", NOW, NOW)
     with patch("broker_engine.main.resolve_intent", return_value=INTENT), \
          patch("broker_engine.main.join_observed_metric", side_effect=join):
-        r = client.post("/context/assess", json={"intent_id": "I1", "time_window": "5m"})
+        r = client.post("/context/assess", json={"intent_id": "I1", "time_window": "5m", "source": "graph"})
     assert r.json()["verdict"] == "failure"
     # direct call with tiny max_entities: floor is the interface count
     with patch("broker_engine.main.resolve_intent", return_value=INTENT), \
          patch("broker_engine.main.join_observed_metric", side_effect=join):
-        out = main.assess("I1", "5m", max_entities=0)
+        out = main.assess("I1", "5m", max_entities=0, source="graph")
     assert out["verdict"] == "failure"
     assert len(out["context"]) == 2 and out["dropped_count"] == 0
 
@@ -96,7 +96,7 @@ def test_assess_missing_telemetry_200():
         return build_observed(f"{device}:{interface}", None, "vm", None, NOW)
     with patch("broker_engine.main.resolve_intent", return_value=INTENT), \
          patch("broker_engine.main.join_observed_metric", side_effect=join):
-        r = client.post("/context/assess", json={"intent_id": "I1", "time_window": "5m"})
+        r = client.post("/context/assess", json={"intent_id": "I1", "time_window": "5m", "source": "graph"})
     assert r.status_code == 200
     assert r.json()["verdict"] == "inconclusive"
     assert r.json()["context"][0]["quality"]["missing"] is True
@@ -144,7 +144,7 @@ def test_unsafe_token_400():
 def test_unknown_intent_404():
     with patch("broker_engine.main.resolve_intent", side_effect=main.IntentNotFound("No such intent: 'X'")):
         assert client.get("/context/intent/X").status_code == 404
-        r = client.post("/context/assess", json={"intent_id": "X", "time_window": "5m"})
+        r = client.post("/context/assess", json={"intent_id": "X", "time_window": "5m", "source": "graph"})
     assert r.status_code == 404
 
 
@@ -167,7 +167,7 @@ def test_mcp_assess_tool_call():
     server = main.build_mcp_server()
     with patch("broker_engine.main.resolve_intent", return_value=INTENT), \
          patch("broker_engine.main.join_observed_metric", side_effect=fake_join):
-        res = asyncio.run(server.call_tool("assess_intent", {"intent_id": "I1", "time_window": "5m"}))
+        res = asyncio.run(server.call_tool("assess_intent", {"intent_id": "I1", "time_window": "5m", "source": "graph"}))
     import json
     assert json.loads(res.content[0].text)["verdict"] == "success"
 
@@ -249,7 +249,7 @@ def test_assess_invalid_interface_is_inconclusive_not_400():
 
     with patch("broker_engine.main.resolve_intent", return_value=intent), \
          patch("broker_engine.main.join_observed_metric", side_effect=join):
-        r = client.post("/context/assess", json={"intent_id": "I-BAD", "time_window": "5m"})
+        r = client.post("/context/assess", json={"intent_id": "I-BAD", "time_window": "5m", "source": "graph"})
     assert r.status_code == 200
     body = r.json()
     assert body["verdict"] == "inconclusive"
@@ -264,7 +264,7 @@ def test_assess_bad_time_window_is_400_and_records_nothing():
     DEFAULT_STORE._outcomes.pop("I-WIN", None)
     with patch("broker_engine.main.resolve_intent", return_value=INTENT), \
          patch("broker_engine.main.join_observed_metric", side_effect=fake_join):
-        r = client.post("/context/assess", json={"intent_id": "I-WIN", "time_window": "5min"})
+        r = client.post("/context/assess", json={"intent_id": "I-WIN", "time_window": "5min", "source": "graph"})
     assert r.status_code == 400
     assert "I-WIN" not in DEFAULT_STORE._outcomes
 
@@ -284,7 +284,7 @@ def test_assess_real_validation_rejects_unsafe_graph_interface_per_interface():
 
     with patch("broker_engine.main.resolve_intent", return_value=intent), \
          patch("broker_engine.main.join_observed_metric", side_effect=real_join_with_fake_http):
-        r = client.post("/context/assess", json={"intent_id": "I-REAL", "time_window": "5m"})
+        r = client.post("/context/assess", json={"intent_id": "I-REAL", "time_window": "5m", "source": "graph"})
     assert r.status_code == 200
     body = r.json()
     assert body["verdict"] == "inconclusive"
@@ -294,13 +294,54 @@ def test_assess_real_validation_rejects_unsafe_graph_interface_per_interface():
 
 # --- source switch (graph | tmf921) ---
 
-def test_assess_default_source_is_graph_not_tmf921():
-    with patch("broker_engine.main.resolve_intent", return_value=INTENT), \
-         patch("broker_engine.main.join_observed_metric", side_effect=fake_join), \
-         patch("broker_engine.assess.assess_via_tmf921") as via:
+def test_default_source_is_tmf921():
+    from broker_engine.assess import assess_intent
+    ret = {"verdict": "success", "source": "tmf921"}
+    with patch("broker_engine.assess.assess_via_tmf921", return_value=ret) as via:
+        assert assess_intent("I1", "5m") == ret
+        via.assert_called_once()
+    # REST body without source
+    with patch("broker_engine.assess.assess_via_tmf921", return_value=ret) as via, \
+         patch("broker_engine.main.resolve_intent") as res:
         r = TestClient(main.app).post("/context/assess", json={"intent_id": "I1", "time_window": "5m"})
+    assert r.status_code == 200 and r.json() == ret
+    via.assert_called_once()
+    res.assert_not_called()
+    # MCP tool without source
+    import json
+    server = main.build_mcp_server()
+    with patch("broker_engine.assess.assess_via_tmf921", return_value=ret) as via:
+        out = asyncio.run(server.call_tool("assess_intent", {"intent_id": "I1", "time_window": "5m"}))
+    via.assert_called_once()
+    assert json.loads(out.content[0].text) == ret
+    assert main.AssessRequest(intent_id="I1", time_window="5m").source == "tmf921"
+
+
+def _graph_post(source):
+    body = {"intent_id": "I1", "time_window": "5m", "source": source}
+    with patch("broker_engine.main.resolve_intent", return_value=INTENT), \
+         patch("broker_engine.main.join_observed_metric", side_effect=fake_join):
+        return TestClient(main.app).post("/context/assess", json=body)
+
+
+def test_graph_source_adds_deprecation_field():
+    r = _graph_post("graph")
     assert r.status_code == 200
-    via.assert_not_called()
+    body = r.json()
+    assert body["deprecated"] == (
+        "source=graph reads the OperationalIntent in the network graph, "
+        "which is being retired; use source=tmf921")
+    rest = {k: v for k, v in body.items() if k != "deprecated"}
+    assert set(rest) == {"verdict", "per_interface", "reasons", "context", "dropped_count",
+                         "intent_status", "last_outcome"}
+    assert rest["verdict"] == "success" and rest["dropped_count"] == 0
+
+
+def test_tmf921_response_has_no_deprecated_key():
+    with patch("broker_engine.assess.assess_via_tmf921", return_value={"verdict": "success"}):
+        r = TestClient(main.app).post(
+            "/context/assess", json={"intent_id": "I1", "time_window": "5m", "source": "tmf921"})
+    assert "deprecated" not in r.json()
 
 
 def test_assess_source_tmf921_routes_to_new_path():

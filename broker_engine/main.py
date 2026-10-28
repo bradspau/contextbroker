@@ -16,7 +16,7 @@ from broker_engine.tsdb_joiner import join_observed_metric
 from outcome_assurance.evaluate import evaluate_intent  # noqa: F401
 
 def assess(intent_id: str, time_window: str, max_entities: int = DEFAULT_MAX_ENTITIES,
-           source: str = "graph", as_of: str | None = None, mode: str | None = None) -> dict:
+           source: str = "tmf921", as_of: str | None = None, mode: str | None = None) -> dict:
     """Thin wrapper over assess_intent using this module's resolver/joiner."""
     return assess_intent(
         intent_id, time_window, max_entities,
@@ -49,12 +49,13 @@ def build_mcp_server():
 
     @server.tool()
     def assess_intent(
-        intent_id: str, time_window: str, source: Literal["graph", "tmf921"] = "graph",
+        intent_id: str, time_window: str, source: Literal["graph", "tmf921"] = "tmf921",
         as_of: str | None = None, mode: Literal["at", "within"] | None = None,
     ) -> dict:
         """Assess an intent against observed telemetry and return verdict plus pruned context.
         as_of ("10m") assesses as of that long ago; mode "within" checks the whole window.
-        Both work for source graph and tmf921 (tmf921: bounds read now, nothing pushed)."""
+        Both work for either source (tmf921: bounds read now, nothing pushed). Default source is tmf921;
+        source graph is deprecated."""
         return assess(intent_id, time_window, source=source, as_of=as_of, mode=mode)
 
     @server.tool()
@@ -110,7 +111,7 @@ class AssessRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intent_id: str
     time_window: str
-    source: Literal["graph", "tmf921"] = "graph"
+    source: Literal["graph", "tmf921"] = "tmf921"
     as_of: str | None = None
     mode: Literal["at", "within"] | None = None
 

@@ -14,6 +14,8 @@ from intent_management.tmf921_source import assess_tmf921_as_of, assess_via_tmf9
 from outcome_assurance.evaluate import Outcome, evaluate_intent
 
 DEFAULT_MAX_ENTITIES = 50
+GRAPH_DEPRECATED = ("source=graph reads the OperationalIntent in the network graph, "
+                    "which is being retired; use source=tmf921")
 
 # Late-bound resolver so patches of broker_engine.assess.resolve_intent apply.
 DEFAULT_STORE = IntentStore(lambda intent_id: resolve_intent(intent_id))
@@ -26,7 +28,7 @@ def assess_intent(
     *,
     resolve=None,
     join=None,
-    source: str = "graph",
+    source: str = "tmf921",
     as_of: str | None = None,
     mode: str | None = None,
 ) -> dict:
@@ -34,9 +36,10 @@ def assess_intent(
     then prune only the context returned. `resolve`/`join` default to the real
     resolver/joiner (looked up at call time so patches apply).
 
-    `source` is "graph" (default; the requirement in the broker's network graph
-    in Fuseki) or "tmf921" (the separate TMF921 intent server and its own graph:
-    its intent handling state combined with the broker's deterministic checks).
+    `source` is "tmf921" (default; the separate TMF921 intent server and its own
+    graph: its intent handling state combined with the broker's deterministic
+    checks) or "graph" (DEPRECATED; the OperationalIntent in the broker's network
+    graph in Fuseki, which is being retired. Its response gains a "deprecated" key).
     The two graphs and their notion of "intent" are separate; see
     data_contracts/intent_bindings.py for the only link. For "tmf921", `max_entities` is ignored.
     Any other value raises ClientInputError.
@@ -63,6 +66,13 @@ def assess_intent(
             return assess_tmf921_as_of(intent_id, time_window, as_of=as_of, mode=mode,
                                        join=join)
         return assess_via_tmf921(intent_id, time_window, join=join)
+    out = _assess_graph(intent_id, time_window, max_entities, resolve, join,
+                        temporal, as_of, mode)
+    out["deprecated"] = GRAPH_DEPRECATED
+    return out
+
+
+def _assess_graph(intent_id, time_window, max_entities, resolve, join, temporal, as_of, mode):
     mode = (mode or "at") if temporal else None
     join = join or join_observed_metric
     # Validate caller input up front so a bad window is a client error (400),

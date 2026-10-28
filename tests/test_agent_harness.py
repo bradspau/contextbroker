@@ -373,7 +373,7 @@ def test_assess_intent_tool_returns_deterministic_verdict():
     with patch("broker_engine.assess.resolve_intent", return_value=INTENT), \
          patch("broker_engine.assess.join_observed_metric", side_effect=join):
         content, is_error = tools.execute_tool(
-            "assess_intent", {"intent_id": "I1", "time_window": "5m"}
+            "assess_intent", {"intent_id": "I1", "time_window": "5m", "source": "graph"}
         )
     assert is_error is False
     body = json.loads(content)
@@ -457,6 +457,7 @@ def test_assess_tool_source_enum_in_both_schemas():
     ):
         assert schema["properties"]["source"]["enum"] == ["graph", "tmf921"]
         assert "source" not in schema["required"]
+        assert schema["properties"]["source"]["default"] == "tmf921"
 
 
 def test_execute_tool_rejects_bad_source_and_undeclared_args():
@@ -482,6 +483,13 @@ def test_execute_tool_routes_tmf921_source():
 def test_system_prompt_mentions_tmf921_rule():
     assert "source=tmf921" in tools.SYSTEM_PROMPT
     assert 'assess_intent(intent_id, time_window, source="graph"|"tmf921"' in tools.SYSTEM_PROMPT
+
+
+def test_prompt_prefers_default_source():
+    p = tools.SYSTEM_PROMPT
+    assert 'default tmf921' in p
+    assert "Do not choose" in p and "deprecated" in p
+    assert "intent-core-health-01" in p and 'needs source="graph"' in p
 
 
 # ---------- LLM_BACKEND switch ----------

@@ -49,7 +49,7 @@ def test_with_resolver_shares_record():
 def test_assess_reports_status_and_last_outcome():
     from broker_engine import assess as assess_mod
     assess_mod.DEFAULT_STORE._outcomes.clear()
-    body = {"intent_id": "I-LO", "time_window": "5m"}
+    body = {"intent_id": "I-LO", "time_window": "5m", "source": "graph"}
     with patch("broker_engine.main.resolve_intent", return_value=INTENT), \
          patch("broker_engine.main.join_observed_metric", side_effect=fake_join):
         first = client.post("/context/assess", json=body).json()
@@ -63,7 +63,7 @@ def test_unknown_intent_short_circuits_inconclusive():
         raise AssertionError("must not join")
     with patch("broker_engine.main.resolve_intent", return_value={"metric": "latency_ms"}), \
          patch("broker_engine.main.join_observed_metric", side_effect=join):
-        body = client.post("/context/assess", json={"intent_id": "I2", "time_window": "5m"}).json()
+        body = client.post("/context/assess", json={"intent_id": "I2", "time_window": "5m", "source": "graph"}).json()
     assert body["verdict"] == "inconclusive"
     assert body["intent_status"] == "unknown"
     assert "intent definition incomplete" in body["reasons"]

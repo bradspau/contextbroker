@@ -109,14 +109,14 @@ def test_legacy_call_is_unchanged_and_adds_no_temporal_keys():
     def join(device, iface, metric, window):  # legacy 4-arg signature
         seen["ok"] = True
         return _env(0.0)
-    out = assess_intent("i1", "5m", resolve=_resolve(), join=join)
+    out = assess_intent("i1", "5m", source="graph", resolve=_resolve(), join=join)
     assert seen and out["verdict"] == "success"
     assert not ({"as_of", "mode", "evaluated_at"} & out.keys())
 
 
 def test_point_in_time_uses_last_sample_at_as_of():
     join = _join_by_agg({"last": 5.0})
-    out = assess_intent("i1", "5m", resolve=_resolve(), join=join, as_of="10m")
+    out = assess_intent("i1", "5m", source="graph", resolve=_resolve(), join=join, as_of="10m")
     assert join.calls[0]["aggregate"] == "last" and join.calls[0]["as_of"] == "10m"
     assert out["verdict"] == "failure" and out["mode"] == "at" and out["as_of"] == "10m"
     assert "evaluated_at" in out and out["requirement"].startswith("current")
@@ -125,17 +125,17 @@ def test_point_in_time_uses_last_sample_at_as_of():
 @pytest.mark.parametrize("op,agg", [("<", "max"), ("<=", "max"), (">", "min"), (">=", "min")])
 def test_within_uses_worst_case_aggregate_per_operator(op, agg):
     join = _join_by_agg({"max": 1.0, "min": 1.0})
-    assess_intent("i1", "30m", resolve=_resolve(op, 0.0), join=join, mode="within", as_of="10m")
+    assess_intent("i1", "30m", source="graph", resolve=_resolve(op, 0.0), join=join, mode="within", as_of="10m")
     assert [c["aggregate"] for c in join.calls] == [agg]
 
 
 def test_within_equals_detects_a_breach_below_or_above_target():
     # any sample differing from 0 breaches "== 0": a low outlier counts as well as a high one
-    up = assess_intent("i1", "30m", resolve=_resolve("==", 0.0),
+    up = assess_intent("i1", "30m", source="graph", resolve=_resolve("==", 0.0),
                        join=_join_by_agg({"max": 7.0, "min": 0.0}), mode="within")
-    down = assess_intent("i1", "30m", resolve=_resolve("==", 0.0),
+    down = assess_intent("i1", "30m", source="graph", resolve=_resolve("==", 0.0),
                          join=_join_by_agg({"max": 0.0, "min": -3.0}), mode="within")
-    ok = assess_intent("i1", "30m", resolve=_resolve("==", 0.0),
+    ok = assess_intent("i1", "30m", source="graph", resolve=_resolve("==", 0.0),
                        join=_join_by_agg({"max": 0.0, "min": 0.0}), mode="within")
     assert (up["verdict"], down["verdict"], ok["verdict"]) == ("failure", "failure", "success")
     assert up["per_interface"][0]["observed"] == 7.0
@@ -143,7 +143,7 @@ def test_within_equals_detects_a_breach_below_or_above_target():
 
 
 def test_within_equals_unusable_evidence_is_inconclusive_not_success():
-    out = assess_intent("i1", "30m", resolve=_resolve("==", 0.0),
+    out = assess_intent("i1", "30m", source="graph", resolve=_resolve("==", 0.0),
                         join=_join_by_agg({"max": 0.0, "min": None}), mode="within")
     assert out["verdict"] == "inconclusive"
 
@@ -151,8 +151,8 @@ def test_within_equals_unusable_evidence_is_inconclusive_not_success():
 def test_historical_assessment_does_not_touch_current_fulfilment():
     with patch.object(assess_mod.DEFAULT_STORE, "fulfilment_update") as upd, \
          patch.object(assess_mod.IntentStore, "fulfilment_update") as upd2:
-        assess_intent("i1", "5m", resolve=_resolve(), join=_join_by_agg({"last": 5.0}), as_of="10m")
-        assess_intent("i1", "5m", resolve=_resolve(), join=_join_by_agg({"max": 5.0, "min": 5.0}),
+        assess_intent("i1", "5m", source="graph", resolve=_resolve(), join=_join_by_agg({"last": 5.0}), as_of="10m")
+        assess_intent("i1", "5m", source="graph", resolve=_resolve(), join=_join_by_agg({"max": 5.0, "min": 5.0}),
                       mode="within")
     upd.assert_not_called()
     upd2.assert_not_called()
@@ -163,7 +163,7 @@ def test_historical_assessment_does_not_touch_current_fulfilment():
 def test_bad_temporal_arguments_are_client_errors(kw):
     join = _join_by_agg({"last": 0.0})
     with pytest.raises(ClientInputError):
-        assess_intent("i1", "5m", resolve=_resolve(), join=join, **kw)
+        assess_intent("i1", "5m", source="graph", resolve=_resolve(), join=join, **kw)
     assert not join.calls
 
 

@@ -30,7 +30,7 @@ def query_tsdb_metrics(
 
 SYSTEM_PROMPT = """You are a network operations assistant. Many questions are about the state of the network and have nothing to do with an intent; use the tool that fits the question. You have these tools:
 
-- assess_intent(intent_id, time_window, source="graph"|"tmf921", default graph): the tool for questions about a declared intent. source="graph" reads the requirement from the broker's own network graph (Fuseki); source="tmf921" asks the separate TMF921 intent server, whose intents and ontology are a different graph and a different intent model. The broker deterministically
+- assess_intent(intent_id, time_window, source="graph"|"tmf921", default tmf921): the tool for questions about a declared intent. Use the default source="tmf921", which asks the separate TMF921 intent server (its intents and ontology are a different graph and a different intent model). Do not choose source="graph" (deprecated: it reads the OperationalIntent in the broker's own network graph, which is being retired) unless the user explicitly names an intent that lives in the network graph, for example intent-core-health-01, which needs source="graph". The broker deterministically
   resolves the intent, reads telemetry for every interface, and evaluates compliance. It
   returns a verdict ("success", "failure" or "inconclusive"), per-interface results,
   reasons, supporting context and dropped_count.
@@ -151,8 +151,8 @@ TOOLS = [
                 "intent_id": {"type": "string"},
                 "time_window": TIME_WINDOW,
                 "source": {
-                    "type": "string", "enum": ["graph", "tmf921"], "default": "graph",
-                    "description": "graph: the requirement in the broker's network graph (Fuseki). tmf921: the separate TMF921 intent server and its own graph.",
+                    "type": "string", "enum": ["graph", "tmf921"], "default": "tmf921",
+                    "description": "tmf921 (default): the separate TMF921 intent server and its own graph. graph (deprecated): the OperationalIntent in the broker's network graph (Fuseki); use it only when the user explicitly names an intent that lives there, for example intent-core-health-01.",
                 },
                 "as_of": AS_OF,
                 "mode": {
