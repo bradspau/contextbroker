@@ -16,3 +16,6 @@ ontologies/tbox/*.ttl
 ontologies/**/*.zip
 docs/spec/TR29*.pdf
 docs/spec/TMF921*.pdf
+
+# Deployment ABox data (service bindings); keep the directory via .gitkeep.
+ontologies/abox/*.ttl

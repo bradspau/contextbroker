@@ -97,3 +97,87 @@ def test_empty_shacl_dir_raises(tmp_path):
         with pytest.raises(ValueError, match="shacl_dir"):
             load_ontologies(tbox, shacl, "http://x/data")
     post.assert_not_called()
+
+
+BINDING_PREFIXES = """@prefix : <http://example.org/network-ontology#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+"""
+
+
+def _binding(forIntent=True, forMetric=True, iface=True, pins=('"0.0"^^xsd:double',)):
+    parts = []
+    if forIntent:
+        parts.append(':forIntent "intent-1"')
+    if forMetric:
+        parts.append(':forMetric "http://example.org/metric/input_drops"')
+    if iface:
+        parts.append(":onInterface :if-router-a-ge000")
+    for p in pins:
+        parts.append(f":pinnedBound {p}")
+    return BINDING_PREFIXES + ":b1 a :ServiceBinding ; " + " ; ".join(parts) + " .\n"
+
+
+def _abox_file(tmp_path, text, name="b.ttl"):
+    d = tmp_path / "abox"
+    d.mkdir(exist_ok=True)
+    f = d / name
+    f.write_text(text)
+    return f
+
+
+def test_service_binding_shape_accepts_complete_binding(tmp_path):
+    ok, report = validate_shapes(_abox_file(tmp_path, _binding()), SHAPES)
+    assert ok is True, report
+
+
+def test_service_binding_shape_rejects_missing_interface(tmp_path):
+    ok, report = validate_shapes(_abox_file(tmp_path, _binding(iface=False)), SHAPES)
+    assert ok is False
+    assert "onInterface" in report
+
+
+def test_service_binding_shape_rejects_two_pins(tmp_path):
+    text = _binding(pins=('"0.0"^^xsd:double', '"1.0"^^xsd:double'))
+    ok, report = validate_shapes(_abox_file(tmp_path, text), SHAPES)
+    assert ok is False
+    assert "pinnedBound" in report
+
+
+def test_non_numeric_pin_is_rejected(tmp_path):
+    ok, report = validate_shapes(_abox_file(tmp_path, _binding(pins=('"abc"',))), SHAPES)
+    assert ok is False
+    assert "pinnedBound" in report
+
+
+def test_abox_failure_loads_nothing(tmp_path):
+    _abox_file(tmp_path, _binding(iface=False))
+    with patch("requests.post") as post:
+        with pytest.raises(ValueError, match="onInterface"):
+            load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=tmp_path / "abox")
+    post.assert_not_called()
+
+
+def test_abox_dir_absent_is_not_an_error(tmp_path):
+    resp = Mock()
+    resp.raise_for_status = Mock()
+    with patch("requests.post", return_value=resp) as post:
+        load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=tmp_path / "nope")
+    assert post.call_count == len(list(TBOX_DIR.glob("*.ttl")))
+
+
+def test_abox_files_are_posted_after_validation(tmp_path):
+    _abox_file(tmp_path, _binding())
+    resp = Mock()
+    resp.raise_for_status = Mock()
+    with patch("requests.post", return_value=resp) as post:
+        load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=tmp_path / "abox")
+    assert post.call_count == len(list(TBOX_DIR.glob("*.ttl"))) + 1
+
+
+def test_empty_abox_dir_is_fine(tmp_path):
+    (tmp_path / "abox").mkdir()
+    resp = Mock()
+    resp.raise_for_status = Mock()
+    with patch("requests.post", return_value=resp) as post:
+        load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=tmp_path / "abox")
+    assert post.call_count == len(list(TBOX_DIR.glob("*.ttl")))

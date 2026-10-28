@@ -21,3 +21,10 @@
     sh:targetClass :Interface ;
     sh:property [ sh:path :onDevice ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] ;
     sh:property [ sh:path :interfaceName ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] .
+
+:ServiceBindingShape a sh:NodeShape ;
+    sh:targetClass :ServiceBinding ;
+    sh:property [ sh:path :forIntent ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path :forMetric ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path :onInterface ; sh:nodeKind sh:IRI ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path :pinnedBound ; sh:datatype xsd:double ; sh:minCount 1 ; sh:maxCount 1 ] .

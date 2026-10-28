@@ -33,6 +33,27 @@
     rdfs:domain :OperationalIntent ;
     rdfs:range :TopologicalLink .
 
+:ServiceBinding a owl:Class ;
+    rdfs:label "Service Binding" ;
+    rdfs:comment "Maps one (intent, metric) pair to an interface plus the bound pinned at binding time." .
+
+:forIntent a owl:DatatypeProperty ;
+    rdfs:domain :ServiceBinding ;
+    rdfs:range xsd:string .
+
+:forMetric a owl:DatatypeProperty ;
+    rdfs:domain :ServiceBinding ;
+    rdfs:range xsd:string ;
+    rdfs:comment "A metric URI." .
+
+:onInterface a owl:ObjectProperty ;
+    rdfs:domain :ServiceBinding ;
+    rdfs:range :Interface .
+
+:pinnedBound a owl:DatatypeProperty ;
+    rdfs:domain :ServiceBinding ;
+    rdfs:range xsd:double .
+
 :hasInterface a owl:ObjectProperty ;
     rdfs:domain :TopologicalLink ;
     rdfs:range :Interface .
