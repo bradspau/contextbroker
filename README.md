@@ -542,20 +542,31 @@ into an image).
    `bash scripts/tmf921_preflight.sh`
 2. Start the server (and the broker): `docker compose --profile tmf921 up -d --build`
    (port 8000, bound to 127.0.0.1).
-3. Create an intent the way `seed_data/seed.sh` in BBF_921_java does, against
-   `localhost:8000`. The bound must carry `quan:unit "Mbps"` (inside the bracketed
-   quantity, e.g. `[ rdf:value "100"^^xsd:decimal ; quan:unit "Mbps" ]`), otherwise the
-   server reports a unit mismatch. Pattern (placeholders in angle brackets):
-   `curl -sf -X POST "$BASE/intent" -H "Content-Type: application/json" -d '{"@type":"Intent","name":"<name>","expression":{"@type":"TurtleExpression","expressionValue":"<turtle>"}}'`
-   then activate it:
-   `curl -sf -X PATCH "$BASE/intent/<intent_id>" -H "Content-Type: application/json" -d '{"lifecycleStatus": "ACTIVE"}'`
-   with `BASE=http://localhost:8000/tmf-api/intentManagement/v5`.
-4. Pin the bound in the bindings file (default `data_contracts/intent_bindings.json`,
-   ships as `{}`; mount your own with `HOST_INTENT_BINDINGS`, read-only):
-   `{"<intent_id>": {"http://broadband-forum.org/Intent#DownstreamBandwidthMetric":
-   {"device": "olt1", "interface": "pon0", "bound": 100}}}`.
-   The metric map (`data_contracts/metric_map.json`, `METRIC_MAP_PATH`) maps the five
-   HSI metrics to broker metric names such as `downstream_bandwidth_mbps`.
+3. Create the intent from a Turtle file. The bound must carry `quan:unit "Mbps"`
+   (inside the bracketed quantity, e.g. `[ rdf:value "100"^^xsd:decimal ; quan:unit "Mbps" ]`),
+   otherwise the server reports a unit mismatch. The helper posts the file to the
+   server and prints the new intent id (`TMF921_BASE_URL` overrides the default
+   `http://localhost:8000/tmf-api/intentManagement/v5`):
+   `bash scripts/create_demo_intent.sh <path-to-intent.ttl>`
+   Activate it the way `seed_data/seed.sh` in BBF_921_java does
+   (`PATCH .../intent/<intent_id>` with `{"lifecycleStatus": "ACTIVE"}`).
+   The helper is for the demo only; the broker has no create call.
+4. Bind the intent to an interface. This reads the intent's current bounds from
+   the TMF921 server, checks the interface exists in the network graph, validates
+   the binding against the SHACL shapes, writes `ontologies/abox/<intent_id>.ttl`
+   and loads it into Fuseki, so the pinned values come from the server and are
+   not typed by hand:
+   `python -m ingestion.bind_intent <intent_id> --place LatencyMetric=olt1/pon0`
+   Use one `--place <MetricShortName>=<device>/<interface>` per metric in the intent
+   (the short name is the part of the metric URI after `#`). `--write-only` writes the
+   file without loading it. The tool refuses, writing and loading nothing, if the
+   bounds cannot be read, a metric has no placement or no metric-map entry, or the
+   interface is not in the topology. The metric map
+   (`data_contracts/metric_map.json`, `METRIC_MAP_PATH`) maps the five HSI metrics to
+   broker metric names such as `downstream_bandwidth_mbps`.
+   The older bindings file (`data_contracts/intent_bindings.json`, ships as `{}`,
+   mount your own with `HOST_INTENT_BINDINGS`, read-only) is the deprecated
+   fallback, used only when the network graph holds no binding for the intent.
 5. Assess:
    `curl -X POST localhost:8080/context/assess -H 'Content-Type: application/json' -d '{"intent_id":"<id>","time_window":"30m","source":"tmf921"}'`
 
