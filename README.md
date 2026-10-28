@@ -109,6 +109,7 @@ engine serves bounded, quality-labelled context; it never decides or acts.
 flowchart TB
     User(["User or operator"])
     Client(["REST client"])
+    Requester(["Intent requester<br/>asks for a service with goals and constraints<br/>(outside this repo)"])
 
     subgraph Agent["Agent harness (agent_harness)"]
         Harness["broker.py CLI and tool-calling loop<br/>tools: assess_intent, 3 operations queries,<br/>query_tsdb_metrics, query_intent_state_requirements"]
@@ -136,6 +137,7 @@ flowchart TB
 
     subgraph Svc["Service intent side (compose profile tmf921)"]
         T921[("tmf921-server :8000, Jena instance 2<br/>Java app with embedded Jena, TDB2 store<br/>persistent volume tdb2-tmf921<br/>TMF921 GRAPH: TIO ontology and service intents")]
+        Handler["Intent handler: provisioning<br/>not in either repo, not built"]
         Onto[/"licensed TIO ontology files<br/>read-only mount, never in an image or this repo"/]
     end
 
@@ -156,13 +158,22 @@ flowchart TB
     Join -->|"SPARQL"| Fuseki
     Join -->|"PromQL"| VM
 
-    AssessT -->|"REST: read intent, push observations, read reports"| T921
+    Requester -->|"POST /intent<br/>goals and constraints"| T921
+    T921 -.->|"stored intent<br/>(future)"| Handler
+    AssessT -->|"REST: read intent and reports,<br/>push observations"| T921
     Onto -.->|"bind mount :ro"| T921
 
     Sim -->|"writes every 5s"| VM
     Load -->|"tbox, shacl"| Fuseki
     User -->|"browses"| Lod --> Fuseki
 ```
+
+The broker is an observer of TMF921 intents, not the front door. A requester creates
+an intent with `POST /intent` on the TMF921 server, which stores it in its graph. The
+server evaluates it against observations and writes reports. Provisioning the service
+is the job of an intent handler that is in neither this repo nor `BBF_921_java`. The
+broker only reads intents and reports and pushes observations (`Tmf921Client` has no
+create call), so it never creates, changes or deletes an intent.
 
 ### Two separate graphs
 
