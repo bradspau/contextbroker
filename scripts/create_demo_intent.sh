@@ -2,6 +2,8 @@
 # Create a TMF921 intent from a Turtle file (demo requester helper).
 # Usage: bash scripts/create_demo_intent.sh <ttl_path> [intent name]
 # The broker itself has no create call; this posts straight to the intent server.
+# The new intent is ACKNOWLEDGED; the server only evaluates posted observations
+# for an ACTIVE intent, so the script then activates it (PATCH lifecycleStatus).
 set -eu
 
 if [ "$#" -lt 1 ] || [ -z "$1" ]; then
@@ -29,7 +31,25 @@ if ! response="$(printf '%s' "$body" | curl -sf -X POST "$base/intent" -H "Conte
   exit 1
 fi
 
-printf '%s' "$response" | python3 -c '
+if ! intent_id="$(printf '%s' "$response" | python3 -c '
+import json, re, sys
+i = json.load(sys.stdin).get("id")
+if not isinstance(i, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", i):
+    sys.exit(1)
+print(i)
+')"; then
+  echo "error: the intent server's reply carried no usable intent id" >&2
+  exit 1
+fi
+
+if ! patched="$(curl -sf -X PATCH "$base/intent/$intent_id" -H "Content-Type: application/json" \
+      --data-binary '{"lifecycleStatus": "ACTIVE"}')" \
+   || ! printf '%s' "$patched" | python3 -c '
 import json, sys
-print("Created intent id: " + str(json.load(sys.stdin)["id"]))
-'
+sys.exit(0 if json.load(sys.stdin).get("lifecycleStatus") == "ACTIVE" else 1)
+'; then
+  echo "error: created intent $intent_id but could not activate it" >&2
+  exit 1
+fi
+
+echo "Created intent id: $intent_id"
