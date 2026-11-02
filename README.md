@@ -66,7 +66,7 @@ container, with samples written into VictoriaMetrics:
 | Fresh value below the bound | `failure` |
 | Sample 10 minutes old | `inconclusive` ("stale observation"), nothing pushed |
 | Two conflicting series | `inconclusive` ("conflicting observation"), nothing pushed |
-| Re-assess after a `failure` | `inconclusive` ("intent bound drifted") |
+| Re-assess after a `failure` | `inconclusive` ("bound changed: LatencyMetric pinned 25, now 40.535") |
 
 **HSI demo end to end on TMF921 alone (verified live 2026-10-28).** The complete
 public HSI demo intent (BBF_921_java `seed_data/hsi_demo_intent.ttl`, with its
@@ -89,7 +89,7 @@ python -m ingestion.telemetry_simulator --hsi          # or --hsi-breach for lat
 |---|---|
 | Compliant samples, current assess | `success` |
 | `--hsi-breach` (latency 40.5 ms vs 25 ms), current assess | `failure`, reason "bound violated" (names no metric, see limits) |
-| Re-assess the same intent after that `failure` | `inconclusive` ("intent bound drifted"): the server had rewritten the latency bound 25 to 40.535 |
+| Re-assess the same intent after that `failure` | `inconclusive` ("bound changed: LatencyMetric pinned 25, now 40.535"): the server's stored latency bound differs from the pin |
 | New intent (new id) and new binding, compliant samples | `success` |
 | `mode=within`, 5 m window containing the breach | `failure`, "LatencyMetric: ... observed 59.22 does not satisfy < 25.0" |
 | `as_of=10m`, `mode=at`, instant in the compliant period | `success` |
@@ -576,7 +576,7 @@ two optional arguments. With neither, the assessment is a current one.
 - A historical assessment never updates the intent's current fulfilment state.
 - Both sources support this. For the default `source: "tmf921"` the broker reads the bounds now
   from the TMF921 intent (after the same drift check against the pinned binding, so
-  a drifted bound is `inconclusive`), takes each bound's direction from the
+  a changed bound is `inconclusive`), takes each bound's direction from the
   `operator` in `data_contracts/metric_map.json` (latency, jitter, packet loss `<`;
   bandwidths `>=`; verified live against the server on 2026-10-28, not read from
   each intent) and judges
@@ -625,8 +625,15 @@ into an image).
    refuses unless you pass `--replace`, which writes the new file, then removes the old
    binding from Fuseki, then loads the new one. If that load fails the intent has no
    binding until the file is loaded again. `--replace` pins whatever bound the server
-   currently holds, so never use it on an intent that reported "intent bound
-   drifted"; create a new intent instead. The tool refuses, writing and loading nothing, if the
+   currently holds, so never use it on an intent that reported "bound changed"
+   (or "intent bound drifted"); create a new intent instead. The broker's only record
+   of the requested bound is this pin: the server rewrites a failed bound in place
+   (a best-effort proposal) and keeps no original. When the stored bound differs the
+   broker reports the metric and both numbers (`bound changed: <metric> pinned 25,
+   now 40.535`, and `bound_changes` in the result), says "bound set changed" if the
+   metric set differs, and does not judge the cause; the verdict stays `inconclusive`.
+   "intent bound drifted" remains only for a bound the broker cannot read.
+   The tool refuses, writing and loading nothing, if the
    bounds cannot be read, a metric has no placement or no metric-map entry, or the
    interface is not in the topology. The metric map
    (`data_contracts/metric_map.json`, `METRIC_MAP_PATH`) maps the five HSI metrics to
@@ -649,7 +656,7 @@ an `atLeast` bound; the `graph` source keeps `max_over_time`.
 Safety behaviour: stale, missing, conflicted, drifted or unpushable evidence gives
 `inconclusive`, never `success`. A partial-evidence assess pushes nothing to the
 server. The server's Flow 3 rewrites an intent's stored bound after any Degraded
-evaluation, so after a `failure` the same intent reports "intent bound drifted"
+evaluation, so after a `failure` the same intent reports "bound changed: <metric> pinned 25, now 40.535"
 (`inconclusive`) until it is re-created and re-pinned; this is server-side behaviour
 to raise with its owner. Re-create it with `create_demo_intent.sh` (a new id) and
 bind the new id. Do not use `bind_intent --replace` on the drifted intent: it

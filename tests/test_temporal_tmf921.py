@@ -146,9 +146,19 @@ def test_bandwidth_uses_lower_bound_worst_case():
 
 def test_drifted_bound_is_inconclusive():
     join = make_join({("latency_ms", "last"): 42.0})
-    out = run(FakeClient(intent((LAT, 200))), join)
-    assert out["verdict"] == "inconclusive" and out["reasons"] == ["intent bound drifted"]
-    assert out["intent_status"] == "unknown" and join.calls == []
+    client = FakeClient(intent((LAT, 200)))
+    out = run(client, join)
+    assert out["verdict"] == "inconclusive"
+    assert out["reasons"] == ["bound changed: LatencyMetric pinned 100, now 200"]
+    assert out["bound_changes"] == [{"metric": "LatencyMetric", "pinned": 100.0,
+                                     "current": 200.0}]
+    assert out["mode"] == "at" and out["as_of"] == "10m"
+    assert out["intent_status"] == "unknown" and join.calls == [] and client.posts == []
+
+
+def test_unreadable_bound_keeps_old_reason():
+    out = run(FakeClient({"lifecycleStatus": "ACTIVE", "expression": None}))
+    assert out["reasons"] == ["intent bound drifted"] and "bound_changes" not in out
 
 
 def test_missing_operator_is_inconclusive_naming_the_metric():

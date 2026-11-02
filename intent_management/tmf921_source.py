@@ -88,9 +88,10 @@ def _parse_ts(value) -> datetime | None:
 
 
 def _result(outcome: Outcome, reasons, per_interface=None, envelopes=(), previous=None,
-            status="active"):
+            status="active",
+            bound_changes=()):
     pruned = prune(list(envelopes), max(DEFAULT_MAX_ENTITIES, len(envelopes)))
-    return jsonable_encoder({
+    out = {
         "verdict": outcome.value,
         "per_interface": per_interface if per_interface is not None else [
             {"condition": "intent", "outcome": outcome.value, "reason": r} for r in reasons],
@@ -100,7 +101,10 @@ def _result(outcome: Outcome, reasons, per_interface=None, envelopes=(), previou
         "intent_status": status,
         "last_outcome": previous,
         "source": "tmf921",
-    })
+    }
+    if bound_changes:
+        out["bound_changes"] = list(bound_changes)
+    return jsonable_encoder(out)
 
 
 def _unpushable(env, ref: datetime) -> str | None:
@@ -129,6 +133,29 @@ def _bounds_match(doc, binding) -> bool:
     current = intent_bounds(doc)
     return bool(binding.bounds) and current.keys() == binding.bounds.keys() \
         and all(current[u] == b for u, b in binding.bounds.items())
+
+
+def _bound_changes(doc, binding) -> tuple[list[str], list[dict]]:
+    """Describe how the server's bound differs from the pin: (reasons, changes).
+
+    Called only after _bounds_match is false. Built from the pinned metric short
+    names and the numbers in intent_bounds, never from server text or a
+    server-supplied metric name. Unreadable bounds keep "intent bound drifted".
+    """
+    current = intent_bounds(doc)
+    if not current:
+        return ["intent bound drifted"], []
+    reasons, changes = [], []
+    for uri, pinned in binding.bounds.items():
+        if uri in current and current[uri] != pinned:
+            name = _short_name(uri)
+            reasons.append(f"bound changed: {name} pinned {format(pinned, '.15g')}, "
+                           f"now {format(current[uri], '.15g')}")
+            changes.append({"metric": name, "pinned": float(pinned),
+                            "current": float(current[uri])})
+    if current.keys() != binding.bounds.keys():
+        reasons.append("bound set changed")
+    return reasons or ["intent bound drifted"], changes
 
 
 def _binding_for(intent_id: str, bindings=None) -> tuple[IntentBinding | None, str | None]:
@@ -209,19 +236,21 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
     def rejected(reason):  # caller/config input rejected: not an assessment
         return _result(Outcome.INCONCLUSIVE, [reason], previous=previous, status="unknown")
 
-    def done(outcome, reasons, per=None, envs=(), status="active"):
+    def done(outcome, reasons, per=None, envs=(), status="active", changes=()):
         _record(intent_id, outcome)
-        return _result(outcome, reasons, per, envs, previous, status)
+        return _result(outcome, reasons, per, envs, previous, status, changes)
 
     # Drift check before anything is pushed: same metric set and values.
     try:
-        ok = _bounds_match(client.get_intent(intent_id), binding)
+        doc = client.get_intent(intent_id)
+        ok = _bounds_match(doc, binding)
     except ClientInputError:
         return rejected("invalid binding")
     except Exception:
         return done(Outcome.INCONCLUSIVE, ["intent server unavailable"])
     if not ok:
-        return done(Outcome.INCONCLUSIVE, ["intent bound drifted"], status="unknown")
+        reasons, changes = _bound_changes(doc, binding)
+        return done(Outcome.INCONCLUSIVE, reasons, status="unknown", changes=changes)
 
     uris = list(binding.bounds)
     mappings = {}
@@ -296,12 +325,14 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
         # The server rewrites a stored bound when it evaluates Degraded: confirm
         # the bound still equals the pinned one before trusting a success.
         try:
-            still = _bounds_match(client.get_intent(intent_id), binding)
+            doc = client.get_intent(intent_id)
+            still = _bounds_match(doc, binding)
         except Exception:
             return done(Outcome.INCONCLUSIVE, ["intent server unavailable"], envs=all_envs)
         if not still:
-            return done(Outcome.INCONCLUSIVE, ["intent bound drifted"], envs=all_envs,
-                        status="unknown")
+            reasons, changes = _bound_changes(doc, binding)
+            return done(Outcome.INCONCLUSIVE, reasons, envs=all_envs, status="unknown",
+                        changes=changes)
     return done(outcome, reasons, per, all_envs)
 
 
@@ -357,8 +388,8 @@ def assess_tmf921_as_of(
     prev = TMF921_STORE.last_outcome(intent_id)
     previous = prev.value if prev else None
 
-    def result(outcome, reasons, per=None, envs=(), status="active"):
-        out = _result(outcome, reasons, per, envs, previous, status)
+    def result(outcome, reasons, per=None, envs=(), status="active", changes=()):
+        out = _result(outcome, reasons, per, envs, previous, status, changes)
         out.update(jsonable_encoder({"mode": mode, "as_of": as_of, "evaluated_at": at,
                                      "requirement": TEMPORAL_REQUIREMENT}))
         return out
@@ -379,7 +410,8 @@ def assess_tmf921_as_of(
     except Exception:  # Tmf921Error and anything unexpected: no server text
         return result(Outcome.INCONCLUSIVE, ["intent server unavailable"])
     if not ok:
-        return result(Outcome.INCONCLUSIVE, ["intent bound drifted"], status="unknown")
+        reasons, changes = _bound_changes(doc, binding)
+        return result(Outcome.INCONCLUSIVE, reasons, status="unknown", changes=changes)
 
     life = doc.get("lifecycleStatus") if isinstance(doc, dict) else None
     if life != "ACTIVE":  # before any telemetry is read; server text is never echoed
