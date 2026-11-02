@@ -15,7 +15,7 @@ def test_docker_compose_defines_victoriametrics_and_fuseki():
 
     assert "fuseki" in services
     fuseki_ports = services["fuseki"]["ports"]
-    assert "3030:3030" in fuseki_ports
+    assert "127.0.0.1:3030:3030" in fuseki_ports
     assert services["fuseki"]["image"] == "secoresearch/fuseki:6.1.0"
     fuseki_command = services["fuseki"]["command"]
     assert isinstance(fuseki_command, list)
@@ -52,3 +52,10 @@ def test_docker_compose_defines_contextbroker_api():
     assert env["VM_QUERY_ENDPOINT"] == "http://victoriametrics:8428/api/v1/query"
     assert {"fuseki", "victoriametrics"} <= set(api["depends_on"])
     assert api["restart"] == "unless-stopped"
+
+
+def test_fuseki_and_lodlive_proxy_are_bound_to_localhost():
+    services = yaml.safe_load(COMPOSE_PATH.read_text())["services"]
+    for name in ("fuseki", "lodlive-proxy"):
+        for port in services[name]["ports"]:
+            assert port.startswith("127.0.0.1:"), (name, port)

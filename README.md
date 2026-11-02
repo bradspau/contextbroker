@@ -671,9 +671,9 @@ Known behaviours / troubleshooting:
 - Past-window assessments on the deprecated graph source treat a `+Inf` telemetry
   value as finite (the TMF921 paths reject non-finite values); the graph source is
   being retired.
-- Fuseki (port 3030) and lodlive-proxy (8081) are published on all interfaces with
-  update enabled and default credentials; the pinned bounds in the network graph are
-  trusted by the drift check, so do not expose these ports.
+- Fuseki (port 3030) and lodlive-proxy (8081) are published on 127.0.0.1 only, because
+  Fuseki has update enabled and default credentials and the pinned bounds in the
+  network graph are trusted by the drift check. Do not change them to all interfaces.
 - The TMF921 server writes two Degraded reports for a new intent (creation and
   activation) before any observation, so a freshly activated intent shows 2 reports
   and a Degraded state until an observation arrives.
