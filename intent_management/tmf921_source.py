@@ -89,7 +89,7 @@ def _parse_ts(value) -> datetime | None:
 
 def _result(outcome: Outcome, reasons, per_interface=None, envelopes=(), previous=None,
             status="active",
-            bound_changes=()):
+            goal_changes=()):
     pruned = prune(list(envelopes), max(DEFAULT_MAX_ENTITIES, len(envelopes)))
     out = {
         "verdict": outcome.value,
@@ -102,8 +102,8 @@ def _result(outcome: Outcome, reasons, per_interface=None, envelopes=(), previou
         "last_outcome": previous,
         "source": "tmf921",
     }
-    if bound_changes:
-        out["bound_changes"] = list(bound_changes)
+    if goal_changes:
+        out["goal_changes"] = list(goal_changes)
     return jsonable_encoder(out)
 
 
@@ -135,27 +135,27 @@ def _bounds_match(doc, binding) -> bool:
         and all(current[u] == b for u, b in binding.bounds.items())
 
 
-def _bound_changes(doc, binding) -> tuple[list[str], list[dict]]:
-    """Describe how the server's bound differs from the pin: (reasons, changes).
+def _goal_changes(doc, binding) -> tuple[list[str], list[dict]]:
+    """Describe how the server's goal differs from the pin: (reasons, changes).
 
     Called only after _bounds_match is false. Built from the pinned metric short
     names and the numbers in intent_bounds, never from server text or a
-    server-supplied metric name. Unreadable bounds keep "intent bound drifted".
+    server-supplied metric name. Goals that cannot be read at all give "intent goal unreadable".
     """
     current = intent_bounds(doc)
     if not current:
-        return ["intent bound drifted"], []
+        return ["intent goal unreadable"], []
     reasons, changes = [], []
     for uri, pinned in binding.bounds.items():
         if uri in current and current[uri] != pinned:
             name = _short_name(uri)
-            reasons.append(f"bound changed: {name} pinned {format(pinned, '.15g')}, "
+            reasons.append(f"goal changed: {name} pinned {format(pinned, '.15g')}, "
                            f"now {format(current[uri], '.15g')}")
             changes.append({"metric": name, "pinned": float(pinned),
                             "current": float(current[uri])})
     if current.keys() != binding.bounds.keys():
-        reasons.append("bound set changed")
-    return reasons or ["intent bound drifted"], changes
+        reasons.append("goal set changed")
+    return reasons or ["intent goal unreadable"], changes
 
 
 def _binding_for(intent_id: str, bindings=None) -> tuple[IntentBinding | None, str | None]:
@@ -249,7 +249,7 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
     except Exception:
         return done(Outcome.INCONCLUSIVE, ["intent server unavailable"])
     if not ok:
-        reasons, changes = _bound_changes(doc, binding)
+        reasons, changes = _goal_changes(doc, binding)
         return done(Outcome.INCONCLUSIVE, reasons, status="unknown", changes=changes)
 
     uris = list(binding.bounds)
@@ -330,7 +330,7 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
         except Exception:
             return done(Outcome.INCONCLUSIVE, ["intent server unavailable"], envs=all_envs)
         if not still:
-            reasons, changes = _bound_changes(doc, binding)
+            reasons, changes = _goal_changes(doc, binding)
             return done(Outcome.INCONCLUSIVE, reasons, envs=all_envs, status="unknown",
                         changes=changes)
     return done(outcome, reasons, per, all_envs)
@@ -410,7 +410,7 @@ def assess_tmf921_as_of(
     except Exception:  # Tmf921Error and anything unexpected: no server text
         return result(Outcome.INCONCLUSIVE, ["intent server unavailable"])
     if not ok:
-        reasons, changes = _bound_changes(doc, binding)
+        reasons, changes = _goal_changes(doc, binding)
         return result(Outcome.INCONCLUSIVE, reasons, status="unknown", changes=changes)
 
     life = doc.get("lifecycleStatus") if isinstance(doc, dict) else None

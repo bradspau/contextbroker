@@ -62,11 +62,11 @@ container, with samples written into VictoriaMetrics:
 
 | Scenario | Result |
 |---|---|
-| Fresh value above the bound | `success` |
-| Fresh value below the bound | `failure` |
+| Fresh value above the limit | `success` |
+| Fresh value below the limit | `failure` |
 | Sample 10 minutes old | `inconclusive` ("stale observation"), nothing pushed |
 | Two conflicting series | `inconclusive` ("conflicting observation"), nothing pushed |
-| Re-assess after a `failure` | `inconclusive` ("bound changed: LatencyMetric pinned 25, now 40.535") |
+| Re-assess after a `failure` | `inconclusive` ("goal changed: LatencyMetric pinned 25, now 40.535") |
 
 **HSI demo end to end on TMF921 alone (verified live 2026-10-28).** The complete
 public HSI demo intent (BBF_921_java `seed_data/hsi_demo_intent.ttl`, with its
@@ -89,13 +89,13 @@ python -m ingestion.telemetry_simulator --hsi          # or --hsi-breach for lat
 |---|---|
 | Compliant samples, current assess | `success` |
 | `--hsi-breach` (latency 40.5 ms vs 25 ms), current assess | `failure`, reason "bound violated" (names no metric, see limits) |
-| Re-assess the same intent after that `failure` | `inconclusive` ("bound changed: LatencyMetric pinned 25, now 40.535"): the server's stored latency bound differs from the pin |
+| Re-assess the same intent after that `failure` | `inconclusive` ("goal changed: LatencyMetric pinned 25, now 40.535"): the server's stored latency goal differs from the pin |
 | New intent (new id) and new binding, compliant samples | `success` |
 | `mode=within`, 5 m window containing the breach | `failure`, "LatencyMetric: ... observed 59.22 does not satisfy < 25.0" |
 | `as_of=10m`, `mode=at`, instant in the compliant period | `success` |
 | `as_of=10m`, `mode=at`, instant in the breach period | `failure`, LatencyMetric observed 47.994 |
 | `as_of=10m`, `mode=within`, window containing the breach | `failure`, LatencyMetric observed 58.848 |
-| Restart `fuseki` and `tmf921-server`, no reload | binding (five pinned bounds) and intent (`ACTIVE`, bounds intact) still there; fresh assess `success` |
+| Restart `fuseki` and `tmf921-server`, no reload | binding (five pinned goals) and intent (`ACTIVE`, goals intact) still there; fresh assess `success` |
 
 **Not turnkey.**
 - The first assess on a new series can read "missing" for a few seconds
@@ -109,8 +109,8 @@ python -m ingestion.telemetry_simulator --hsi          # or --hsi-breach for lat
 
 **Known limits of the demo.**
 - After any Degraded evaluation the TMF921 server rewrites the intent's stored
-  bound, so the intent must be re-created (new id) and bound again to assess
-  again. `bind_intent --replace` on the same intent pins the rewritten bound.
+  goal, so the intent must be re-created (new id) and bound again to assess
+  again. `bind_intent --replace` on the same intent pins the rewritten goal.
 - A current-moment `tmf921` `failure` says only "bound violated": the server's
   JSON reason (`40.535 ms < 25 ms: FAIL`) names no metric. The failing condition
   is only in its TR290 report (`icm:about bbf:Lat_Check`). The past-question
@@ -156,7 +156,7 @@ flowchart TB
         Join["tsdb_joiner and sparql_resolver<br/>ContextEnvelope with quality labels"]
         Assure["outcome_assurance<br/>deterministic success, failure, inconclusive"]
         Bind["metric_map.json and the intent_bindings.json fallback<br/>the binding in the network graph wins"]
-        BindCli["bind_intent CLI<br/>reads bounds from TMF921, writes :ServiceBinding"]
+        BindCli["bind_intent CLI<br/>reads goals from TMF921, writes :ServiceBinding"]
         MCP["MCP server<br/>built, not mounted"]
     end
 
@@ -189,7 +189,7 @@ flowchart TB
     AssessT --> Join
     AssessT --> Bind
     AssessT -->|"binding lookup"| Fuseki
-    BindCli -->|"reads current bounds"| T921
+    BindCli -->|"reads current goals"| T921
     BindCli -->|"writes :ServiceBinding"| Fuseki
     Join -->|"SPARQL"| Fuseki
     Join -->|"PromQL"| VM
@@ -229,7 +229,7 @@ The solution has two graphs that are **not** merged, queried together or kept in
 graph, and a service intent in the TMF921 graph. They are connected by bindings. A
 binding lives in the network graph as a `:ServiceBinding` resource (written with
 `python -m ingestion.bind_intent`) that maps a TMF921 intent and metric URI to a device,
-an interface and a pinned bound. `data_contracts/intent_bindings.json` is only the
+an interface and a pinned goal. `data_contracts/intent_bindings.json` is only the
 deprecated fallback, consulted when the network graph has no binding for that intent;
 the graph binding wins. `data_contracts/metric_map.json` maps metric URIs to metric names. Nothing yet answers "which interfaces
 carry this service" from a graph.
@@ -325,7 +325,7 @@ compliant-vs-non-compliant demo. `--hsi` also emits the five HSI metrics as floa
 (`latency_ms`, `jitter_ms`, `packet_loss_percent`, `downstream_bandwidth_mbps`,
 `upstream_bandwidth_mbps`), with values sized for the public HSI demo intent
 (BBF_921_java `seed_data/hsi_demo_intent.ttl`); `--hsi-breach` (implies `--hsi`)
-puts latency at 40-60 ms, above that intent's 25 ms bound, and keeps the other
+puts latency at 40-60 ms, above that intent's 25 ms limit, and keeps the other
 four compliant. `python -m ingestion.telemetry_simulator`
 (continuous) or with `--once` for a single batch. `MEASUREMENT_NAME` is imported
 by the broker engine so the metric name prefix cannot drift.
@@ -511,7 +511,7 @@ python -m ingestion.telemetry_simulator --inject-drops
 ```
 
 For the TMF921 HSI demo add `--hsi` (compliant HSI metrics) or `--hsi-breach`
-(latency above the demo intent's 25 ms bound); see [Demo status](#demo-status).
+(latency above the demo intent's 25 ms limit); see [Demo status](#demo-status).
 
 ## 6. Ask the broker
 
@@ -574,16 +574,16 @@ two optional arguments. With neither, the assessment is a current one.
   graph keeps no history, so if the target changed since then, the past answer is
   judged against today's target.
 - A historical assessment never updates the intent's current fulfilment state.
-- Both sources support this. For the default `source: "tmf921"` the broker reads the bounds now
+- Both sources support this. For the default `source: "tmf921"` the broker reads the goals now
   from the TMF921 intent (after the same drift check against the pinned binding, so
-  a changed bound is `inconclusive`), takes each bound's direction from the
+  a changed goal is `inconclusive`), takes each goal's direction from the
   `operator` in `data_contracts/metric_map.json` (latency, jitter, packet loss `<`;
   bandwidths `>=`; verified live against the server on 2026-10-28, not read from
   each intent) and judges
   the past telemetry itself. The TMF921 server keeps no history and is never asked
   about the past: nothing is pushed, no high-water mark is written and the stored
   outcome is not updated. `requirement` says "bounds read now from the TMF921 intent
-  (no history is kept)", `per_interface` has one entry per bound metric (`condition`
+  (no history is kept)", `per_interface` has one entry per goal metric (`condition`
   is the metric's short name), and one failing metric fails the whole intent.
 - Data must still be in VictoriaMetrics (default retention is about a month); with no
   sample in the period the result is `inconclusive` ("missing observation"), never `success`.
@@ -603,7 +603,7 @@ into an image).
    `bash scripts/tmf921_preflight.sh`
 2. Start the server (and the broker): `docker compose --profile tmf921 up -d --build`
    (port 8000, bound to 127.0.0.1).
-3. Create the intent from a Turtle file. The bound must carry `quan:unit "Mbps"`
+3. Create the intent from a Turtle file. The goal must carry `quan:unit "Mbps"`
    (inside the bracketed quantity, e.g. `[ rdf:value "100"^^xsd:decimal ; quan:unit "Mbps" ]`),
    otherwise the server reports a unit mismatch. The helper posts the file to the
    server, activates the new intent (`PATCH .../intent/<intent_id>` with
@@ -613,7 +613,7 @@ into an image).
    Activation matters: the server stores observations posted to an `ACKNOWLEDGED`
    intent but never evaluates them, so the assess would end "no new report".
    The helper is for the demo only; the broker has no create call.
-4. Bind the intent to an interface. This reads the intent's current bounds from
+4. Bind the intent to an interface. In this broker a "goal" is one metric together with its limit (for example latency under 20 ms); the TMF921 specification groups an intent's expectations as requirements, goals and constraints, and does not define the limit's name. This reads the intent's current goals from
    the TMF921 server, checks the interface exists in the network graph, validates
    the binding against the SHACL shapes, writes `ontologies/abox/<intent_id>.ttl`
    and loads it into Fuseki, so the pinned values come from the server and are
@@ -624,17 +624,17 @@ into an image).
    file without loading it. If the intent already has a binding in the graph the tool
    refuses unless you pass `--replace`, which writes the new file, then removes the old
    binding from Fuseki, then loads the new one. If that load fails the intent has no
-   binding until the file is loaded again. `--replace` pins whatever bound the server
-   currently holds, so never use it on an intent that reported "bound changed"
-   (or "intent bound drifted"); create a new intent instead. The broker's only record
-   of the requested bound is this pin: the server rewrites a failed bound in place
-   (a best-effort proposal) and keeps no original. When the stored bound differs the
-   broker reports the metric and both numbers (`bound changed: <metric> pinned 25,
-   now 40.535`, and `bound_changes` in the result), says "bound set changed" if the
+   binding until the file is loaded again. `--replace` pins whatever goal the server
+   currently holds, so never use it on an intent that reported "goal changed"
+   (or "intent goal unreadable"); create a new intent instead. The broker's only record
+   of the requested goal is this pin: the server rewrites a failed goal in place
+   and keeps no original. When the stored goal differs the
+   broker reports the metric and both numbers (`goal changed: <metric> pinned 25,
+   now 40.535`, and `goal_changes` in the result), says "goal set changed" if the
    metric set differs, and does not judge the cause; the verdict stays `inconclusive`.
-   "intent bound drifted" remains only for a bound the broker cannot read.
+   "intent goal unreadable" remains only for goals the broker cannot read.
    The tool refuses, writing and loading nothing, if the
-   bounds cannot be read, a metric has no placement or no metric-map entry, or the
+   goals cannot be read, a metric has no placement or no metric-map entry, or the
    interface is not in the topology. The metric map
    (`data_contracts/metric_map.json`, `METRIC_MAP_PATH`) maps the five HSI metrics to
    broker metric names such as `downstream_bandwidth_mbps` and gives each an
@@ -642,7 +642,7 @@ into an image).
    jitter and packet loss, `>=` for both bandwidths. An entry without a known
    operator makes the metric map fail to load. The operators were checked against
    the live server on 2026-10-28 (`tests/test_tmf921_live.py`): the server's
-   `quan:smaller` is strict, so a value exactly at the bound is a `failure`.
+   `quan:smaller` is strict, so a value exactly at the limit is a `failure`.
    The older bindings file (`data_contracts/intent_bindings.json`, ships as `{}`,
    mount your own with `HOST_INTENT_BINDINGS`, read-only) is the deprecated
    fallback, used only when the network graph holds no binding for the intent.
@@ -651,17 +651,17 @@ into an image).
 
 The value judged on the TMF921 path is the latest sample in the window
 (`last_over_time`), not the window maximum, so an old high value cannot satisfy
-an `atLeast` bound; the `graph` source keeps `max_over_time`.
+an `atLeast` limit; the `graph` source keeps `max_over_time`.
 
 Safety behaviour: stale, missing, conflicted, drifted or unpushable evidence gives
 `inconclusive`, never `success`. A partial-evidence assess pushes nothing to the
-server. The server's Flow 3 rewrites an intent's stored bound after any Degraded
-evaluation, so after a `failure` the same intent reports "bound changed: <metric> pinned 25, now 40.535"
+server. The server's Flow 3 rewrites an intent's stored goal after any Degraded
+evaluation, so after a `failure` the same intent reports "goal changed: <metric> pinned 25, now 40.535"
 (`inconclusive`) until it is re-created and re-pinned; this is server-side behaviour
 to raise with its owner. Re-create it with `create_demo_intent.sh` (a new id) and
 bind the new id. Do not use `bind_intent --replace` on the drifted intent: it
-re-pins whatever bound the server now holds, which is the rewritten one (verified
-live: the latency bound 25 became the observed 40.535 and `--replace` pinned
+re-pins whatever goal the server now holds, which is the rewritten one (verified
+live: the latency limit 25 became the observed 40.535 and `--replace` pinned
 40.535 without a warning). Per-intent locks and high-water marks are in-process, so
 run a single broker process. Observations pushed by other clients are invisible to the broker.
 
@@ -679,7 +679,7 @@ Known behaviours / troubleshooting:
   value as finite (the TMF921 paths reject non-finite values); the graph source is
   being retired.
 - Fuseki (port 3030) and lodlive-proxy (8081) are published on 127.0.0.1 only, because
-  Fuseki has update enabled and default credentials and the pinned bounds in the
+  Fuseki has update enabled and default credentials and the pinned goals in the
   network graph are trusted by the drift check. Do not change them to all interfaces.
 - The TMF921 server writes two Degraded reports for a new intent (creation and
   activation) before any observation, so a freshly activated intent shows 2 reports

@@ -219,7 +219,7 @@ def test_bound_drifted_zero_pushes():
     c = FakeClient(intent_doc=intent((URI, 50)), post=[[rep("n", "2026-10-27T12:00:01Z")]])
     out = run(c)
     assert out["verdict"] == "inconclusive"
-    assert out["reasons"] == ["bound changed: LatencyMetric pinned 100, now 50"]
+    assert out["reasons"] == ["goal changed: LatencyMetric pinned 100, now 50"]
     assert c.posts == [] and c.lists == 0
 
 
@@ -227,8 +227,8 @@ def test_bound_change_names_metric_and_both_values():
     c = FakeClient(intent_doc=intent((URI, 50)))
     out = run(c)
     assert out["verdict"] == "inconclusive" and out["intent_status"] == "unknown"
-    assert out["reasons"] == ["bound changed: LatencyMetric pinned 100, now 50"]
-    assert out["bound_changes"] == [{"metric": "LatencyMetric", "pinned": 100.0,
+    assert out["reasons"] == ["goal changed: LatencyMetric pinned 100, now 50"]
+    assert out["goal_changes"] == [{"metric": "LatencyMetric", "pinned": 100.0,
                                      "current": 50.0}]
     assert c.posts == []
 
@@ -236,8 +236,8 @@ def test_bound_change_names_metric_and_both_values():
 def test_bound_change_names_only_the_changed_metric():
     c = FakeClient(intent_doc=intent((URI, 100), (URI2, 7)))
     out = run(c, bindings=BIND2)
-    assert out["reasons"] == ["bound changed: JitterMetric pinned 10, now 7"]
-    assert out["bound_changes"] == [{"metric": "JitterMetric", "pinned": 10.0,
+    assert out["reasons"] == ["goal changed: JitterMetric pinned 10, now 7"]
+    assert out["goal_changes"] == [{"metric": "JitterMetric", "pinned": 10.0,
                                      "current": 7.0}]
     assert c.posts == []
 
@@ -246,8 +246,8 @@ def test_bound_set_change_names_no_server_metric():
     evil = "http://example.org/evil/SECRET"
     c = FakeClient(intent_doc=intent((URI, 100), (evil, 5)))
     out = run(c)
-    assert out["reasons"] == ["bound set changed"]
-    assert "bound_changes" not in out
+    assert out["reasons"] == ["goal set changed"]
+    assert "goal_changes" not in out
     assert "SECRET" not in str(out) and c.posts == []
 
 
@@ -255,22 +255,22 @@ def test_bound_set_and_value_change_both_reported():
     evil = "http://example.org/evil/SECRET"
     c = FakeClient(intent_doc=intent((URI, 50), (evil, 5)))
     out = run(c)
-    assert out["reasons"] == ["bound changed: LatencyMetric pinned 100, now 50",
-                              "bound set changed"]
+    assert out["reasons"] == ["goal changed: LatencyMetric pinned 100, now 50",
+                              "goal set changed"]
     assert "SECRET" not in str(out)
 
 
 def test_number_formatting():
     bind = {IID: IntentBinding(IID, {URI: ("olt1", "pon0/1")}, {URI: 25.0})}
     out = run(FakeClient(intent_doc=intent((URI, 40.535))), bindings=bind)
-    assert out["reasons"] == ["bound changed: LatencyMetric pinned 25, now 40.535"]
+    assert out["reasons"] == ["goal changed: LatencyMetric pinned 25, now 40.535"]
 
 
 def test_unreadable_bound_zero_pushes():
     c = FakeClient(intent_doc={"expression": None})
     out = run(c)
-    assert out["reasons"] == ["intent bound drifted"] and c.posts == []
-    assert "bound_changes" not in out
+    assert out["reasons"] == ["intent goal unreadable"] and c.posts == []
+    assert "goal_changes" not in out
 
 
 def test_last_outcome_recorded():
@@ -329,14 +329,14 @@ def test_extra_intent_metric_not_in_binding_is_drift():
     c = FakeClient(intent_doc=intent((URI, 100), (URI2, 10)),
                    post=[[rep("n", "2026-10-27T12:00:01Z")]])
     out = run(c)
-    assert out["verdict"] == "inconclusive" and out["reasons"] == ["bound set changed"]
+    assert out["verdict"] == "inconclusive" and out["reasons"] == ["goal set changed"]
     assert c.posts == []
 
 
 def test_missing_intent_metric_is_drift():
     c = FakeClient(intent_doc=intent((URI, 100)))
     out = run(c, bindings=BIND2)
-    assert out["reasons"] == ["bound set changed"] and c.posts == []
+    assert out["reasons"] == ["goal set changed"] and c.posts == []
 
 
 def test_two_pushes_wait_for_two_new_reports():
@@ -366,12 +366,12 @@ def test_report_without_id_or_bad_date_is_not_new():
     assert out["reasons"] == ["no new report"]
 
 
-def test_bound_changes_before_success_is_inconclusive():
+def test_goal_change_before_success_is_inconclusive():
     c = FakeClient(docs=[intent((URI, 100)), intent((URI, 50))],
                    post=[[rep("n", "2026-10-27T12:00:01Z")]])
     out = run(c)
     assert out["verdict"] == "inconclusive"
-    assert out["reasons"] == ["bound changed: LatencyMetric pinned 100, now 50"]
+    assert out["reasons"] == ["goal changed: LatencyMetric pinned 100, now 50"]
     assert c.gets == 2
 
 
@@ -380,8 +380,8 @@ def test_bound_changed_after_success_report_names_metric():
                    post=[[rep("n", "2026-10-27T12:00:01Z")]])
     out = run(c)
     assert out["verdict"] == "inconclusive" and out["intent_status"] == "unknown"
-    assert out["reasons"] == ["bound changed: LatencyMetric pinned 100, now 40.535"]
-    assert out["bound_changes"][0]["current"] == 40.535
+    assert out["reasons"] == ["goal changed: LatencyMetric pinned 100, now 40.535"]
+    assert out["goal_changes"][0]["current"] == 40.535
     assert len(c.posts) == 1
 
 

@@ -64,7 +64,7 @@ If the verdict is "inconclusive", or any interface has missing telemetry ("no_da
 never report the intent as compliant; report compliance as unknown due to missing or
 unreliable telemetry.
 
-With assess_intent source=tmf921 the verdict still comes from the broker's deterministic checks combined with the intent server's handling state; explain it and never compute or override it, and an "inconclusive" verdict means evidence was stale, missing, conflicted, drifted (the intent server's stored bound differs from the bound recorded when it was bound; report both numbers and do not say why) or unavailable and must never be presented as compliant."""
+With assess_intent source=tmf921 the verdict still comes from the broker's deterministic checks combined with the intent server's handling state; explain it and never compute or override it, and an "inconclusive" verdict means evidence was stale, missing, conflicted, drifted (the intent server's stored goal differs from the goal recorded when it was bound; report both numbers and do not say why) or unavailable and must never be presented as compliant."""
 
 # The broker accepts only digits followed by s, m, h or d (e.g. "5m", "1h");
 # ISO-8601 durations such as "PT1H" are rejected as an unsafe time_window.
