@@ -54,7 +54,7 @@ def build_mcp_server():
     ) -> dict:
         """Assess an intent against observed telemetry and return verdict plus pruned context.
         as_of ("10m") assesses as of that long ago; mode "within" checks the whole window.
-        Both work for either source (tmf921: bounds read now, nothing pushed). Default source is tmf921;
+        Both work for either source (tmf921: goals read now, nothing pushed). Default source is tmf921;
         source graph is deprecated."""
         return assess(intent_id, time_window, source=source, as_of=as_of, mode=mode)
 

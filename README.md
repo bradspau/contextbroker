@@ -88,7 +88,7 @@ python -m ingestion.telemetry_simulator --hsi          # or --hsi-breach for lat
 | Step | Result |
 |---|---|
 | Compliant samples, current assess | `success` |
-| `--hsi-breach` (latency 40.5 ms vs 25 ms), current assess | `failure`, reason "bound violated" (names no metric, see limits) |
+| `--hsi-breach` (latency 40.5 ms vs 25 ms), current assess | `failure`, reason "goal not met" (names no metric, see limits) |
 | Re-assess the same intent after that `failure` | `inconclusive` ("goal changed: LatencyMetric pinned 25, now 40.535"): the server's stored latency goal differs from the pin |
 | New intent (new id) and new binding, compliant samples | `success` |
 | `mode=within`, 5 m window containing the breach | `failure`, "LatencyMetric: ... observed 59.22 does not satisfy < 25.0" |
@@ -111,7 +111,7 @@ python -m ingestion.telemetry_simulator --hsi          # or --hsi-breach for lat
 - After any Degraded evaluation the TMF921 server rewrites the intent's stored
   goal, so the intent must be re-created (new id) and bound again to assess
   again. `bind_intent --replace` on the same intent pins the rewritten goal.
-- A current-moment `tmf921` `failure` says only "bound violated": the server's
+- A current-moment `tmf921` `failure` says only "goal not met": the server's
   JSON reason (`40.535 ms < 25 ms: FAIL`) names no metric. The failing condition
   is only in its TR290 report (`icm:about bbf:Lat_Check`). The past-question
   assess names the metric because the broker judges it.
@@ -582,7 +582,7 @@ two optional arguments. With neither, the assessment is a current one.
   each intent) and judges
   the past telemetry itself. The TMF921 server keeps no history and is never asked
   about the past: nothing is pushed, no high-water mark is written and the stored
-  outcome is not updated. `requirement` says "bounds read now from the TMF921 intent
+  outcome is not updated. `requirement` says "goals read now from the TMF921 intent
   (no history is kept)", `per_interface` has one entry per goal metric (`condition`
   is the metric's short name), and one failing metric fails the whole intent.
 - Data must still be in VictoriaMetrics (default retention is about a month); with no

@@ -26,7 +26,7 @@ def test_fulfilled_fresh_is_success():
 def test_violation_is_failure():
     v = run(load("degraded_violation"))
     assert v.outcome is Outcome.FAILURE
-    assert v.per_interface[0]["reason"] == "bound violated"
+    assert v.per_interface[0]["reason"] == "goal not met"
 
 
 def test_no_observation_inconclusive_without_echo():

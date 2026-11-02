@@ -336,7 +336,7 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
     return done(outcome, reasons, per, all_envs)
 
 
-TEMPORAL_REQUIREMENT = "bounds read now from the TMF921 intent (no history is kept)"
+TEMPORAL_REQUIREMENT = "goals read now from the TMF921 intent (no history is kept)"
 
 
 def assess_tmf921_as_of(

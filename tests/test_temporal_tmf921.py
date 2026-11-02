@@ -1,4 +1,4 @@
-"""Temporal assess (as_of, mode) for source=tmf921: read-only, bounds read now."""
+"""Temporal assess (as_of, mode) for source=tmf921: read-only, goals read now."""
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -28,7 +28,7 @@ B_LAT = {IID: IntentBinding(IID, {LAT: ("olt1", "pon0/1")}, {LAT: 100.0})}
 B_TWO = {IID: IntentBinding(IID, {LAT: ("olt1", "pon0/1"), JIT: ("olt1", "pon0/2")},
                             {LAT: 100.0, JIT: 10.0})}
 B_DOWN = {IID: IntentBinding(IID, {DOWN: ("olt1", "pon0/1")}, {DOWN: 100.0})}
-REQUIREMENT = "bounds read now from the TMF921 intent (no history is kept)"
+REQUIREMENT = "goals read now from the TMF921 intent (no history is kept)"
 
 
 def ttl(uri, val):

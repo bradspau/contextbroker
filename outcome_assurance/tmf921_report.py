@@ -34,7 +34,7 @@ def _classify(clause: str) -> tuple[Outcome, str]:
     if "unit mismatch:" in clause:
         return Outcome.INCONCLUSIVE, "unit mismatch"
     if clause.endswith(": FAIL"):
-        return Outcome.FAILURE, "bound violated"
+        return Outcome.FAILURE, "goal not met"
     return Outcome.INCONCLUSIVE, "unrecognised clause"
 
 
