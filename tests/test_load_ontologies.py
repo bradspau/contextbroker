@@ -3,6 +3,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+import ingestion.load_ontologies as loader
 from ingestion.load_ontologies import load_ontologies, validate_shapes
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -61,7 +62,7 @@ def test_load_ontologies_posts_nothing_on_violation(tmp_path):
     d = _write(tmp_path, _intent(operator=False))
     with patch("requests.post") as post:
         with pytest.raises(ValueError, match="hasOperator"):
-            load_ontologies(d, SHACL_DIR, ENDPOINT)
+            load_ontologies(d, SHACL_DIR, ENDPOINT, allow=("bad.ttl",))
     post.assert_not_called()
 
 
@@ -95,7 +96,7 @@ def test_empty_shacl_dir_raises(tmp_path):
     shacl.mkdir()
     with patch("ingestion.load_ontologies.requests.post") as post:
         with pytest.raises(ValueError, match="shacl_dir"):
-            load_ontologies(tbox, shacl, "http://x/data")
+            load_ontologies(tbox, shacl, "http://x/data", allow=("t.ttl",))
     post.assert_not_called()
 
 
@@ -199,3 +200,72 @@ def test_empty_abox_dir_is_fine(tmp_path):
     with patch("requests.post", return_value=resp) as post:
         load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=tmp_path / "abox")
     assert post.call_count == len(list(TBOX_DIR.glob("*.ttl")))
+
+
+def _tbox_with(tmp_path, names):
+    d = tmp_path / "tbox"
+    d.mkdir()
+    for n in names:
+        (d / n).write_text((TBOX_DIR / "topology.ttl").read_text())
+    return d
+
+
+def test_unlisted_tbox_file_is_refused_before_validation_and_post(tmp_path):
+    d = _tbox_with(tmp_path, ["topology.ttl", "licensed.ttl"])
+    with patch("ingestion.load_ontologies.validate_shapes") as validate, \
+            patch("ingestion.load_ontologies.requests.post") as post:
+        with pytest.raises(ValueError, match="not on the allow-list; nothing loaded") as exc:
+            load_ontologies(d, SHACL_DIR, ENDPOINT)
+    assert "licensed.ttl" in str(exc.value)
+    assert "topology.ttl" not in str(exc.value)
+    assert str(tmp_path) not in str(exc.value)
+    validate.assert_not_called()
+    post.assert_not_called()
+
+
+def test_symlink_outside_tbox_dir_is_refused(tmp_path):
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "topology.ttl").write_text((TBOX_DIR / "topology.ttl").read_text())
+    d = tmp_path / "tbox"
+    d.mkdir()
+    try:
+        (d / "topology.ttl").symlink_to(outside / "topology.ttl")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not supported on this platform")
+    with patch("ingestion.load_ontologies.validate_shapes") as validate, \
+            patch("ingestion.load_ontologies.requests.post") as post:
+        with pytest.raises(ValueError, match="links outside the TBox directory; nothing loaded") as exc:
+            load_ontologies(d, SHACL_DIR, ENDPOINT)
+    assert "topology.ttl" in str(exc.value)
+    assert str(tmp_path) not in str(exc.value)
+    validate.assert_not_called()
+    post.assert_not_called()
+
+
+def test_repo_tbox_passes_the_allow_list():
+    assert getattr(loader, "TBOX_ALLOWLIST", None) == ("topology.ttl",)
+    assert {p.name for p in TBOX_DIR.glob("*.ttl")} <= set(loader.TBOX_ALLOWLIST)
+    resp = Mock()
+    resp.raise_for_status = Mock()
+    with patch("requests.post", return_value=resp) as post:
+        load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT)
+    assert post.call_count == len(list(TBOX_DIR.glob("*.ttl")))
+
+
+def test_abox_files_are_not_subject_to_the_tbox_allow_list(tmp_path):
+    _abox_file(tmp_path, _binding(), name="not-on-the-list.ttl")
+    resp = Mock()
+    resp.raise_for_status = Mock()
+    with patch("requests.post", return_value=resp) as post:
+        load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=tmp_path / "abox")
+    assert post.call_count == len(list(TBOX_DIR.glob("*.ttl"))) + 1
+
+
+def test_caller_can_pass_its_own_allow_list(tmp_path):
+    d = _tbox_with(tmp_path, ["mine.ttl"])
+    resp = Mock()
+    resp.raise_for_status = Mock()
+    with patch("requests.post", return_value=resp) as post:
+        load_ontologies(d, SHACL_DIR, ENDPOINT, allow=("mine.ttl",))
+    assert post.call_count == 1
