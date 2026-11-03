@@ -1,5 +1,6 @@
 """Broker REST interface (MCP server built but not mounted) over the joiner, pruner, operations queries and the TMF921 assess."""
 
+import logging
 from typing import Literal
 
 import requests
@@ -8,11 +9,15 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from broker_engine.assess import assess_intent
+from broker_engine.faults import log_fault
 from broker_engine import operations
 from broker_engine.pruner import prune  # noqa: F401
 from broker_engine.validation import ClientInputError
 from broker_engine.tsdb_joiner import join_observed_metric
 from outcome_assurance.evaluate import evaluate_intent  # noqa: F401
+
+log = logging.getLogger(__name__)
+
 
 def assess(intent_id: str, time_window: str, source: str = "tmf921",
            as_of: str | None = None, mode: str | None = None) -> dict:
@@ -92,6 +97,7 @@ async def _client_error(request: Request, exc: ClientInputError):
 
 @app.exception_handler(requests.RequestException)
 async def _upstream_error(request: Request, exc: requests.RequestException):
+    log_fault(log, exc, "upstream data store unavailable")
     return JSONResponse(status_code=502, content={"detail": "upstream data store unavailable"})
 
 

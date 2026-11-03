@@ -4,11 +4,15 @@ Verdict mapping: ``Verdict.per_interface`` carries per-condition entries
 ``{"condition", "outcome", "reason"}``; ``Verdict.reasons`` carries fixed strings only.
 Raw server text is never echoed into reasons.
 """
+import logging
 import re
 from datetime import datetime, timedelta
 
+from broker_engine.faults import log_fault
 from data_contracts.envelope import DEFAULT_MAX_AGE_S
 from outcome_assurance.evaluate import Outcome, Verdict
+
+log = logging.getLogger(__name__)
 
 MAX_TURTLE_BYTES = 64 * 1024
 FUTURE_SKEW = timedelta(seconds=5)
@@ -99,7 +103,8 @@ def _turtle_outcome(text: str) -> Outcome | None:
             else:
                 outcomes.append(Outcome.INCONCLUSIVE)
         return _combine(outcomes)
-    except Exception:
+    except Exception as exc:
+        log_fault(log, exc, "report Turtle unreadable")
         return None
 
 
@@ -120,7 +125,8 @@ def interpret_report(report, *, now: datetime, max_age_s: int = DEFAULT_MAX_AGE_
                      observed_at: dict | None = None) -> Verdict:
     try:
         return _interpret(report, now, max_age_s, observed_at)
-    except Exception:
+    except Exception as exc:
+        log_fault(log, exc, "unparseable report")
         return _inconclusive("unparseable report")
 
 

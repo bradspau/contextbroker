@@ -1,10 +1,12 @@
 """Join observed telemetry from VictoriaMetrics into context envelopes."""
+import logging
 import math
 import os
 from datetime import datetime, timedelta, timezone
 
 import requests
 
+from broker_engine.faults import log_fault
 from broker_engine.validation import (
     REQUEST_TIMEOUT_S,
     _SAFE_WINDOW,
@@ -14,6 +16,8 @@ from broker_engine.validation import (
 )
 from data_contracts.envelope import ContextEnvelope, build_observed
 from ingestion.telemetry_simulator import MEASUREMENT_NAME
+
+log = logging.getLogger(__name__)
 
 VM_QUERY_ENDPOINT = os.environ.get("VM_QUERY_ENDPOINT", "http://localhost:8428/api/v1/query")
 
@@ -119,5 +123,6 @@ def _oldest_sample_time(
         if (observed_at - now).total_seconds() > FUTURE_TOLERANCE_S:
             return None
         return observed_at
-    except Exception:
+    except Exception as exc:
+        log_fault(log, exc, "sample time query failed")
         return None

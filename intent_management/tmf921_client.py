@@ -9,6 +9,7 @@ validated with allow-list regexes before any HTTP call.
 Errors are generic: Tmf921Error never carries the URL, headers or response
 body, and nothing sensitive is logged.
 """
+import logging
 import math
 import os
 import re
@@ -19,8 +20,11 @@ import requests
 from rdflib import BNode, Graph, Literal, URIRef
 from rdflib.namespace import RDF
 
+from broker_engine.faults import log_fault
 from broker_engine.validation import REQUEST_TIMEOUT_S, ClientInputError
 from data_contracts.metric_map import ALLOWED_UNITS, broker_metric_for, check_uri
+
+log = logging.getLogger(__name__)
 
 TMF921_BASE_URL = os.environ.get(
     "TMF921_BASE_URL", "http://localhost:8000/tmf-api/intentManagement/v5"
@@ -102,7 +106,8 @@ def intent_bounds(intent) -> dict[str, float]:
                     p_ == RDF.first and s_ in heads):
                 return {}
         return out
-    except Exception:
+    except Exception as exc:
+        log_fault(log, exc, "intent goal unreadable")
         return {}
 
 
@@ -119,7 +124,8 @@ class Tmf921Client:
             return r.json()
         except Tmf921Error:
             raise
-        except Exception:
+        except Exception as exc:
+            log_fault(log, exc, "TMF921 request failed")
             raise Tmf921Error("TMF921 request failed") from None
 
     def get_intent(self, intent_id: str) -> dict:
@@ -170,7 +176,8 @@ class Tmf921Client:
                               json=body, timeout=REQUEST_TIMEOUT_S,
                               allow_redirects=False)
             ok = r.status_code in (200, 201)
-        except Exception:
+        except Exception as exc:
+            log_fault(log, exc, "TMF921 request failed")
             raise Tmf921Error("TMF921 request failed") from None
         if not ok:
             raise Tmf921Error("TMF921 request failed")
