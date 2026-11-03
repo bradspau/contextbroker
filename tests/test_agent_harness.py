@@ -30,25 +30,25 @@ def _response(content):
 
 def test_run_agent_executes_tool_call_then_returns_final_message():
     first_response = _response(
-        [_tool_use_block("call_1", "query_intent_state_requirements", {"intent_id": "intent-core-health-01"})]
+        [_tool_use_block("call_1", "query_interface_neighbours", {"device": "Router-A", "interface": "ge0"})]
     )
     final_response = _response(
-        [_text_block("Compliant: 0 drops observed, target is 0.")]
+        [_text_block("Router-A ge0 has no declared neighbours.")]
     )
 
     fake_client = Mock()
     fake_client.messages.create.side_effect = [first_response, final_response]
 
     with patch(
-        "agent_harness.tools.query_intent_state_requirements",
-        return_value={"metric": "input_drops", "operator": "==", "target_value": 0.0, "interfaces": []},
+        "agent_harness.tools.query_interface_neighbours",
+        return_value={"neighbours": [], "quality": {"missing": True}},
     ) as mock_tool:
         result = run_agent(
-            "Is intent-core-health-01 compliant right now?", client=fake_client, model="test-model"
+            "What is connected to Router-A ge0?", client=fake_client, model="test-model"
         )
 
-    mock_tool.assert_called_once_with(intent_id="intent-core-health-01")
-    assert result == "Compliant: 0 drops observed, target is 0."
+    mock_tool.assert_called_once_with(device="Router-A", interface="ge0")
+    assert result == "Router-A ge0 has no declared neighbours."
     assert fake_client.messages.create.call_count == 2
 
 
@@ -70,22 +70,22 @@ def test_run_agent_rejects_llm_supplied_extra_kwarg_and_recovers():
     tool function — and run_agent must recover rather than crash."""
     bad_block = _tool_use_block(
         "call_1",
-        "query_intent_state_requirements",
-        {"intent_id": "intent-core-health-01", "query_endpoint": "http://attacker.example/x"},
+        "query_interface_neighbours",
+        {"device": "Router-A", "interface": "ge0", "query_endpoint": "http://attacker.example/x"},
     )
     first_response = _response([bad_block])
-    final_response = _response([_text_block("I hit an error reading the requirement.")])
+    final_response = _response([_text_block("I hit an error reading the neighbours.")])
 
     fake_client = Mock()
     fake_client.messages.create.side_effect = [first_response, final_response]
 
-    with patch("agent_harness.tools.query_intent_state_requirements") as mock_tool:
+    with patch("agent_harness.tools.query_interface_neighbours") as mock_tool:
         result = run_agent(
-            "Is intent-core-health-01 compliant right now?", client=fake_client, model="test-model"
+            "What is connected to Router-A ge0?", client=fake_client, model="test-model"
         )
 
     mock_tool.assert_not_called()
-    assert result == "I hit an error reading the requirement."
+    assert result == "I hit an error reading the neighbours."
     assert fake_client.messages.create.call_count == 2
 
     # The conversation sent on the second call must contain a tool_result error message.
@@ -185,15 +185,15 @@ def test_run_agent_stops_after_max_iterations_without_raising():
     """Finding 4: if the model keeps returning tool calls forever, run_agent must
     give up after MAX_ITERATIONS create() calls instead of looping unboundedly."""
     always_tool_call_response = _response(
-        [_tool_use_block("call_x", "query_intent_state_requirements", {"intent_id": "intent-core-health-01"})]
+        [_tool_use_block("call_x", "query_interface_neighbours", {"device": "Router-A", "interface": "ge0"})]
     )
 
     fake_client = Mock()
     fake_client.messages.create.return_value = always_tool_call_response
 
     with patch(
-        "agent_harness.tools.query_intent_state_requirements",
-        return_value={"metric": "input_drops", "operator": "==", "target_value": 0.0, "interfaces": []},
+        "agent_harness.tools.query_interface_neighbours",
+        return_value={"neighbours": [], "quality": {"missing": True}},
     ):
         result = run_agent("check compliance forever", client=fake_client, model="test-model")
 
@@ -228,7 +228,7 @@ def test_run_agent_falls_back_to_lmstudio_on_connection_error():
     fake_lmstudio_client.chat.completions.create.return_value = lmstudio_final
 
     result = run_agent(
-        "Is intent-core-health-01 compliant right now?",
+        "Is intent-1 compliant right now?",
         client=fake_claude_client,
         model="test-model",
         fallback_client=fake_lmstudio_client,
@@ -253,7 +253,7 @@ def test_run_agent_does_not_fallback_on_non_connection_error():
 
     with pytest.raises(anthropic.AuthenticationError):
         run_agent(
-            "Is intent-core-health-01 compliant right now?",
+            "Is intent-1 compliant right now?",
             client=fake_claude_client,
             model="test-model",
             fallback_client=fake_lmstudio_client,
@@ -273,7 +273,7 @@ def test_run_agent_lmstudio_fallback_executes_tool_call():
         content=None,
         tool_calls=[
             _openai_tool_call(
-                "call_1", "query_intent_state_requirements", '{"intent_id": "intent-core-health-01"}'
+                "call_1", "query_interface_neighbours", '{"device": "Router-A", "interface": "ge0"}'
             )
         ],
     )
@@ -285,18 +285,18 @@ def test_run_agent_lmstudio_fallback_executes_tool_call():
     ]
 
     with patch(
-        "agent_harness.tools.query_intent_state_requirements",
-        return_value={"metric": "input_drops", "operator": "==", "target_value": 0.0, "interfaces": []},
+        "agent_harness.tools.query_interface_neighbours",
+        return_value={"neighbours": [], "quality": {"missing": True}},
     ) as mock_tool:
         result = run_agent(
-            "Is intent-core-health-01 compliant right now?",
+            "What is connected to Router-A ge0?",
             client=fake_claude_client,
             model="test-model",
             fallback_client=fake_lmstudio_client,
             fallback_model="local-model",
         )
 
-    mock_tool.assert_called_once_with(intent_id="intent-core-health-01")
+    mock_tool.assert_called_once_with(device="Router-A", interface="ge0")
     assert result == "Compliant via LM Studio."
     assert fake_lmstudio_client.chat.completions.create.call_count == 2
 
@@ -310,7 +310,7 @@ def test_run_agent_fallback_requires_lmstudio_model_env_var(monkeypatch):
 
     with pytest.raises(RuntimeError, match="LMSTUDIO_MODEL"):
         run_agent(
-            "Is intent-core-health-01 compliant right now?",
+            "Is intent-1 compliant right now?",
             client=fake_claude_client,
             model="test-model",
         )
@@ -351,7 +351,7 @@ def test_system_prompt_forbids_own_verdict():
 def test_assess_intent_tool_registered_and_rejects_extra_args():
     names = {t["name"] for t in tools.TOOLS}
     assert "assess_intent" in names
-    assert tools._TOOL_ALLOWED_ARGS["assess_intent"] == {"intent_id", "time_window", "source", "as_of", "mode"}
+    assert tools._TOOL_ALLOWED_ARGS["assess_intent"] == {"intent_id", "time_window", "as_of", "mode"}
     assert {t["function"]["name"] for t in tools.TOOLS_OPENAI} == names
     with patch("agent_harness.tools.assess_intent") as mock_tool:
         content, is_error = tools.execute_tool(
@@ -366,20 +366,20 @@ def test_assess_intent_tool_registered_and_rejects_extra_args():
 
 
 def test_assess_intent_tool_returns_deterministic_verdict():
-    def join(device, interface, metric_type, time_window, **kw):
-        value = 3.0 if device == "r1" else 0.0
-        return build_observed(f"{device}:{interface}", value, "vm", NOW, NOW)
-
-    with patch("broker_engine.assess.resolve_intent", return_value=INTENT), \
-         patch("broker_engine.assess.join_observed_metric", side_effect=join):
+    verdict = {
+        "verdict": "failure",
+        "per_interface": [{"outcome": "failure"}, {"outcome": "success"}],
+        "reasons": ["latency_ms 60 not < 50"],
+        "context": [],
+        "dropped_count": 0,
+    }
+    with patch("broker_engine.assess.assess_via_tmf921", return_value=verdict) as via:
         content, is_error = tools.execute_tool(
-            "assess_intent", {"intent_id": "I1", "time_window": "5m", "source": "graph"}
+            "assess_intent", {"intent_id": "I1", "time_window": "5m"}
         )
+    via.assert_called_once()
     assert is_error is False
-    body = json.loads(content)
-    assert body["verdict"] == "failure"  # nonzero input_drops on r1
-    assert {p["outcome"] for p in body["per_interface"]} == {"failure", "success"}
-    assert set(body) >= {"verdict", "per_interface", "reasons", "context", "dropped_count"}
+    assert json.loads(content) == verdict
 
 
 # ---- envelope-returning metric tool and sanitised errors ----
@@ -423,10 +423,6 @@ def test_system_prompt_forbids_stale_as_current():
 
 
 def test_execute_tool_keeps_safe_messages():
-    from broker_engine.validation import IntentNotFound
-    with patch("agent_harness.tools.query_intent_state_requirements", side_effect=IntentNotFound("No such intent: 'x'")):
-        content, is_error = tools.execute_tool("query_intent_state_requirements", {"intent_id": "x"})
-    assert is_error and "No such intent" in json.loads(content)["error"]
     content, is_error = tools.execute_tool("query_tsdb_metrics", {**_METRIC_ARGS, "time_window": "5min"})
     assert is_error and "time_window" in json.loads(content)["error"]
 
@@ -434,62 +430,70 @@ def test_execute_tool_keeps_safe_messages():
 def test_execute_tool_hides_upstream_details():
     import requests
     exc = requests.HTTPError("500 for url http://fuseki.internal:3030/ds/query?query=SELECT secret")
-    with patch("agent_harness.tools.query_intent_state_requirements", side_effect=exc):
-        content, is_error = tools.execute_tool("query_intent_state_requirements", {"intent_id": "x"})
+    with patch("agent_harness.tools.query_interface_neighbours", side_effect=exc):
+        content, is_error = tools.execute_tool("query_interface_neighbours", {"device": "r1", "interface": "e0"})
     assert is_error
     assert json.loads(content) == {"error": "upstream data store unavailable"}
     assert "fuseki.internal" not in content and "secret" not in content
 
 
 def test_execute_tool_generic_exception_has_type_only():
-    with patch("agent_harness.tools.query_intent_state_requirements",
+    with patch("agent_harness.tools.query_interface_neighbours",
                side_effect=KeyError("http://vm.internal:8428/leak")):
-        content, is_error = tools.execute_tool("query_intent_state_requirements", {"intent_id": "x"})
+        content, is_error = tools.execute_tool("query_interface_neighbours", {"device": "r1", "interface": "e0"})
     assert is_error
     assert json.loads(content) == {"error": "tool error: KeyError"}
     assert "vm.internal" not in content
 
 
-def test_assess_tool_source_enum_in_both_schemas():
+def test_assess_tool_has_no_source_property_in_either_schema():
     for schema in (
         next(t for t in tools.TOOLS if t["name"] == "assess_intent")["input_schema"],
         next(t for t in tools.TOOLS_OPENAI if t["function"]["name"] == "assess_intent")["function"]["parameters"],
     ):
-        assert schema["properties"]["source"]["enum"] == ["graph", "tmf921"]
+        assert sorted(schema["properties"]) == ["as_of", "intent_id", "mode", "time_window"]
         assert "source" not in schema["required"]
-        assert schema["properties"]["source"]["default"] == "tmf921"
 
 
-def test_execute_tool_rejects_bad_source_and_undeclared_args():
+def test_removed_graph_tool_is_gone():
+    assert "query_intent_state_requirements" not in {t["name"] for t in tools.TOOLS}
+    assert "query_intent_state_requirements" not in {t["function"]["name"] for t in tools.TOOLS_OPENAI}
+    assert not hasattr(tools, "query_intent_state_requirements")
+    content, err = tools.execute_tool("query_intent_state_requirements", {"intent_id": "I1"})
+    assert err and "Unknown tool" in json.loads(content)["error"]
+
+
+def test_execute_tool_rejects_source_and_undeclared_args():
     with patch("agent_harness.tools.assess_intent") as m:
-        content, err = tools.execute_tool(
-            "assess_intent", {"intent_id": "I1", "time_window": "5m", "source": "evil"})
-        assert err and "source" in json.loads(content)["error"]
-        for extra in ("query_endpoint", "base_url"):
+        for extra, value in (("source", "graph"), ("source", "tmf921"),
+                             ("query_endpoint", "http://x"), ("base_url", "http://x")):
             content, err = tools.execute_tool(
-                "assess_intent", {"intent_id": "I1", "time_window": "5m", extra: "http://x"})
+                "assess_intent", {"intent_id": "I1", "time_window": "5m", extra: value})
             assert err and "Unexpected argument" in json.loads(content)["error"]
         m.assert_not_called()
 
 
-def test_execute_tool_routes_tmf921_source():
+def test_execute_tool_passes_assess_arguments_straight_through():
     with patch("agent_harness.tools.assess_intent", return_value={"verdict": "success"}) as m:
-        content, err = tools.execute_tool(
-            "assess_intent", {"intent_id": "I1", "time_window": "5m", "source": "tmf921"})
-    assert not err
-    m.assert_called_once_with(intent_id="I1", time_window="5m", source="tmf921")
+        content, err = tools.execute_tool("assess_intent", {"intent_id": "I1", "time_window": "5m"})
+        assert not err and json.loads(content) == {"verdict": "success"}
+        m.assert_called_once_with(intent_id="I1", time_window="5m")
+        m.reset_mock()
+        tools.execute_tool("assess_intent", {"intent_id": "I1", "time_window": "5m",
+                                             "as_of": "10m", "mode": "within"})
+        m.assert_called_once_with(intent_id="I1", time_window="5m", as_of="10m", mode="within")
 
 
-def test_system_prompt_mentions_tmf921_rule():
-    assert "source=tmf921" in tools.SYSTEM_PROMPT
-    assert 'assess_intent(intent_id, time_window, source="graph"|"tmf921"' in tools.SYSTEM_PROMPT
-
-
-def test_prompt_prefers_default_source():
+def test_system_prompt_describes_one_intent_model_and_keeps_verdict_rules():
     p = tools.SYSTEM_PROMPT
-    assert 'default tmf921' in p
-    assert "Do not choose" in p and "deprecated" in p
-    assert "intent-core-health-01" in p and 'needs source="graph"' in p
+    for gone in ("source=", "intent-core-health-01", "OperationalIntent", "query_intent_state_requirements",
+                 "drift", "graph"):
+        assert gone not in p, gone
+    assert "assess_intent(intent_id, time_window)" in p and "TMF921" in p
+    for word in ('"success"', '"failure"', '"inconclusive"'):
+        assert word in p
+    assert "do not compute compliance yourself" in p
+    assert "never compute or override" in p
 
 
 # ---------- LLM_BACKEND switch ----------

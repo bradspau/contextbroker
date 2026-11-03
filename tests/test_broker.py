@@ -47,30 +47,6 @@ VM_RESPONSE = {
 VM_EMPTY_RESPONSE = {"status": "success", "data": {"resultType": "vector", "result": []}}
 
 
-def test_query_intent_state_requirements_parses_sparql_json():
-    mock_response = Mock()
-    mock_response.json.return_value = SPARQL_RESPONSE
-    mock_response.raise_for_status = Mock()
-
-    with patch("broker.requests.post", return_value=mock_response) as mock_post:
-        result = broker.query_intent_state_requirements("intent-core-health-01")
-
-    assert result["metric"] == "input_drops"
-    assert result["operator"] == "=="
-    assert result["target_value"] == 0.0
-    assert result["interfaces"] == [
-        {"device": "Router-A", "interface_name": "GigabitEthernet0/0/0"},
-        {"device": "Router-B", "interface_name": "GigabitEthernet0/0/1"},
-    ]
-    _, kwargs = mock_post.call_args
-    assert "intent-core-health-01" in kwargs["data"]["query"]
-
-
-def test_query_intent_state_requirements_rejects_unsafe_intent_id():
-    with pytest.raises(ValueError):
-        broker.query_intent_state_requirements("intent-1 . } DROP ALL ; #")
-
-
 def test_query_tsdb_metrics_parses_vector_result():
     mock_response = Mock()
     mock_response.json.return_value = VM_RESPONSE
@@ -127,25 +103,3 @@ def test_query_tsdb_metrics_rejects_unsafe_inputs(device, interface, metric_type
 def test_measurement_name_constant_matches_telemetry_simulator():
     """Finding 5: broker.py must import the shared constant, not hardcode its own copy."""
     assert broker.MEASUREMENT_NAME == telemetry_simulator.MEASUREMENT_NAME == "interface_metrics"
-
-
-def test_intent_sparql_matches_real_ontology_content():
-    """Finding 6: run the actual SPARQL text broker builds against the real ontology
-    file (no HTTP mocking) so a predicate typo would fail this test, not just the
-    mocked unit tests above."""
-    graph = rdflib.Graph()
-    graph.parse(ONTOLOGY_PATH, format="turtle")
-
-    sparql = broker._build_intent_sparql("intent-core-health-01")
-    rows = list(graph.query(sparql))
-
-    assert len(rows) == 2
-    seen = {(str(row.device), str(row.interfaceName)) for row in rows}
-    assert seen == {
-        ("Router-A", "GigabitEthernet0/0/0"),
-        ("Router-B", "GigabitEthernet0/0/1"),
-    }
-    for row in rows:
-        assert str(row.metric) == "input_drops"
-        assert str(row.operator) == "=="
-        assert str(row.targetValue) == "0.0"
