@@ -11,7 +11,7 @@
 - Work on `fullnetwork` (pushed to `origin/fullnetwork`). Do not push `origin/master` unless asked.
 
 ## Licensing (never break)
-- TM Forum TIO ontology files and the TMF921/TR290-292 PDFs are licensed: never commit, push, copy content into the repo, or bake into an image. `docs/` is deliberately untracked.
+- TM Forum TIO ontology files and the TMF921/TR290-292 PDFs are licensed: never commit, push, copy content into the repo, or bake into an image. The licensed material is `docs/TMF-921-spec/` only. `docs/` is still deliberately untracked.
 - Do not modify `/home/brad/Projects/BBF_921_java` (the TMF921 server source). The broker never creates, patches or deletes a TMF921 intent.
 
 ## Architecture rules
@@ -23,10 +23,10 @@
 - Say "goal" (one metric with its limit), not "bound"; avoid "drift". The stored `:pinnedBound` and internal `intent_bounds` names stay as they are.
 - "Fails closed" must name its subject (for example "the TMF921 assess fails closed"). Do not call the action-readiness check a "gate".
 
-## Docs map (untracked, licensed material: read only)
+## Docs map (untracked; only `docs/TMF-921-spec/` is licensed, read only)
 - `docs/Architecture/` - functional architecture spec with implementation options; Layer 3 (Context Broker, E01-E03) is the layer this repo implements
 - `docs/AI_Ready_Network_Operations_Layer_Markdowns/` - one file per layer (`03_...` is Semantic Knowledge and Context), plus `08_Cross_Cutting_Fabrics.md`
-- `docs/TMF-921-spec/` - TMF921 intent interface: markdown `01`-`11`, OAS yaml, PDFs
+- `docs/TMF-921-spec/` - LICENSED. TMF921 intent interface: markdown `01`-`11`, OAS yaml, PDFs
 - `docs/superpowers/plans/` - dated implementation plans
 
 ## Design notes (tracked)
@@ -88,8 +88,8 @@ GSD (`/gsd-*` skills, open-gsd/gsd-core) plans the work and beads tracks it. The
 - `.planning/` is gitignored: it is derived planning state and may hold licensed text. Do not `git add -f` it. Anything meant for git goes in `design/`.
 
 ### Licensing (never break)
-- Do not point GSD at `docs/` (`/gsd-onboard`, `/gsd-ingest-docs`, `/gsd-map-codebase`). It is licensed, read-only and untracked.
-- Nothing from `docs/` may be copied into `.planning/`, beads descriptions or `design/`.
+- Do not point GSD at `docs/TMF-921-spec/` (`/gsd-onboard`, `/gsd-ingest-docs`, `/gsd-map-codebase`). It is licensed, read-only and untracked. The other `docs/` subfolders (`Architecture/`, `AI_Ready_Network_Operations_Layer_Markdowns/`, `superpowers/`) are not licensed and may be used as GSD input.
+- Nothing from `docs/TMF-921-spec/` may be copied into `.planning/`, beads descriptions or `design/`.
 
 ### Architecture rules still apply
 - GSD plans must keep the broker's rules from this file: it resolves, joins and delivers context and never decides or acts. Verdicts stay `success|failure|inconclusive`.
