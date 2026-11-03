@@ -17,7 +17,7 @@ The design principle (spec: `docs/Context-Broker-Updated.md`) is:
   `ContextEnvelope` that carries quality labels (`stale`, `missing`, `conflicts`) and
   provenance.
 - **The LLM is not the judge.** A deterministic assurance layer returns
-  `success`, `failure` or `inconclusive`. Stale, missing, conflicted, drifted or
+  `success`, `failure` or `inconclusive`. Stale, missing, conflicted, changed-goal or
   unmappable evidence is never `success`. The LLM only explains the verdict.
 - **Refuse unless proven safe.** Anything that could change a network goes through
   the action-readiness check (`governance_gate`) and the executor
@@ -49,9 +49,9 @@ structure below by a strangler migration.
 | LQM, System 1 / investigation models, state reconciliation, syslog parsing | Stubs |
 | Redpanda, Qdrant, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 708 tests passing plus 15 live TMF921 tests that are skipped
-unless `TMF921_LIVE=1` (`pytest`). The work is on local `master` and has
-not been pushed or reviewed upstream.
+The test suite has 716 tests passing plus 15 live TMF921 tests that are skipped
+unless `TMF921_LIVE=1` (`pytest`). The work is on the `fullnetwork` branch
+(pushed to GitHub) and has not been reviewed by anyone else.
 
 ## Demo status
 
@@ -108,9 +108,13 @@ python -m ingestion.telemetry_simulator --hsi          # or --hsi-breach for lat
   mocks only.
 
 **Known limits of the demo.**
-- After any Degraded evaluation the TMF921 server rewrites the intent's stored
-  goal, so the intent must be re-created (new id) and bound again to assess
-  again. `bind_intent --replace` on the same intent pins the rewritten goal.
+- After any Degraded evaluation the TMF921 server replaces the failed goal in the
+  intent with the value it observed (its best-effort proposal, by design). It does
+  not mark the change and keeps no copy of the original, so the goal recorded when
+  the intent was bound is the only record of what was asked for. The broker reports
+  the difference as `inconclusive` and does not judge the cause. To assess again
+  the intent must be re-created (new id) and bound again; `bind_intent --replace`
+  on the same intent pins the changed goal.
 - A current-moment `tmf921` `failure` says only "goal not met": the server's
   JSON reason (`40.535 ms < 25 ms: FAIL`) names no metric. The failing condition
   is only in its TR290 report (`icm:about bbf:Lat_Check`). The past-question
@@ -575,7 +579,7 @@ two optional arguments. With neither, the assessment is a current one.
   judged against today's target.
 - A historical assessment never updates the intent's current fulfilment state.
 - Both sources support this. For the default `source: "tmf921"` the broker reads the goals now
-  from the TMF921 intent (after the same drift check against the pinned binding, so
+  from the TMF921 intent (after the same changed-goal check against the pinned binding, so
   a changed goal is `inconclusive`), takes each goal's direction from the
   `operator` in `data_contracts/metric_map.json` (latency, jitter, packet loss `<`;
   bandwidths `>=`; verified live against the server on 2026-10-28, not read from
@@ -653,14 +657,15 @@ The value judged on the TMF921 path is the latest sample in the window
 (`last_over_time`), not the window maximum, so an old high value cannot satisfy
 an `atLeast` limit; the `graph` source keeps `max_over_time`.
 
-Safety behaviour: stale, missing, conflicted, drifted or unpushable evidence gives
+Safety behaviour: stale, missing, conflicted, changed-goal or unpushable evidence gives
 `inconclusive`, never `success`. A partial-evidence assess pushes nothing to the
-server. The server's Flow 3 rewrites an intent's stored goal after any Degraded
-evaluation, so after a `failure` the same intent reports "goal changed: <metric> pinned 25, now 40.535"
-(`inconclusive`) until it is re-created and re-pinned; this is server-side behaviour
-to raise with its owner. Re-create it with `create_demo_intent.sh` (a new id) and
-bind the new id. Do not use `bind_intent --replace` on the drifted intent: it
-re-pins whatever goal the server now holds, which is the rewritten one (verified
+server. The server's Flow 3 replaces an intent's failed goal with the observed value
+after any Degraded evaluation (a designed best-effort proposal that it does not mark
+and keeps no original of), so after a `failure` the same intent reports "goal changed:
+<metric> pinned 25, now 40.535" (`inconclusive`) until it is re-created and re-pinned.
+A marker for such a change would have to come from the intent server. Re-create it with `create_demo_intent.sh` (a new id) and
+bind the new id. Do not use `bind_intent --replace` on an intent that reported a changed goal: it
+re-pins whatever goal the server now holds, which is the changed one (verified
 live: the latency limit 25 became the observed 40.535 and `--replace` pinned
 40.535 without a warning). Per-intent locks and high-water marks are in-process, so
 run a single broker process. Observations pushed by other clients are invisible to the broker.
@@ -680,7 +685,10 @@ Known behaviours / troubleshooting:
   being retired.
 - Fuseki (port 3030) and lodlive-proxy (8081) are published on 127.0.0.1 only, because
   Fuseki has update enabled and default credentials and the pinned goals in the
-  network graph are trusted by the drift check. Do not change them to all interfaces.
+  network graph are trusted by the changed-goal check. Do not change them to all interfaces.
+- Fuseki needs host port 3030. If another project's container (for example the
+  BBF_921_java app) already publishes 3030, `docker start fuseki` fails with "port is
+  already allocated"; stop the other container first.
 - The TMF921 server writes two Degraded reports for a new intent (creation and
   activation) before any observation, so a freshly activated intent shows 2 reports
   and a Degraded state until an observation arrives.
