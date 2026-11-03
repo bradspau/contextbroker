@@ -670,3 +670,31 @@ def test_no_json_bindings_fallback():
     assert not hasattr(bindings_module, "load_bindings")
     assert not hasattr(src, "load_bindings")
     assert hasattr(bindings_module, "IntentBinding")
+
+
+# ---------- a push that fails part-way (D-14, D-15) ----------
+class SecondPostFails(FakeClient):
+    """Accepts the first post, raises on every later one."""
+
+    def __init__(self, exc, **kw):
+        super().__init__(**kw)
+        self.exc = exc
+
+    def post_observation(self, i, uri, value, unit=None, obtained_at=None):
+        if self.posts:
+            raise self.exc
+        super().post_observation(i, uri, value, unit, obtained_at)
+
+
+@pytest.mark.parametrize("exc", [Tmf921Error("server says SECRET"),
+                                 ClientInputError("SECRET value")])
+def test_second_push_failure_is_a_partial_push(exc):
+    c = SecondPostFails(exc, intent_doc=intent((URI, 100), (URI2, 10)))
+    out = run(c, bindings=BIND2)
+    assert out["verdict"] == "inconclusive"
+    assert out["reasons"] == ["partial push: pushed LatencyMetric; failed JitterMetric"]
+    assert len(c.posts) == 1 and c.posts[0][0] == URI  # nothing retried, nothing further
+    assert c.lists == 1  # no polling after the failure
+    assert (IID, URI) in src._MARKS and (IID, URI2) not in src._MARKS
+    assert "SECRET" not in str(out)
+    assert src.TMF921_STORE.last_outcome(IID).value == "inconclusive"
