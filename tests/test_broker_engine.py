@@ -3,7 +3,6 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from broker_engine.sparql_resolver import resolve_intent
 from broker_engine.tsdb_joiner import join_observed_metric
 
 TS = 1_700_000_000.5
@@ -125,23 +124,19 @@ def test_join_observed_metric_unsafe_token():
         join_observed_metric("r1", "eth0", "utilization", "5 minutes")
 
 
-def test_resolve_intent_unknown_raises():
-    r = _resp({"results": {"bindings": []}})
-    with patch("broker_engine.sparql_resolver.requests.post", return_value=r):
-        with pytest.raises(ValueError):
-            resolve_intent("nope")
+def test_graph_intent_resolver_and_not_found_are_gone():
+    import importlib
 
-
-def test_resolve_intent_adds_state_and_source():
-    b = {"metric": {"value": "utilization"}, "operator": {"value": "lt"},
-         "targetValue": {"value": "80"}, "device": {"value": "r1"},
-         "interfaceName": {"value": "eth0"}}
-    r = _resp({"results": {"bindings": [b]}})
-    with patch("broker_engine.sparql_resolver.requests.post", return_value=r):
-        out = resolve_intent("intent1")
-    assert out["state"] == "intended" and out["source"] == "fuseki"
-    assert out["target_value"] == 80.0
-    assert out["interfaces"] == [{"device": "r1", "interface_name": "eth0"}]
+    import broker_engine.sparql_resolver as sparql_resolver
+    import broker_engine.validation as validation
+    assert not hasattr(sparql_resolver, "resolve_intent")
+    assert not hasattr(sparql_resolver, "_build_intent_sparql")
+    assert hasattr(sparql_resolver, "FUSEKI_QUERY_ENDPOINT")
+    assert not hasattr(validation, "IntentNotFound")
+    for name in ("broker_engine.main", "broker_engine.assess", "broker_engine.operations",
+                 "broker_engine.binding_resolver", "agent_harness.tools", "broker",
+                 "ingestion.bind_intent", "intent_management.tmf921_source"):
+        importlib.import_module(name)
 
 
 def test_safe_token_and_window_reject_trailing_newline():
