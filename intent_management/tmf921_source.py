@@ -42,8 +42,8 @@ from outcome_assurance.tmf921_report import _short_name, interpret_report
 MAX_TRACKED_OUTCOMES = 1024
 FUTURE_SKEW = timedelta(seconds=5)
 
-# Separate from the graph path's store so a graph intent never inherits these.
-TMF921_STORE = IntentStore(lambda _i: {})
+# Last outcome the broker reported per TMF921 intent (in memory).
+TMF921_STORE = IntentStore()
 _STATE_LOCK = threading.Lock()
 _INTENT_LOCKS: dict[str, threading.Lock] = {}
 _MARKS: dict[tuple[str, str], tuple[datetime, float]] = {}
