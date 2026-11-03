@@ -11,7 +11,7 @@ def test_docker_compose_defines_victoriametrics_and_fuseki():
 
     assert "victoriametrics" in services
     vm_ports = services["victoriametrics"]["ports"]
-    assert "8428:8428" in vm_ports
+    assert vm_ports == ["127.0.0.1:8428:8428"]
 
     assert "fuseki" in services
     fuseki_ports = services["fuseki"]["ports"]
@@ -56,6 +56,30 @@ def test_docker_compose_defines_contextbroker_api():
 
 def test_fuseki_and_lodlive_proxy_are_bound_to_localhost():
     services = yaml.safe_load(COMPOSE_PATH.read_text())["services"]
-    for name in ("fuseki", "lodlive-proxy"):
+    for name in ("fuseki", "lodlive-proxy", "victoriametrics"):
         for port in services[name]["ports"]:
             assert port.startswith("127.0.0.1:"), (name, port)
+
+
+def _published_host_side(port):
+    """Return (host_ip, host_port, container_port) for a short-form port string."""
+    parts = str(port).split(":")
+    if len(parts) == 3:
+        return parts[0], parts[1], parts[2]
+    if len(parts) == 2:
+        return "", parts[0], parts[1]
+    return "", "", parts[0]
+
+
+def test_no_service_publishes_8428_on_a_host_interface():
+    services = yaml.safe_load(COMPOSE_PATH.read_text())["services"]
+    for name, svc in services.items():
+        for port in svc.get("ports", []):
+            host_ip, host_port, container_port = _published_host_side(port)
+            if "8428" in (host_port, container_port.split("/")[0]):
+                assert host_ip == "127.0.0.1", (name, port)
+
+
+def test_api_port_unchanged():
+    services = yaml.safe_load(COMPOSE_PATH.read_text())["services"]
+    assert services["contextbroker-api"]["ports"] == ["8080:8080"]
