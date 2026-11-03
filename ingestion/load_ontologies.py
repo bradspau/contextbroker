@@ -15,6 +15,8 @@ DEFAULT_SHACL_DIR = REPO_ROOT / "ontologies" / "shacl"
 DEFAULT_ABOX_DIR = REPO_ROOT / "ontologies" / "abox"
 DEFAULT_TTL_PATH = DEFAULT_TBOX_DIR / "topology.ttl"
 DEFAULT_DATA_ENDPOINT = "http://localhost:3030/network-dataset/data"
+# Only our own TBox loads; licensed ontology files are refused even if copied into the directory.
+TBOX_ALLOWLIST = ("topology.ttl",)
 
 
 def load_ttl_to_fuseki(
@@ -47,11 +49,19 @@ def load_ontologies(
     data_endpoint: str,
     auth: tuple[str, str] | None = ("admin", "admin"),
     abox_dir: Path | None = None,
+    allow: tuple[str, ...] = TBOX_ALLOWLIST,
 ) -> None:
     files = sorted(Path(tbox_dir).glob("*.ttl"))
     shapes_files = sorted(Path(shacl_dir).glob("*.ttl"))
     if not files:
         raise ValueError(f"no *.ttl files found in tbox_dir: {tbox_dir}")
+    unlisted = sorted(f.name for f in files if f.name not in allow)
+    if unlisted:
+        raise ValueError("TBox file(s) not on the allow-list; nothing loaded: " + ", ".join(unlisted))
+    tbox_real = Path(tbox_dir).resolve()
+    for f in files:
+        if f.resolve().parent != tbox_real:
+            raise ValueError(f"TBox file links outside the TBox directory; nothing loaded: {f.name}")
     if abox_dir is not None and Path(abox_dir).is_dir():
         files += sorted(Path(abox_dir).glob("*.ttl"))
     if not shapes_files:
