@@ -29,6 +29,9 @@
 - `docs/TMF-921-spec/` - TMF921 intent interface: markdown `01`-`11`, OAS yaml, PDFs
 - `docs/superpowers/plans/` - dated implementation plans
 
+## Design notes (tracked)
+- `design/` - tracked analysis docs (e.g. `layer3-gap-analysis.md`); `docs/` is untracked, so anything meant for git goes here
+
 ## Gotchas
 - TMF921 server evaluates latency, jitter and packet loss with strict `<`; bandwidth with `>=` (`data_contracts/metric_map.json`).
 - After a Degraded evaluation the server replaces the failed goal with the observed value (Flow 3) and keeps no original; the goal pinned in the graph is the only record.
