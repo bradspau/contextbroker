@@ -3,7 +3,7 @@ services:
     image: victoriametrics/victoria-metrics:v1.102.0
     container_name: victoriametrics
     ports:
-      - "8428:8428"
+      - "127.0.0.1:8428:8428"
     volumes:
       - vm-data:/victoria-metrics-data
     restart: unless-stopped

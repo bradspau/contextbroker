@@ -16,3 +16,13 @@ ontologies/tbox/*.ttl
 ontologies/**/*.zip
 docs/spec/TR29*.pdf
 docs/spec/TMF921*.pdf
+.beads/
+.planning/
+.claude/
+design/
+scripts/
+CLAUDE.md
+AGENTS.md
+planning.md
+*.pem
+*.key
