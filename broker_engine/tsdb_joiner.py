@@ -65,8 +65,16 @@ def join_observed_metric(
     if not result:
         return build_observed(entity_id, None, "victoriametrics", None, now)
     raw = result[0]["value"][1]
-    observed_at = _oldest_sample_time(query_endpoint, selector, time_window, now, params_extra)
-    env = build_observed(entity_id, float(raw), "victoriametrics", observed_at, now)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        value = None
+    if value is None or not math.isfinite(value):
+        # Unreadable or non-finite: there is no sample to date, so it is missing.
+        env = build_observed(entity_id, None, "victoriametrics", None, now)
+    else:
+        observed_at = _oldest_sample_time(query_endpoint, selector, time_window, now, params_extra)
+        env = build_observed(entity_id, value, "victoriametrics", observed_at, now)
     if len(result) > 1:
         # Which series is "the" value is ambiguous (the right worst case depends on
         # the intent operator), so fail closed: the evaluator treats conflicts as

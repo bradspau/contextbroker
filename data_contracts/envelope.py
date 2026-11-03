@@ -1,4 +1,5 @@
 """Context envelope: the shared data contract for facts passed through the broker."""
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -47,6 +48,9 @@ class ContextEnvelope:
 
 
 def build_observed(entity_id, value, source, observed_at, now, max_age_s=DEFAULT_MAX_AGE_S) -> ContextEnvelope:
+    """A non-finite sample (NaN or infinity) is no usable sample, so it is missing."""
+    if isinstance(value, float) and not math.isfinite(value):
+        value = None
     missing = value is None
     # Fail closed: a present value whose sample time is unknown is stale.
     stale = not missing and (

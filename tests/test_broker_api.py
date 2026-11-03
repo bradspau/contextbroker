@@ -132,6 +132,46 @@ def test_connection_error_is_502(target, url, params):
     assert "10.0.0.1" not in r.text
 
 
+def _vector(value, ts=None):
+    """A VictoriaMetrics instant-query response carrying one series."""
+    from unittest.mock import MagicMock
+    r = MagicMock()
+    r.json.return_value = {"data": {"result": [{"value": [1, value]}]}}
+    return r
+
+
+@pytest.mark.parametrize("raw", ["NaN", "+Inf", "-Inf"])
+def test_metric_non_finite_sample_is_missing_at_the_endpoint(raw):
+    with patch("broker_engine.tsdb_joiner.requests.get", return_value=_vector(raw)):
+        r = client.get("/context/metric", params=_metric_params())
+    assert r.status_code == 200
+    body = r.json()
+    assert body["value"] is None
+    assert body["quality"]["missing"] is True
+    assert body["quality"]["stale"] is False
+
+
+def test_metric_unparsable_sample_is_missing():
+    with patch("broker_engine.tsdb_joiner.requests.get", return_value=_vector("not-a-number")):
+        r = client.get("/context/metric", params=_metric_params())
+    assert r.status_code == 200
+    body = r.json()
+    assert body["value"] is None
+    assert body["quality"]["missing"] is True
+    assert "not-a-number" not in r.text
+
+
+def test_metric_missing_sample_still_reports_multiple_series():
+    from unittest.mock import MagicMock
+    resp = MagicMock()
+    resp.json.return_value = {"data": {"result": [{"value": [1, "NaN"]}, {"value": [1, "5"]}]}}
+    with patch("broker_engine.tsdb_joiner.requests.get", return_value=resp):
+        r = client.get("/context/metric", params=_metric_params())
+    body = r.json()
+    assert body["quality"]["missing"] is True
+    assert body["quality"]["conflicts"] == ["multiple series match selector (2)"]
+
+
 def test_timeout_passed_to_requests():
     from unittest.mock import MagicMock
     from broker_engine.validation import REQUEST_TIMEOUT_S

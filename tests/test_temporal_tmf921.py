@@ -210,8 +210,7 @@ def test_non_finite_value_is_never_success():
     join = make_join({("latency_ms", "last"): float("-inf")})
     out = run(join=join)
     assert out["verdict"] == "inconclusive"
-    assert out["reasons"] == [
-        "LatencyMetric: olt1/pon0/1: unresolved conflicts: invalid observation"]
+    assert out["reasons"] == ["LatencyMetric: olt1/pon0/1: missing observation"]
 
 
 # ---------- no side effects ----------
