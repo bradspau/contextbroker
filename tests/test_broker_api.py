@@ -278,3 +278,14 @@ def test_rest_bad_input_is_a_400():
         "device": "r1", "interface": "e0", "metric_type": "m", "time_window": "PT1H"})
     assert r.status_code == 400
     assert c.get("/context/neighbours", params={"device": 'a"b', "interface": "e0"}).status_code == 400
+
+
+def test_rest_passes_as_of_and_mode_through():
+    with patch.object(main, "assess", return_value={"verdict": "success"}) as a:
+        c = TestClient(main.app)
+        r = c.post("/context/assess", json={"intent_id": "i1", "time_window": "5m",
+                                            "as_of": "10m", "mode": "within"})
+        assert r.status_code == 200
+        assert a.call_args.kwargs["as_of"] == "10m" and a.call_args.kwargs["mode"] == "within"
+        assert c.post("/context/assess", json={"intent_id": "i1", "time_window": "5m",
+                                               "mode": "bogus"}).status_code == 422

@@ -1,6 +1,6 @@
 """Temporal observation for one interface: point-in-time or worst case over a window.
 
-Shared by both assess sources (graph and tmf921). Lives in its own module so
+Serves the TMF921 assess (intent_management.tmf921_source). Lives in its own module so
 intent_management.tmf921_source can import it without importing broker_engine.assess
 (which imports tmf921_source).
 """

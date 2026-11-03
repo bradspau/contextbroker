@@ -449,10 +449,8 @@ def test_no_binding_and_invalid_binding_not_recorded(monkeypatch):
     assert src.TMF921_STORE.tracked_count() == 0
 
 
-def test_graph_store_not_polluted_and_cap(monkeypatch):
-    from broker_engine import assess
+def test_tracked_outcomes_are_capped(monkeypatch):
     run(FakeClient(post=[[rep("n", "2026-10-27T12:00:01Z")]]))
-    assert assess.DEFAULT_STORE.last_outcome(IID) is None
     monkeypatch.setattr(src, "MAX_TRACKED_OUTCOMES", 1)
     b = {"other": IntentBinding("other", {URI: ("olt1", "pon0/1")}, {URI: 100.0})}
     run(FakeClient(), bindings=b, iid="other")
