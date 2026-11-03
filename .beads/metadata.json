@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "contextbroker",
+  "project_id": "2a2ff5eb-da46-40df-8a70-83b7790b7289"
+}
