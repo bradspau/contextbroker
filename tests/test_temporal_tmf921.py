@@ -245,7 +245,6 @@ def test_binding_store_down_is_inconclusive(monkeypatch):
     def down(_i):
         raise requests.ConnectionError("fuseki down: secret text")
     monkeypatch.setattr(src, "resolve_binding", down)
-    monkeypatch.setattr(src, "load_bindings", lambda: {})
     out = assess_tmf921_as_of(IID, "5m", as_of="10m", mode=None, client=FakeClient(),
                               join=make_join({}), now=NOW, metric_map=MMAP)
     assert out["verdict"] == "inconclusive" and out["reasons"] == ["binding store unavailable"]

@@ -28,7 +28,7 @@ from broker_engine.temporal import temporal_observation
 from broker_engine.tsdb_joiner import join_observed_metric
 from broker_engine.validation import _SAFE_WINDOW, ClientInputError, window_seconds
 from data_contracts.envelope import DEFAULT_MAX_AGE_S, build_observed
-from data_contracts.intent_bindings import IntentBinding, load_bindings
+from data_contracts.intent_bindings import IntentBinding
 from data_contracts.metric_map import load_metric_map
 from intent_management.store import IntentStore
 from intent_management.tmf921_client import (
@@ -162,35 +162,27 @@ def _binding_for(intent_id: str, bindings=None) -> tuple[IntentBinding | None, s
     """Find the binding for an intent: (binding, None) or (None, fixed reason).
 
     Reasons: "no binding for intent", "invalid binding", "binding store unavailable".
-    Precedence: an explicit `bindings` mapping is used alone. Otherwise the network
-    graph wins; the JSON file is the fallback when the graph has no binding for the
-    intent. If the graph is unreachable the JSON file is used only if it has the
-    intent, else the reason is "binding store unavailable". A malformed graph
-    binding is "invalid binding" and does not fall back to JSON, so the TMF921
-    assess returns inconclusive instead of silently using a different binding.
-    Fuseki error text is never returned.
+    An explicit `bindings` mapping is used alone. Otherwise the only source is the
+    `:ServiceBinding` nodes in the network graph. If the graph is unreachable (or
+    replies with something that is not JSON) the reason is "binding store
+    unavailable"; a malformed or duplicate graph binding is "invalid binding"; no
+    binding is "no binding for intent". In each case the TMF921 assess returns
+    inconclusive and pushes nothing. Fuseki error text is never returned.
     """
     if bindings is not None:
         binding = bindings.get(intent_id)
         return (binding, None) if binding else (None, "no binding for intent")
-    unreachable = False
     try:
         binding = resolve_binding(intent_id)
     except requests.RequestException:  # checked first: includes a non-JSON reply
-        binding, unreachable = None, True
+        return None, "binding store unavailable"
     except ClientInputError:  # unsafe caller input is not a binding problem
         raise
     except ValueError:
         return None, "invalid binding"
-    if binding is not None:
-        return binding, None
-    try:
-        binding = load_bindings().get(intent_id)
-    except ValueError:
-        return None, "binding store unavailable" if unreachable else "invalid binding"
-    if binding is not None:
-        return binding, None
-    return None, "binding store unavailable" if unreachable else "no binding for intent"
+    if binding is None:
+        return None, "no binding for intent"
+    return binding, None
 
 
 def assess_via_tmf921(
@@ -240,7 +232,7 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
         _record(intent_id, outcome)
         return _result(outcome, reasons, per, envs, previous, status, changes)
 
-    # Drift check before anything is pushed: same metric set and values.
+    # Goal check before anything is pushed: same metric set and values as the pin.
     try:
         doc = client.get_intent(intent_id)
         ok = _bounds_match(doc, binding)
@@ -322,8 +314,8 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
                                observed_at=observed_at)
     outcome, reasons, per = verdict.outcome, list(verdict.reasons), list(verdict.per_interface)
     if outcome is Outcome.SUCCESS:
-        # The server rewrites a stored bound when it evaluates Degraded: confirm
-        # the bound still equals the pinned one before trusting a success.
+        # The server rewrites a stored goal when it evaluates Degraded: confirm
+        # the goal still equals the pinned one before trusting a success.
         try:
             doc = client.get_intent(intent_id)
             still = _bounds_match(doc, binding)
@@ -358,8 +350,8 @@ def assess_tmf921_as_of(
     worst case over `time_window` ending then, in the direction of each bound's
     operator from metric_map.json). `mode` without `as_of` ends now.
 
-    The TMF921 server keeps no history of bounds, so the bounds are read now from
-    the intent (after the same drift check against the pinned binding as the push
+    The TMF921 server keeps no history of goals, so the goals are read now from
+    the intent (after the same check against the pinned binding as the push
     path) and applied to the past telemetry. The server is never asked to judge a
     past instant: its reports describe only what was pushed to it.
 
@@ -370,7 +362,7 @@ def assess_tmf921_as_of(
     push only changes which stored outcome is reported as `last_outcome`.
 
     The temporal TMF921 assess fails closed: unmapped metrics, a metric without an
-    operator, drifted bounds, an unreachable server or binding store, and missing,
+    operator, a goal that differs from the pinned one, an unreachable server or binding store, and missing,
     stale, conflicting or non-finite evidence are never a success. Reasons are
     fixed strings; server text never reaches the result.
     """
