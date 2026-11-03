@@ -1,4 +1,4 @@
-"""Broker REST interface (MCP server built but not mounted) over the resolver, joiner, pruner and evaluator."""
+"""Broker REST interface (MCP server built but not mounted) over the joiner, pruner, operations queries and the TMF921 assess."""
 
 from typing import Literal
 
@@ -7,20 +7,19 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
-from broker_engine.assess import DEFAULT_MAX_ENTITIES, assess_intent
+from broker_engine.assess import assess_intent
 from broker_engine import operations
 from broker_engine.pruner import prune  # noqa: F401
-from broker_engine.validation import ClientInputError, IntentNotFound
-from broker_engine.sparql_resolver import resolve_intent
+from broker_engine.validation import ClientInputError
 from broker_engine.tsdb_joiner import join_observed_metric
 from outcome_assurance.evaluate import evaluate_intent  # noqa: F401
 
-def assess(intent_id: str, time_window: str, max_entities: int = DEFAULT_MAX_ENTITIES,
-           source: str = "tmf921", as_of: str | None = None, mode: str | None = None) -> dict:
-    """Thin wrapper over assess_intent using this module's resolver/joiner."""
+def assess(intent_id: str, time_window: str, source: str = "tmf921",
+           as_of: str | None = None, mode: str | None = None) -> dict:
+    """Thin wrapper over assess_intent using this module's joiner."""
     return assess_intent(
-        intent_id, time_window, max_entities,
-        resolve=resolve_intent, join=join_observed_metric, source=source, as_of=as_of, mode=mode,
+        intent_id, time_window,
+        join=join_observed_metric, source=source, as_of=as_of, mode=mode,
     )
 
 
@@ -38,25 +37,19 @@ def build_mcp_server():
     server = MCPServer("context-broker")
 
     @server.tool()
-    def query_intent_state_requirements(intent_id: str) -> dict:
-        """Read the declared requirement for an operational intent from the knowledge graph."""
-        return resolve_intent(intent_id)
-
-    @server.tool()
     def query_tsdb_metrics(device: str, interface: str, metric_type: str, time_window: str) -> dict:
         """Read the observed metric as a context envelope incl. quality flags (stale/missing)."""
         return _metric(device, interface, metric_type, time_window)
 
     @server.tool()
     def assess_intent(
-        intent_id: str, time_window: str, source: Literal["graph", "tmf921"] = "tmf921",
+        intent_id: str, time_window: str,
         as_of: str | None = None, mode: Literal["at", "within"] | None = None,
     ) -> dict:
-        """Assess an intent against observed telemetry and return verdict plus pruned context.
+        """Assess a TMF921 intent against observed telemetry and return verdict plus pruned context.
         as_of ("10m") assesses as of that long ago; mode "within" checks the whole window.
-        Both work for either source (tmf921: goals read now, nothing pushed). Default source is tmf921;
-        source graph is deprecated."""
-        return assess(intent_id, time_window, source=source, as_of=as_of, mode=mode)
+        The goals are read now from the TMF921 intent; a past question pushes nothing to the intent server."""
+        return assess(intent_id, time_window, as_of=as_of, mode=mode)
 
     @server.tool()
     def query_metric_history(device: str, interface: str, metric_type: str, time_window: str,
@@ -97,11 +90,6 @@ async def _client_error(request: Request, exc: ClientInputError):
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
-@app.exception_handler(IntentNotFound)
-async def _not_found(request: Request, exc: IntentNotFound):
-    return JSONResponse(status_code=404, content={"detail": str(exc)})
-
-
 @app.exception_handler(requests.RequestException)
 async def _upstream_error(request: Request, exc: requests.RequestException):
     return JSONResponse(status_code=502, content={"detail": "upstream data store unavailable"})
@@ -111,14 +99,9 @@ class AssessRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intent_id: str
     time_window: str
-    source: Literal["graph", "tmf921"] = "tmf921"
+    source: Literal["tmf921"] = "tmf921"
     as_of: str | None = None
     mode: Literal["at", "within"] | None = None
-
-
-@app.get("/context/intent/{intent_id}", dependencies=[_allow_only()])
-def get_intent(intent_id: str) -> dict:
-    return resolve_intent(intent_id)
 
 
 @app.get("/context/metric", dependencies=[_allow_only("device", "interface", "metric_type", "time_window")])

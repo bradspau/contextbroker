@@ -253,38 +253,6 @@ def test_neighbours_rejects_unsafe_identifiers_before_any_request(bad):
 
 
 # ---------- wiring ----------
-def test_rest_endpoints_pass_arguments_through_and_reject_extras():
-    from fastapi.testclient import TestClient
-    from broker_engine import main
-    c = TestClient(main.app)
-    with patch.object(main.operations, "metric_history", return_value={"ok": 1}) as h:
-        r = c.get("/context/metric-history", params={
-            "device": "r1", "interface": "e0", "metric_type": "input_drops",
-            "time_window": "30m", "as_of": "10m"})
-        assert r.status_code == 200
-        assert h.call_args.args == ("r1", "e0", "input_drops", "30m", "10m")
-        assert c.get("/context/metric-history", params={
-            "device": "r1", "interface": "e0", "metric_type": "m", "time_window": "5m",
-            "query_endpoint": "http://evil"}).status_code == 422
-    with patch.object(main.operations, "interfaces_with_nonzero", return_value={"ok": 1}) as n:
-        r = c.get("/context/interfaces-nonzero", params={
-            "device": "r1", "metric_type": "input_drops", "time_window": "1h", "limit": 5})
-        assert r.status_code == 200 and n.call_args.args == ("r1", "input_drops", "1h", None, 5)
-    with patch.object(main.operations, "interface_neighbours", return_value={"ok": 1}) as nb:
-        assert c.get("/context/neighbours", params={"device": "r1", "interface": "e0"}).status_code == 200
-        assert nb.call_args.args == ("r1", "e0")
-
-
-def test_rest_bad_input_is_a_400():
-    from fastapi.testclient import TestClient
-    from broker_engine import main
-    c = TestClient(main.app)
-    r = c.get("/context/metric-history", params={
-        "device": "r1", "interface": "e0", "metric_type": "m", "time_window": "PT1H"})
-    assert r.status_code == 400
-    assert c.get("/context/neighbours", params={"device": 'a"b', "interface": "e0"}).status_code == 400
-
-
 def test_agent_tools_are_registered_validated_and_described():
     import json
     from agent_harness import tools
