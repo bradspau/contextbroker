@@ -11,7 +11,7 @@ from broker_engine.faults import log_fault
 from broker_engine.validation import ClientInputError
 from intent_management import tmf921_source as src
 from intent_management.tmf921_client import Tmf921Error
-from tests.test_tmf921_source import (  # noqa: F401  (fixtures and helpers)
+from test_tmf921_source import (  # noqa: F401  (fixtures and helpers)
     BIND2, IID, NOW, URI, URI2, FakeClient, SecondPostFails, clean_store, intent,
     make_join, no_live_graph, rep, run,
 )
@@ -83,13 +83,12 @@ def test_goal_recheck_after_success_logs_class_and_reason(caplog):
 
 
 def test_temporal_get_intent_logs_class_and_reason(caplog):
-    from intent_management.tmf921_source import assess_tmf921_as_of
-    from tests.test_temporal_tmf921 import MMAP, make_join as tmake_join
+    import test_temporal_tmf921 as tt
     with caplog.at_level(logging.WARNING):
-        out = assess_tmf921_as_of(IID, "5m", as_of="10m", mode=None,
-                                  client=FakeClient(get_exc=ConnectionError(CANARY)),
-                                  join=tmake_join({}), now=NOW, metric_map=MMAP,
-                                  bindings=BIND2)
+        out = tt.assess_tmf921_as_of(tt.IID, "5m", as_of="10m", mode=None,
+                                     client=tt.FakeClient(get_exc=ConnectionError(CANARY)),
+                                     join=tt.make_join({}), now=tt.NOW, metric_map=tt.MMAP,
+                                     bindings=tt.B_LAT)
     assert out["reasons"] == ["intent server unavailable"]
     assert_clean(caplog, "intent server unavailable", "ConnectionError", out)
 

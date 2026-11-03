@@ -13,6 +13,7 @@ by other clients (including future-dated ones) cannot be seen. The broker only
 keeps an in-memory per-(intent, metric) high-water mark of what IT pushed and
 refuses to push anything older (or equal with a different value).
 """
+import logging
 import math
 import re
 import threading
@@ -23,6 +24,7 @@ import requests
 from fastapi.encoders import jsonable_encoder
 
 from broker_engine.binding_resolver import resolve_binding
+from broker_engine.faults import log_fault
 from broker_engine.pruner import prune
 from broker_engine.temporal import temporal_observation
 from broker_engine.tsdb_joiner import join_observed_metric
@@ -38,6 +40,8 @@ from intent_management.tmf921_client import (
 )
 from outcome_assurance.evaluate import OPERATORS, Outcome, evaluate_intent
 from outcome_assurance.tmf921_report import _short_name, interpret_report
+
+log = logging.getLogger(__name__)
 
 MAX_TRACKED_OUTCOMES = 1024
 FUTURE_SKEW = timedelta(seconds=5)
@@ -238,7 +242,8 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
         ok = _bounds_match(doc, binding)
     except ClientInputError:
         return rejected("invalid binding")
-    except Exception:
+    except Exception as exc:
+        log_fault(log, exc, "intent server unavailable")
         return done(Outcome.INCONCLUSIVE, ["intent server unavailable"])
     if not ok:
         reasons, changes = _goal_changes(doc, binding)
@@ -278,16 +283,29 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
                     envs=all_envs)
 
     observed_at = {u: envs[u].observed_at for u in uris}
+    pushed: list[str] = []  # short names of the metrics whose post succeeded
     try:
         pre_ids = {r.get("id") for r in client.list_reports(intent_id)}
         for u in uris:
             try:
                 client.post_observation(intent_id, u, envs[u].value, mappings[u].unit,
                                         envs[u].observed_at)
-            except ClientInputError:
-                return rejected("invalid observation")
+            except Exception as exc:
+                if not pushed:  # nothing reached the server yet: today's results
+                    if isinstance(exc, ClientInputError):
+                        return rejected("invalid observation")
+                    raise
+                # Part-way through: report which pinned metrics went in and which
+                # failed. Nothing is retried and nothing already pushed is undone;
+                # a retry is the caller's choice (the high-water marks stop a stale one).
+                log_fault(log, exc, "partial push")
+                return done(Outcome.INCONCLUSIVE,
+                            ["partial push: pushed " + ", ".join(pushed)
+                             + "; failed " + _short_name(u)],
+                            envs=all_envs)
             with _STATE_LOCK:
                 _MARKS[(intent_id, u)] = (envs[u].observed_at, envs[u].value)
+            pushed.append(_short_name(u))
         report = None
         waited = 0.0
         start = monotonic()
@@ -305,7 +323,8 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
                 break
             sleep(poll_interval_s)
             waited += poll_interval_s
-    except Exception:  # Tmf921Error and anything unexpected: fail closed
+    except Exception as exc:  # Tmf921Error and anything unexpected: fail closed
+        log_fault(log, exc, "intent server unavailable")
         return done(Outcome.INCONCLUSIVE, ["intent server unavailable"], envs=all_envs)
     if report is None:
         return done(Outcome.INCONCLUSIVE, ["no new report"], envs=all_envs)
@@ -319,7 +338,8 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
         try:
             doc = client.get_intent(intent_id)
             still = _bounds_match(doc, binding)
-        except Exception:
+        except Exception as exc:
+            log_fault(log, exc, "intent server unavailable")
             return done(Outcome.INCONCLUSIVE, ["intent server unavailable"], envs=all_envs)
         if not still:
             reasons, changes = _goal_changes(doc, binding)
@@ -399,7 +419,8 @@ def assess_tmf921_as_of(
         ok = _bounds_match(doc, binding)
     except ClientInputError:
         return result(Outcome.INCONCLUSIVE, ["invalid binding"], status="unknown")
-    except Exception:  # Tmf921Error and anything unexpected: no server text
+    except Exception as exc:  # Tmf921Error and anything unexpected: no server text
+        log_fault(log, exc, "intent server unavailable")
         return result(Outcome.INCONCLUSIVE, ["intent server unavailable"])
     if not ok:
         reasons, changes = _goal_changes(doc, binding)
