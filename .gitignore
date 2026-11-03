@@ -24,3 +24,6 @@ ontologies/abox/*.ttl
 .dolt/
 *.db
 .beads-credential-key
+
+# GSD planning state (derived; may contain licensed text)
+.planning/

@@ -61,6 +61,40 @@ bd close <id>         # Complete work
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 
+## GSD + Beads
+
+GSD (`/gsd-*` skills, open-gsd/gsd-core) plans the work and beads tracks it. They are not integrated, so keep the roles separate.
+
+### Roles
+- **GSD owns the plan:** `.planning/` holds PROJECT, REQUIREMENTS, ROADMAP, phase plans and verification reports.
+- **Beads owns tracking:** every piece of work has a bead (`bd`). Status, claiming, dependencies and closing live there only.
+- **No second tracker:** `.planning/STATE.md` and checklists in plan files are plan content, not progress. Do not mark work done there instead of in beads.
+
+### Workflow per phase
+1. `bd ready`, and check the phase is not already covered by an open bead.
+2. Create or reuse one epic per GSD phase, with one bead per plan task:
+   `bd create --title="Phase N: <name>" --type=feature --description="..."`
+   Put the plan path (`.planning/phases/...`) in the bead description or `--notes`.
+3. `bd update <id> --claim` before `/gsd-execute-phase` (or `/gsd-quick`).
+4. Run `/gsd-discuss-phase`, `/gsd-plan-phase`, `/gsd-execute-phase` and `/gsd-verify-work` as needed.
+5. `bd close <id> --reason="..."` when verified. File follow-ups with `bd create` and link them with `bd dep add`.
+6. Run the session close protocol (Session Completion, below).
+
+### Rules
+- Create the bead before running a GSD execute step, not after.
+- Work that GSD discovers but does not do (review findings, deferred items, UAT failures) becomes a bead. Do not leave it only in a GSD report.
+- Persistent knowledge goes in `bd remember`. Do not use the `gsd-mempalace-*` skills or MEMORY.md files.
+- GSD executors commit atomically. Keep them on `fullnetwork`, and do not push `origin/master`.
+- `.planning/` is gitignored: it is derived planning state and may hold licensed text. Do not `git add -f` it. Anything meant for git goes in `design/`.
+
+### Licensing (never break)
+- Do not point GSD at `docs/` (`/gsd-onboard`, `/gsd-ingest-docs`, `/gsd-map-codebase`). It is licensed, read-only and untracked.
+- Nothing from `docs/` may be copied into `.planning/`, beads descriptions or `design/`.
+
+### Architecture rules still apply
+- GSD plans must keep the broker's rules from this file: it resolves, joins and delivers context and never decides or acts. Verdicts stay `success|failure|inconclusive`.
+- Use "goal", not "bound", in plans and bead titles.
+
 ## Session Completion
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
