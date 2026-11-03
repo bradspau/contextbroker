@@ -109,16 +109,14 @@ def test_broker_has_tmf921_url():
     assert "tmf921-server" not in _services()["contextbroker-api"]["depends_on"]
 
 
-def test_broker_bindings_mount_read_only_and_no_ontology():
+def test_broker_has_no_bindings_file_and_no_ontology_mount():
     svc = _services()["contextbroker-api"]
     env = _env(svc["environment"])
-    assert env["INTENT_BINDINGS_PATH"] == "/app/config/intent_bindings.json"
-    vols = svc["volumes"]
-    assert len(vols) == 1
-    assert vols[0].endswith(":/app/config/intent_bindings.json:ro")
-    assert "./data_contracts/intent_bindings.json" in vols[0]
-    assert not any("ontolog" in v.lower() or "TIO" in v for v in vols)
-    assert (ROOT / "data_contracts" / "intent_bindings.json").read_text().strip() == "{}"
+    assert "INTENT_BINDINGS_PATH" not in env
+    vols = svc.get("volumes") or []  # a later plan adds a read-only key mount
+    assert not any("intent_bindings" in v or "ontolog" in v.lower() or "TIO" in v
+                   for v in vols)
+    assert not (ROOT / "data_contracts" / "intent_bindings.json").exists()
     assert svc["ports"] == ["8080:8080"]
 
 
