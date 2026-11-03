@@ -5,11 +5,9 @@ import requests
 
 from broker_engine import operations
 from broker_engine.assess import assess_intent
-from broker_engine.sparql_resolver import resolve_intent
 from broker_engine.tsdb_joiner import VM_QUERY_ENDPOINT, join_observed_metric
-from broker_engine.validation import ClientInputError, IntentNotFound
+from broker_engine.validation import ClientInputError
 
-query_intent_state_requirements = resolve_intent
 query_metric_history = operations.metric_history
 query_interfaces_with_nonzero = operations.interfaces_with_nonzero
 query_interface_neighbours = operations.interface_neighbours
@@ -30,25 +28,22 @@ def query_tsdb_metrics(
 
 SYSTEM_PROMPT = """You are a network operations assistant. Many questions are about the state of the network and have nothing to do with an intent; use the tool that fits the question. You have these tools:
 
-- assess_intent(intent_id, time_window, source="graph"|"tmf921", default tmf921): the tool for questions about a declared intent. Use the default source="tmf921", which asks the separate TMF921 intent server (its intents and ontology are a different graph and a different intent model). Do not choose source="graph" (deprecated: it reads the OperationalIntent in the broker's own network graph, which is being retired) unless the user explicitly names an intent that lives in the network graph, for example intent-core-health-01, which needs source="graph". The broker deterministically
-  resolves the intent, reads telemetry for every interface, and evaluates compliance. It
+- assess_intent(intent_id, time_window): the tool for questions about a declared intent. It asks the separate TMF921 intent server, which holds the one intent model. The broker deterministically
+  reads the intent's goals, reads telemetry for every interface, and evaluates compliance. It
   returns a verdict ("success", "failure" or "inconclusive"), per-interface results,
   reasons, supporting context and dropped_count.
-- query_intent_state_requirements(intent_id): reads the declared requirement for an
-  operational intent from the broker's network graph in Fuseki (drill-down only; graph
-  OperationalIntent only, not for TMF921 intents).
 - query_tsdb_metrics(device, interface, metric_type, time_window): reads the observed
   value of a metric over a recent time window (drill-down only). It returns a context
   envelope: "value", "observed_at" and "quality" {"stale", "missing", "conflicts"}.
 
 For a past question use assess_intent's as_of ("was it compliant 10 minutes ago" is as_of="10m", mode="at"; "was it ever non-compliant in the last 30 minutes" is time_window="30m", mode="within").
-as_of and mode work for both sources. The requirement judged is always the intent's current definition (for source=tmf921 the bounds are read now from the TMF921 intent; nothing is pushed to the server for a past question). Say which moment the verdict describes (the evaluated_at field).
+The goals judged are always read now from the TMF921 intent; nothing is pushed to the intent server for a past question. Say which moment the verdict describes (the evaluated_at field).
 
 time_window is digits plus s, m, h or d (for example "5m" or "1h"), never ISO-8601 such as "PT1H".
 
 To answer a compliance question, call assess_intent and then EXPLAIN the verdict it
 returned, citing the per_interface results and reasons. Please do not compute compliance yourself: never compare observed values to targets on your own or override the verdict.
-You may use the other two tools only to look up supporting detail.
+You may use the other tools only to look up supporting detail.
 
 - query_metric_history(device, interface, metric_type, time_window, as_of): min, max, last and sample count of one metric over a window, now or in the past.
 - query_interfaces_with_nonzero(device, metric_type, time_window, as_of, limit): which interfaces of a device had a non-zero value in the window.
@@ -64,7 +59,7 @@ If the verdict is "inconclusive", or any interface has missing telemetry ("no_da
 never report the intent as compliant; report compliance as unknown due to missing or
 unreliable telemetry.
 
-With assess_intent source=tmf921 the verdict still comes from the broker's deterministic checks combined with the intent server's handling state; explain it and never compute or override it, and an "inconclusive" verdict means evidence was stale, missing, conflicted, drifted (the intent server's stored goal differs from the goal recorded when it was bound; report both numbers and do not say why) or unavailable and must never be presented as compliant."""
+The verdict comes from the broker's deterministic checks combined with the intent server's handling state; explain it and never compute or override it, and an "inconclusive" verdict means evidence was stale, missing, conflicted, changed-goal (the intent server's stored goal differs from the goal recorded when it was bound; report both numbers and do not say why) or unavailable and must never be presented as compliant."""
 
 # The broker accepts only digits followed by s, m, h or d (e.g. "5m", "1h");
 # ISO-8601 durations such as "PT1H" are rejected as an unsafe time_window.
@@ -77,19 +72,10 @@ TIME_WINDOW = {
 AS_OF = {
     "type": "string",
     "pattern": r"^[0-9]+[smhd]$",
-    "description": 'Evaluate as of this long ago, e.g. "10m" for "10 minutes ago" (up to 30d). Omit for now. For assess_intent, works for both sources.',
+    "description": 'Evaluate as of this long ago, e.g. "10m" for "10 minutes ago" (up to 30d). Omit for now.',
 }
 
 TOOLS = [
-    {
-        "name": "query_intent_state_requirements",
-        "description": "Read the declared requirement for an operational intent from the broker's network graph (Fuseki).",
-        "input_schema": {
-            "type": "object",
-            "properties": {"intent_id": {"type": "string"}},
-            "required": ["intent_id"],
-        },
-    },
     {
         "name": "query_tsdb_metrics",
         "description": "Read the observed metric as a context envelope (value, observed_at, quality.stale, quality.missing). A stale or missing result is not a current observation.",
@@ -145,16 +131,12 @@ TOOLS = [
     },
     {
         "name": "assess_intent",
-        "description": "Deterministically assess an intent against observed telemetry; returns verdict, per-interface results, reasons and pruned context.",
+        "description": "Deterministically assess a TMF921 intent against observed telemetry; returns verdict, per-interface results, reasons and pruned context.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "intent_id": {"type": "string"},
                 "time_window": TIME_WINDOW,
-                "source": {
-                    "type": "string", "enum": ["graph", "tmf921"], "default": "tmf921",
-                    "description": "tmf921 (default): the separate TMF921 intent server and its own graph. graph (deprecated): the OperationalIntent in the broker's network graph (Fuseki); use it only when the user explicitly names an intent that lives there, for example intent-core-health-01.",
-                },
                 "as_of": AS_OF,
                 "mode": {
                     "type": "string",
@@ -218,8 +200,8 @@ def execute_tool(name: str, arguments: dict) -> tuple[str, bool]:
         if result is None:
             result = {"status": "no_data"}
         return json.dumps(result), False
-    except (ClientInputError, IntentNotFound) as exc:
-        # Our own validation/not-found messages: safe to show the model.
+    except ClientInputError as exc:
+        # Our own validation messages: safe to show the model.
         return json.dumps({"error": str(exc)}), True
     except requests.RequestException:
         # Never leak internal hostnames/URLs/queries to the model provider.

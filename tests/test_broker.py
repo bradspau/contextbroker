@@ -1,40 +1,14 @@
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import anthropic
 import httpx2
 import pytest
-import rdflib
 
 import broker
 import ingestion.telemetry_simulator as telemetry_simulator
 
-
-ONTOLOGY_PATH = Path(__file__).resolve().parent.parent / "ontologies" / "tbox" / "topology.ttl"
-
-
-SPARQL_RESPONSE = {
-    "results": {
-        "bindings": [
-            {
-                "metric": {"value": "input_drops"},
-                "operator": {"value": "=="},
-                "targetValue": {"value": "0.0"},
-                "device": {"value": "Router-A"},
-                "interfaceName": {"value": "GigabitEthernet0/0/0"},
-            },
-            {
-                "metric": {"value": "input_drops"},
-                "operator": {"value": "=="},
-                "targetValue": {"value": "0.0"},
-                "device": {"value": "Router-B"},
-                "interfaceName": {"value": "GigabitEthernet0/0/1"},
-            },
-        ]
-    }
-}
 
 VM_RESPONSE = {
     "status": "success",

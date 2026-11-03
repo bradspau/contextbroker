@@ -15,9 +15,6 @@ $.jStorage.set('profile', {
 			useForInverseSameAs : true,
 			endpoint : 'http://localhost:8081/sparql',
 			examples : [ {
-				label : 'intent-core-health-01',
-				uri : 'http://example.org/network-ontology#intent-core-health-01'
-			}, {
 				label : 'Router-A <-> Router-B link',
 				uri : 'http://example.org/network-ontology#link-router-a-router-b'
 			}, {
