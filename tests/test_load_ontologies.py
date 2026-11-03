@@ -12,22 +12,6 @@ SHACL_DIR = ROOT / "ontologies" / "shacl"
 SHAPES = SHACL_DIR / "topology.shacl.ttl"
 ENDPOINT = "http://localhost:3030/network-dataset/data"
 
-PREFIXES = """@prefix : <http://example.org/network-ontology#> .
-@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
-:if-a a :Interface ; :onDevice "R-A" ; :interfaceName "ge0" .
-:link a :TopologicalLink ; :hasInterface :if-a .
-"""
-
-
-def _intent(extra="", operator=True, link=True):
-    body = ':i1 a :OperationalIntent ; :hasTargetMetric "input_drops" ; :hasTargetValue "0"^^xsd:double'
-    if operator:
-        body += ' ; :hasOperator "=="'
-    if link:
-        body += " ; :appliesToLink :link"
-    return PREFIXES + body + extra + " .\n"
-
-
 def _write(tmp_path, text):
     d = tmp_path / "tbox"
     d.mkdir()
@@ -35,33 +19,10 @@ def _write(tmp_path, text):
     return d
 
 
-def test_missing_operator_fails_validation(tmp_path):
-    f = _write(tmp_path, _intent(operator=False)) / "bad.ttl"
-    ok, report = validate_shapes(f, SHAPES)
-    assert ok is False
-    assert "hasOperator" in report
-
-
-def test_missing_applies_to_link_fails(tmp_path):
-    f = _write(tmp_path, _intent(link=False)) / "bad.ttl"
-    assert validate_shapes(f, SHAPES)[0] is False
-
-
-def test_bogus_state_category_rejected(tmp_path):
-    f = _write(tmp_path, _intent(' ; :stateCategory "bogus"')) / "bad.ttl"
-    assert validate_shapes(f, SHAPES)[0] is False
-
-
-def test_observed_state_category_accepted(tmp_path):
-    f = _write(tmp_path, _intent(' ; :stateCategory "observed"')) / "bad.ttl"
-    ok, report = validate_shapes(f, SHAPES)
-    assert ok is True, report
-
-
 def test_load_ontologies_posts_nothing_on_violation(tmp_path):
-    d = _write(tmp_path, _intent(operator=False))
+    d = _write(tmp_path, _binding(forIntent=False))
     with patch("requests.post") as post:
-        with pytest.raises(ValueError, match="hasOperator"):
+        with pytest.raises(ValueError, match="forIntent"):
             load_ontologies(d, SHACL_DIR, ENDPOINT, allow=("bad.ttl",))
     post.assert_not_called()
 
@@ -269,3 +230,127 @@ def test_caller_can_pass_its_own_allow_list(tmp_path):
     with patch("requests.post", return_value=resp) as post:
         load_ontologies(d, SHACL_DIR, ENDPOINT, allow=("mine.ttl",))
     assert post.call_count == 1
+
+
+# --- retiring the graph intent vocabulary (D-09) ---
+
+MIGRATION = ROOT / "ontologies" / "migrations" / "001-retire-operational-intent.ru"
+
+# The block that topology.ttl carried before it was retired (our own text, copied
+# before it was deleted). Old TBox = the current TBox plus this block.
+OLD_BLOCK = """@prefix : <http://example.org/network-ontology#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+:OperationalIntent a owl:Class ;
+    rdfs:label "Operational Intent" .
+
+:hasTargetMetric a owl:DatatypeProperty ;
+    rdfs:domain :OperationalIntent ;
+    rdfs:range xsd:string .
+
+:hasOperator a owl:DatatypeProperty ;
+    rdfs:domain :OperationalIntent ;
+    rdfs:range xsd:string .
+
+:hasTargetValue a owl:DatatypeProperty ;
+    rdfs:domain :OperationalIntent ;
+    rdfs:range xsd:double .
+
+:appliesToLink a owl:ObjectProperty ;
+    rdfs:domain :OperationalIntent ;
+    rdfs:range :TopologicalLink .
+
+:stateCategory a owl:DatatypeProperty ;
+    rdfs:domain :OperationalIntent ;
+    rdfs:range xsd:string ;
+    rdfs:comment "One of: intended, configured, observed, inferred." .
+
+:validFrom a owl:DatatypeProperty ;
+    rdfs:domain :OperationalIntent ;
+    rdfs:range xsd:dateTime .
+
+:validTo a owl:DatatypeProperty ;
+    rdfs:domain :OperationalIntent ;
+    rdfs:range xsd:dateTime .
+
+:intent-core-health-01 a :OperationalIntent ;
+    rdfs:label "Core Health: Zero Input Drops" ;
+    :hasTargetMetric "input_drops" ;
+    :hasOperator "==" ;
+    :hasTargetValue "0.0"^^xsd:double ;
+    :stateCategory "intended" ;
+    :appliesToLink :link-router-a-router-b .
+"""
+
+# A second instance, as a store could hold after an operator created one by hand.
+EXTRA_INSTANCE = """@prefix : <http://example.org/network-ontology#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+:hand-made a :OperationalIntent ;
+    :hasTargetMetric "latency_ms" ; :hasOperator "<" ;
+    :hasTargetValue "5.0"^^xsd:double ;
+    :validFrom "2026-01-01T00:00:00Z"^^xsd:dateTime ;
+    :appliesToLink :link-router-a-router-b .
+"""
+
+RETIRED_NAMES = ("OperationalIntent", "OperationalIntentShape", "intent-core-health-01",
+                 "hasTargetMetric", "hasOperator", "hasTargetValue", "appliesToLink",
+                 "stateCategory", "validFrom", "validTo")
+NETWORK_NS = "http://example.org/network-ontology#"
+
+
+def _graph(*texts):
+    import rdflib
+    g = rdflib.Graph()
+    for t in texts:
+        g.parse(data=t, format="turtle")
+    return g
+
+
+def _binding_fixture():
+    return _binding()  # a complete :ServiceBinding pointing at an existing interface
+
+
+def test_tbox_has_no_graph_intent_vocabulary():
+    import rdflib
+    g = rdflib.Graph()
+    g.parse(TBOX_DIR / "topology.ttl", format="turtle")
+    g.parse(SHAPES, format="turtle")
+    retired = {rdflib.URIRef(NETWORK_NS + n) for n in RETIRED_NAMES}
+    hits = [t for t in g if any(x in retired for x in t)]
+    assert hits == []
+    assert not [t for t in g if any("OperationalIntent" in str(x)
+                                    or "intent-core-health-01" in str(x) for x in t)]
+    # What stays: bindings and topology.
+    for kept in ("ServiceBinding", "forIntent", "forMetric", "onInterface", "pinnedBound",
+                 "TopologicalLink", "Interface", "hasInterface", "onDevice", "interfaceName"):
+        assert (rdflib.URIRef(NETWORK_NS + kept), None, None) in g
+
+
+def test_retire_migration_turns_the_old_tbox_into_the_new_one():
+    from rdflib.compare import isomorphic
+    new_tbox = (TBOX_DIR / "topology.ttl").read_text()
+    fixture = _binding_fixture()
+    old = _graph(new_tbox, OLD_BLOCK, EXTRA_INSTANCE, fixture)
+    assert len(old) > len(_graph(new_tbox, fixture))
+    old.update(MIGRATION.read_text())
+    assert isomorphic(old, _graph(new_tbox, fixture))
+
+
+def test_retire_migration_is_a_no_op_on_the_new_tbox():
+    from rdflib.compare import isomorphic
+    g = _graph((TBOX_DIR / "topology.ttl").read_text(), _binding_fixture())
+    before = len(g)
+    g.update(MIGRATION.read_text())
+    assert len(g) == before
+    assert isomorphic(g, _graph((TBOX_DIR / "topology.ttl").read_text(), _binding_fixture()))
+
+
+def test_retire_migration_only_deletes():
+    import re
+    text = MIGRATION.read_text()
+    body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+    assert re.search(r"\bDELETE\b", body, re.I)
+    for word in ("INSERT", "CLEAR", "DROP", "LOAD", "CREATE"):
+        assert not re.search(rf"\b{word}\b", body, re.I), word

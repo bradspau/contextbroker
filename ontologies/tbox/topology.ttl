@@ -6,9 +6,6 @@
 
 ### Classes ###
 
-:OperationalIntent a owl:Class ;
-    rdfs:label "Operational Intent" .
-
 :TopologicalLink a owl:Class ;
     rdfs:label "Topological Link" .
 
@@ -16,22 +13,6 @@
     rdfs:label "Interface" .
 
 ### Properties ###
-
-:hasTargetMetric a owl:DatatypeProperty ;
-    rdfs:domain :OperationalIntent ;
-    rdfs:range xsd:string .
-
-:hasOperator a owl:DatatypeProperty ;
-    rdfs:domain :OperationalIntent ;
-    rdfs:range xsd:string .
-
-:hasTargetValue a owl:DatatypeProperty ;
-    rdfs:domain :OperationalIntent ;
-    rdfs:range xsd:double .
-
-:appliesToLink a owl:ObjectProperty ;
-    rdfs:domain :OperationalIntent ;
-    rdfs:range :TopologicalLink .
 
 :ServiceBinding a owl:Class ;
     rdfs:label "Service Binding" ;
@@ -66,19 +47,6 @@
     rdfs:domain :Interface ;
     rdfs:range xsd:string .
 
-:stateCategory a owl:DatatypeProperty ;
-    rdfs:domain :OperationalIntent ;
-    rdfs:range xsd:string ;
-    rdfs:comment "One of: intended, configured, observed, inferred." .
-
-:validFrom a owl:DatatypeProperty ;
-    rdfs:domain :OperationalIntent ;
-    rdfs:range xsd:dateTime .
-
-:validTo a owl:DatatypeProperty ;
-    rdfs:domain :OperationalIntent ;
-    rdfs:range xsd:dateTime .
-
 ### Individuals ###
 
 :if-router-a-ge000 a :Interface ;
@@ -92,11 +60,3 @@
 :link-router-a-router-b a :TopologicalLink ;
     rdfs:label "Router-A <-> Router-B core link" ;
     :hasInterface :if-router-a-ge000 , :if-router-b-ge001 .
-
-:intent-core-health-01 a :OperationalIntent ;
-    rdfs:label "Core Health: Zero Input Drops" ;
-    :hasTargetMetric "input_drops" ;
-    :hasOperator "==" ;
-    :hasTargetValue "0.0"^^xsd:double ;
-    :stateCategory "intended" ;
-    :appliesToLink :link-router-a-router-b .

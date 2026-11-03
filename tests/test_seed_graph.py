@@ -9,14 +9,23 @@ ONTOLOGY_PATH = Path(__file__).resolve().parent.parent / "ontologies" / "tbox" /
 NS = rdflib.Namespace("http://example.org/network-ontology#")
 
 
-def test_topology_ttl_parses_and_defines_intent_core_health_01():
+def test_topology_ttl_defines_the_demo_topology():
     graph = rdflib.Graph()
     graph.parse(ONTOLOGY_PATH, format="turtle")
 
     assert len(graph) > 0
-    intent = NS["intent-core-health-01"]
-    assert (intent, NS.hasTargetMetric, rdflib.Literal("input_drops")) in graph
-    assert (intent, NS.hasOperator, rdflib.Literal("==")) in graph
+    for iface, device, name in (
+        ("if-router-a-ge000", "Router-A", "GigabitEthernet0/0/0"),
+        ("if-router-b-ge001", "Router-B", "GigabitEthernet0/0/1"),
+    ):
+        node = NS[iface]
+        assert (node, rdflib.RDF.type, NS.Interface) in graph
+        assert (node, NS.onDevice, rdflib.Literal(device)) in graph
+        assert (node, NS.interfaceName, rdflib.Literal(name)) in graph
+    link = NS["link-router-a-router-b"]
+    assert (link, rdflib.RDF.type, NS.TopologicalLink) in graph
+    assert (link, NS.hasInterface, NS["if-router-a-ge000"]) in graph
+    assert (link, NS.hasInterface, NS["if-router-b-ge001"]) in graph
 
 
 def test_load_ttl_to_fuseki_posts_raw_turtle_bytes():
