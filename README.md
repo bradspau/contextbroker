@@ -7,7 +7,7 @@ right now?"*
 
 ## What it is trying to achieve
 
-The design principle (spec: `docs/Context-Broker-Updated.md`) is:
+The design principle (spec: `docs/Architecture/AI_Ready_Network_Operations_Integrated_Architecture_with_OKF.md`) is:
 
 > AI proposes; the action-readiness check authorises; controllers execute; assurance verifies.
 
@@ -137,7 +137,7 @@ bind-mounted read-only into `tmf921-server` at runtime.
 
 ## Architecture
 
-The repo is a layered Context Broker (spec: `docs/Context-Broker-Updated.md`)
+The repo is a layered Context Broker (spec: `docs/Architecture/AI_Ready_Network_Operations_Integrated_Architecture_with_OKF.md`)
 grown from a single-file compliance agent by a strangler migration. The broker
 engine serves bounded, quality-labelled context; it never decides or acts.
 

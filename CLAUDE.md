@@ -23,6 +23,12 @@
 - Say "goal" (one metric with its limit), not "bound"; avoid "drift". The stored `:pinnedBound` and internal `intent_bounds` names stay as they are.
 - "Fails closed" must name its subject (for example "the TMF921 assess fails closed"). Do not call the action-readiness check a "gate".
 
+## Docs map (untracked, licensed material: read only)
+- `docs/Architecture/` - functional architecture spec with implementation options; Layer 3 (Context Broker, E01-E03) is the layer this repo implements
+- `docs/AI_Ready_Network_Operations_Layer_Markdowns/` - one file per layer (`03_...` is Semantic Knowledge and Context), plus `08_Cross_Cutting_Fabrics.md`
+- `docs/TMF-921-spec/` - TMF921 intent interface: markdown `01`-`11`, OAS yaml, PDFs
+- `docs/superpowers/plans/` - dated implementation plans
+
 ## Gotchas
 - TMF921 server evaluates latency, jitter and packet loss with strict `<`; bandwidth with `>=` (`data_contracts/metric_map.json`).
 - After a Degraded evaluation the server replaces the failed goal with the observed value (Flow 3) and keeps no original; the goal pinned in the graph is the only record.
