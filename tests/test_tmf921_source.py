@@ -698,3 +698,107 @@ def test_second_push_failure_is_a_partial_push(exc):
     assert (IID, URI) in src._MARKS and (IID, URI2) not in src._MARKS
     assert "SECRET" not in str(out)
     assert src.TMF921_STORE.last_outcome(IID).value == "inconclusive"
+
+
+# ---------- gaps: a goal or placement missing at the requested time ----------
+
+GAP_BIND = IntentBinding(IID, {URI: ("olt1", "pon0/1")}, {URI: 100.0},
+                         gaps=((URI2, "goal"), (URI2, "placement")))
+GAP_REASONS = ["no goal in force: JitterMetric", "no placement in force: JitterMetric"]
+
+
+def test_gap_reasons_are_fixed_strings_from_the_pinned_metric_names():
+    assert src._gap_reasons(GAP_BIND) == GAP_REASONS
+    assert src._gap_reasons(IntentBinding(IID, {}, {})) == []
+    only = IntentBinding(IID, {}, {}, gaps=((URI, "placement"),))
+    assert src._gap_reasons(only) == ["no placement in force: LatencyMetric"]
+
+
+def _nothing_happened(c, join):
+    assert (c.gets, c.lists, c.posts) == (0, 0, [])
+    assert join.seen == []
+    assert src._MARKS == {}
+    assert src.TMF921_STORE.tracked_count() == 0
+    assert src.TMF921_STORE.last_outcome(IID) is None
+
+
+def test_a_gap_makes_the_push_assess_inconclusive_before_any_tmf921_call():
+    c, join = FakeClient(), make_join()
+    out = run(c, join, bindings={IID: GAP_BIND})
+    assert out["verdict"] == "inconclusive"
+    assert out["intent_status"] == "unknown"
+    assert out["reasons"] == GAP_REASONS
+    assert out["source"] == "tmf921"
+    _nothing_happened(c, join)
+
+
+def test_a_gap_from_the_graph_makes_the_push_assess_inconclusive(monkeypatch):
+    monkeypatch.setattr("intent_management.tmf921_source.resolve_binding", lambda i: GAP_BIND)
+    c, join = FakeClient(), make_join()
+    out = assess_via_tmf921(IID, "5m", client=c, join=join, now=NOW, metric_map=MMAP,
+                            sleep=lambda s: None, monotonic=lambda: 0.0)
+    assert out["verdict"] == "inconclusive" and out["reasons"] == GAP_REASONS
+    _nothing_happened(c, join)
+
+
+def test_a_gap_is_checked_before_the_metric_map_is_read(monkeypatch):
+    def boom():
+        raise AssertionError("metric map read")
+    monkeypatch.setattr("intent_management.tmf921_source.load_metric_map", boom)
+    out = assess_via_tmf921(IID, "5m", client=FakeClient(), join=make_join(), now=NOW,
+                            bindings={IID: GAP_BIND}, sleep=lambda s: None,
+                            monotonic=lambda: 0.0)
+    assert out["reasons"] == GAP_REASONS
+
+
+def test_a_gap_stays_inconclusive_even_when_the_covered_metric_would_succeed():
+    # LatencyMetric is covered and fine; JitterMetric has no goal: the whole result is inconclusive.
+    c = FakeClient(pre=[OLD], post=[[rep("new", "2026-10-27T12:00:01Z")]])
+    out = run(c, make_join(age=10), bindings={IID: GAP_BIND})
+    assert out["verdict"] != "success"
+    assert c.posts == []
+
+
+def test_a_binding_without_gaps_behaves_as_before():
+    c = FakeClient(pre=[OLD], post=[[rep("new", "2026-10-27T12:00:01Z")]])
+    out = run(c, make_join(age=10))
+    assert out["verdict"] == "success"
+    assert c.posts
+
+
+AS_OF_NOW = NOW
+
+
+def _as_of(c, join, bindings, **kw):
+    return src.assess_tmf921_as_of(IID, "5m", as_of=kw.pop("as_of", None),
+                                   mode=kw.pop("mode", "within"), client=c, join=join,
+                                   now=AS_OF_NOW, metric_map=MMAP, bindings=bindings)
+
+
+@pytest.mark.parametrize("as_of,mode", [(None, "within"), ("10m", "at"), (None, None)])
+def test_a_gap_makes_the_temporal_assess_inconclusive_with_zero_tmf921_calls(as_of, mode):
+    c, join = FakeClient(), make_join()
+    out = _as_of(c, join, {IID: GAP_BIND}, as_of=as_of, mode=mode)
+    assert out["verdict"] == "inconclusive"
+    assert out["reasons"] == GAP_REASONS
+    assert out["intent_status"] == "unknown"
+    assert out["mode"] == (mode or "at")
+    _nothing_happened(c, join)
+
+
+def test_a_gap_from_the_graph_makes_the_temporal_assess_inconclusive(monkeypatch):
+    monkeypatch.setattr("intent_management.tmf921_source.resolve_binding", lambda i: GAP_BIND)
+    c, join = FakeClient(), make_join()
+    out = _as_of(c, join, None)
+    assert out["reasons"] == GAP_REASONS
+    _nothing_happened(c, join)
+
+
+def test_a_binding_without_gaps_is_assessed_by_the_temporal_path_as_before():
+    c = FakeClient(intent_doc={**intent((URI, 100)), "lifecycleStatus": "ACTIVE"})
+    mmap = {URI: MetricMapping("latency_ms", URI, "ms", "<")}
+    out = src.assess_tmf921_as_of(IID, "5m", as_of=None, mode="within", client=c,
+                                  join=make_join(age=10), now=NOW, metric_map=mmap,
+                                  bindings=BIND)
+    assert out["verdict"] == "success"
+    assert c.gets == 1 and c.posts == []

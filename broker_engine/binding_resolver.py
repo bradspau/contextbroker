@@ -148,7 +148,10 @@ def resolve_binding(
 ) -> IntentBinding | None:
     """The binding in force at `valid_at` (default now) as known at `known_at`.
 
-    known_at None means the latest record: fluents that have not been superseded.
+    known_at None means the latest record: fluents that have not been superseded. A
+    metric with no goal or no placement in force is not an error: it is listed in
+    `gaps` (sorted by metric URI, then "goal" before "placement") and left out of
+    `sources` and `bounds`, so the caller can name it and refuse partial coverage.
     """
     valid_at = _aware(valid_at, "valid_at") or datetime.now(timezone.utc)
     known_at = _aware(known_at, "known_at")
@@ -158,11 +161,21 @@ def resolve_binding(
 
     sources: dict[str, tuple[str, str]] = {}
     bounds: dict[str, float] = {}
+    goal_intervals: dict[str, tuple[datetime, datetime | None]] = {}
+    placement_intervals: dict[str, tuple[datetime, datetime | None]] = {}
+    gaps: list[tuple[str, str]] = []
     for metric in sorted({m for m, _kind in fluents}):
         goal = select_in_force(fluents[(metric, "goal")], valid_at, known_at)
         place = select_in_force(fluents[(metric, "placement")], valid_at, known_at)
+        if goal is None:
+            gaps.append((metric, "goal"))
+        if place is None:
+            gaps.append((metric, "placement"))
         if goal is None or place is None:
-            raise ValueError("no goal in force")
+            continue  # a metric is judged only with both; the assess reports the gap
         sources[metric] = interfaces[place.value]
         bounds[metric] = goal.value
-    return IntentBinding(intent_id, sources, bounds)
+        goal_intervals[metric] = (goal.start, goal.end)
+        placement_intervals[metric] = (place.start, place.end)
+    return IntentBinding(intent_id, sources, bounds, goal_intervals, placement_intervals,
+                         tuple(gaps))

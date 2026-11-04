@@ -301,11 +301,11 @@ def test_no_binding_node_reads_as_none():
     assert read(fuseki()) is None
 
 
-def test_a_valid_time_before_the_first_fluent_is_refused_for_now():
+def test_a_valid_time_before_the_first_fluent_is_a_named_gap():
     fx = fuseki()
     first_bind(fx)
-    with pytest.raises(ValueError):
-        read(fx, valid_at=T0 - HOUR)
+    b = read(fx, valid_at=T0 - HOUR)
+    assert b.gaps == ((LAT, "goal"), (LAT, "placement"))
 
 
 def test_the_old_fluent_is_known_for_a_knowledge_time_before_the_replacement():
@@ -313,8 +313,7 @@ def test_the_old_fluent_is_known_for_a_knowledge_time_before_the_replacement():
     first_bind(fx)
     replace_goal(fx)
     # Known at T1 - 1h the replacement did not exist, so the closed goal does not cover T1 + 1h.
-    with pytest.raises(ValueError):
-        read(fx, valid_at=T1 + HOUR, known_at=T1 - HOUR)
+    assert read(fx, valid_at=T1 + HOUR, known_at=T1 - HOUR).gaps == ((LAT, "goal"),)
     assert read(fx, valid_at=T0 + HOUR, known_at=T1 - HOUR).bounds == {LAT: 100.0}
 
 

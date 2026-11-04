@@ -162,6 +162,15 @@ def _goal_changes(doc, binding) -> tuple[list[str], list[dict]]:
     return reasons or ["intent goal unreadable"], changes
 
 
+def _gap_reasons(binding) -> list[str]:
+    """One fixed reason per gap, named by the pinned metric's short name.
+
+    A gap is a metric the broker recorded no goal or no placement for at the requested
+    time; the assess is inconclusive for the whole intent, never partial.
+    """
+    return [f"no {kind} in force: {_short_name(uri)}" for uri, kind in binding.gaps]
+
+
 def _binding_for(intent_id: str, bindings=None) -> tuple[IntentBinding | None, str | None]:
     """Find the binding for an intent: (binding, None) or (None, fixed reason).
 
@@ -213,6 +222,8 @@ def assess_via_tmf921(
     binding, reason = _binding_for(intent_id, bindings)
     if binding is None:
         return _result(Outcome.INCONCLUSIVE, [reason], status="unknown")
+    if binding.gaps:  # before the lock, any TMF921 call, a push or a mark; nothing is recorded
+        return _result(Outcome.INCONCLUSIVE, _gap_reasons(binding), status="unknown")
     try:
         metric_map = load_metric_map() if metric_map is None else metric_map
     except ValueError:
@@ -409,6 +420,8 @@ def assess_tmf921_as_of(
     binding, reason = _binding_for(intent_id, bindings)
     if binding is None:
         return result(Outcome.INCONCLUSIVE, [reason], status="unknown")
+    if binding.gaps:  # before any TMF921 call or telemetry read
+        return result(Outcome.INCONCLUSIVE, _gap_reasons(binding), status="unknown")
     try:
         metric_map = load_metric_map() if metric_map is None else metric_map
     except ValueError:

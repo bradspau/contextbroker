@@ -248,7 +248,73 @@ def test_a_naive_request_time_is_refused_before_any_request(kw):
     p.assert_not_called()
 
 
-def test_a_valid_time_before_the_first_fluent_is_not_resolvable():
+def test_a_valid_time_before_the_first_fluent_gives_both_gaps():
     before = datetime(2026, 10, 1, tzinfo=timezone.utc)
-    with pytest.raises(ValueError):
-        get([*full()], valid_at=before)
+    b = get([*full()], valid_at=before)
+    assert b.gaps == ((URI, "goal"), (URI, "placement"))
+    assert b.bounds == {} and b.sources == {}
+    assert b.goal_intervals == {} and b.placement_intervals == {}
+
+
+def test_a_metric_with_a_goal_and_no_placement_has_a_placement_gap():
+    b = get([goal()])
+    assert b.gaps == ((URI, "placement"),)
+    assert b.bounds == {} and b.sources == {}
+
+
+def test_a_metric_with_a_placement_and_no_goal_has_a_goal_gap():
+    assert get([place()]).gaps == ((URI, "goal"),)
+
+
+def test_a_binding_node_with_no_fluent_gives_both_gaps():
+    b = get([bare()])
+    assert b is not None
+    assert b.gaps == ((URI, "goal"), (URI, "placement"))
+
+
+def test_gaps_are_sorted_by_metric_then_kind():
+    b = get([bare(URI), bare(URI2)])
+    assert b.gaps == ((URI2, "goal"), (URI2, "placement"), (URI, "goal"), (URI, "placement"))
+
+
+def test_only_the_uncovered_metric_is_a_gap():
+    b = get([*full(), bare(URI2)])
+    assert b.gaps == ((URI2, "goal"), (URI2, "placement"))
+    assert b.bounds == {URI: 100.0}
+    assert b.sources == {URI: ("olt1", "pon0/1")}
+
+
+def test_a_superseded_only_placement_is_a_gap_when_known_at_is_latest():
+    rows = [goal(), place(sa=LATER)]
+    b = get(rows, valid_at=V)
+    assert b.gaps == ((URI, "placement"),)
+    # ...but it is the record the broker held before it was superseded.
+    held = get(rows, valid_at=V, known_at=datetime(2026, 11, 3, 9, 0, tzinfo=timezone.utc))
+    assert held.gaps == ()
+
+
+def test_a_closed_goal_with_no_successor_is_a_gap_after_its_end():
+    rows = [goal(ve=LATER), place()]
+    later = datetime(2026, 11, 3, 10, 0, tzinfo=timezone.utc)
+    assert get(rows, valid_at=later).gaps == ((URI, "goal"),)
+    assert get(rows, valid_at=later - timedelta(milliseconds=1)).gaps == ()
+
+
+def test_the_intervals_of_the_selected_fluents_are_returned():
+    b = get(replaced(), valid_at=V)
+    start = datetime(2026, 11, 1, 10, 0, tzinfo=timezone.utc)
+    later = datetime(2026, 11, 3, 10, 0, tzinfo=timezone.utc)
+    assert b.goal_intervals == {URI: (start, later)}
+    assert b.placement_intervals == {URI: (start, None)}
+    assert get(replaced(), valid_at=later).goal_intervals == {URI: (later, None)}
+
+
+def test_a_gap_does_not_raise():
+    assert get([bare()]).gaps
+
+
+def test_the_binding_still_constructs_from_three_arguments():
+    from data_contracts.intent_bindings import IntentBinding
+    b = IntentBinding("i", {}, {})
+    assert (b.gaps, b.goal_intervals, b.placement_intervals) == ((), {}, {})
+    assert IntentBinding("i", {}, {}) == IntentBinding("i", {}, {})
