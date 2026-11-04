@@ -1,0 +1,24 @@
+# Demo topology for a fresh store: two router interfaces, the core link between them, and the
+# link fluent that holds the link's interface pair, valid and recorded from the date this file
+# was created. A store already migrated by migration 002 holds the live link: do not load this
+# file into it again, or the link gets a second open fluent.
+@prefix : <http://example.org/network-ontology#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+:if-router-a-ge000 a :Interface ;
+    :onDevice "Router-A" ;
+    :interfaceName "GigabitEthernet0/0/0" .
+
+:if-router-b-ge001 a :Interface ;
+    :onDevice "Router-B" ;
+    :interfaceName "GigabitEthernet0/0/1" .
+
+:link-router-a-router-b a :TopologicalLink ;
+    rdfs:label "Router-A <-> Router-B core link" .
+
+:link-router-a-router-b-fluent-demo a :LinkFluent ;
+    :ofLink :link-router-a-router-b ;
+    :hasInterface :if-router-a-ge000 , :if-router-b-ge001 ;
+    :validStart "2026-11-05T00:00:00Z"^^xsd:dateTime ;
+    :recordedAt "2026-11-05T00:00:00Z"^^xsd:dateTime .

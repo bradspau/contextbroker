@@ -1,4 +1,6 @@
 import runpy
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -7,6 +9,7 @@ import pytest
 import rdflib
 
 import seed_graph
+from ingestion.load_ontologies import load_ontologies, validate_shapes
 
 ONTOLOGY_PATH = Path(__file__).resolve().parent.parent / "ontologies" / "tbox" / "topology.ttl"
 NS = rdflib.Namespace("http://example.org/network-ontology#")
@@ -17,11 +20,28 @@ def _fuseki_credential(monkeypatch):
     monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "testpassword0")
 
 
-def test_topology_ttl_defines_the_demo_topology():
+DEMO_PATH = Path(__file__).resolve().parent.parent / "ontologies" / "abox" / "topology-demo.ttl"
+SHACL_DIR = Path(__file__).resolve().parent.parent / "ontologies" / "shacl"
+XSD = rdflib.XSD
+INSTANCE_CLASSES = ("Interface", "TopologicalLink", "ServiceBinding", "GoalFluent", "PlacementFluent", "LinkFluent")
+
+
+def test_topology_tbox_holds_schema_only():
     graph = rdflib.Graph()
     graph.parse(ONTOLOGY_PATH, format="turtle")
 
-    assert len(graph) > 0
+    for cls in INSTANCE_CLASSES:
+        assert list(graph.subjects(rdflib.RDF.type, NS[cls])) == [], cls
+        # the class is still declared
+        assert (NS[cls], rdflib.RDF.type, rdflib.OWL.Class) in graph
+    for prop in ("hasInterface", "ofLink", "onDevice", "interfaceName", "validStart", "recordedAt"):
+        assert any(graph.triples((NS[prop], rdflib.RDF.type, None))), prop
+
+
+def test_demo_topology_abox_defines_interfaces_and_a_link_fluent():
+    graph = rdflib.Graph()
+    graph.parse(DEMO_PATH, format="turtle")
+
     for iface, device, name in (
         ("if-router-a-ge000", "Router-A", "GigabitEthernet0/0/0"),
         ("if-router-b-ge001", "Router-B", "GigabitEthernet0/0/1"),
@@ -32,8 +52,56 @@ def test_topology_ttl_defines_the_demo_topology():
         assert (node, NS.interfaceName, rdflib.Literal(name)) in graph
     link = NS["link-router-a-router-b"]
     assert (link, rdflib.RDF.type, NS.TopologicalLink) in graph
-    assert (link, NS.hasInterface, NS["if-router-a-ge000"]) in graph
-    assert (link, NS.hasInterface, NS["if-router-b-ge001"]) in graph
+    assert (link, rdflib.RDFS.label, rdflib.Literal("Router-A <-> Router-B core link")) in graph
+    assert list(graph.objects(link, NS.hasInterface)) == []
+
+    fluent = NS["link-router-a-router-b-fluent-demo"]
+    assert (fluent, rdflib.RDF.type, NS.LinkFluent) in graph
+    assert (fluent, NS.ofLink, link) in graph
+    assert set(graph.objects(fluent, NS.hasInterface)) == {NS["if-router-a-ge000"], NS["if-router-b-ge001"]}
+    stamp = rdflib.Literal("2026-11-05T00:00:00Z", datatype=XSD.dateTime)
+    assert (fluent, NS.validStart, stamp) in graph
+    assert (fluent, NS.recordedAt, stamp) in graph
+    assert list(graph.objects(fluent, NS.validEnd)) == []
+    assert list(graph.objects(fluent, NS.supersededAt)) == []
+
+
+def test_demo_topology_abox_conforms_to_every_shapes_file():
+    for shapes in sorted(SHACL_DIR.glob("*.ttl")):
+        ok, report = validate_shapes(DEMO_PATH, shapes)
+        assert ok, report
+
+
+def test_a_link_node_that_still_carries_the_interface_pair_does_not_conform(tmp_path):
+    old = tmp_path / "old-link.ttl"
+    old.write_text(
+        "@prefix : <http://example.org/network-ontology#> .\n"
+        ":l a :TopologicalLink ; :hasInterface :a , :b .\n"
+    )
+    ok, report = validate_shapes(old, SHACL_DIR / "topology.shacl.ttl")
+    assert ok is False
+    assert "hasInterface" in report
+
+
+def test_load_ontologies_validates_and_posts_the_tbox_and_the_demo_file():
+    abox_dir = Path(__file__).resolve().parent.parent / "ontologies" / "abox"
+    resp = Mock()
+    resp.raise_for_status = Mock()
+    with patch("ingestion.load_ontologies.requests.post", return_value=resp) as post:
+        load_ontologies(ONTOLOGY_PATH.parent, SHACL_DIR, "http://x/data", abox_dir=abox_dir)
+    sent = [call.kwargs["data"] for call in post.call_args_list]
+    assert sent[0] == ONTOLOGY_PATH.read_bytes()
+    assert DEMO_PATH.read_bytes() in sent
+    assert len(sent) == 2
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_git_tracks_only_the_demo_abox_file():
+    root = Path(__file__).resolve().parent.parent
+    demo = subprocess.run(["git", "check-ignore", "-q", "ontologies/abox/topology-demo.ttl"], cwd=root)
+    other = subprocess.run(["git", "check-ignore", "-q", "ontologies/abox/some-intent.ttl"], cwd=root)
+    assert demo.returncode == 1
+    assert other.returncode == 0
 
 
 def test_load_ttl_to_fuseki_posts_raw_turtle_bytes():

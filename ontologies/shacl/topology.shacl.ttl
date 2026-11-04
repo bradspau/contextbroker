@@ -4,7 +4,10 @@
 
 :TopologicalLinkShape a sh:NodeShape ;
     sh:targetClass :TopologicalLink ;
-    sh:property [ sh:path :hasInterface ; sh:minCount 1 ] .
+    # The interface pair lives on the link fluent, which carries its valid and knowledge times.
+    # A link node that still carries the pair is the pre-migration shape and is refused.
+    sh:property [ sh:path :hasInterface ; sh:maxCount 0 ;
+                  sh:message "hasInterface belongs on a link fluent node, not on the link" ] .
 
 :InterfaceShape a sh:NodeShape ;
     sh:targetClass :Interface ;

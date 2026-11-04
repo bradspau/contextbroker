@@ -19,6 +19,7 @@ docs/spec/TMF921*.pdf
 
 # Deployment ABox data (service bindings); keep the directory via .gitkeep.
 ontologies/abox/*.ttl
+!ontologies/abox/topology-demo.ttl
 
 # Beads / Dolt files (added by bd init)
 .dolt/

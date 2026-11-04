@@ -91,17 +91,3 @@
 :interfaceName a owl:DatatypeProperty ;
     rdfs:domain :Interface ;
     rdfs:range xsd:string .
-
-### Individuals ###
-
-:if-router-a-ge000 a :Interface ;
-    :onDevice "Router-A" ;
-    :interfaceName "GigabitEthernet0/0/0" .
-
-:if-router-b-ge001 a :Interface ;
-    :onDevice "Router-B" ;
-    :interfaceName "GigabitEthernet0/0/1" .
-
-:link-router-a-router-b a :TopologicalLink ;
-    rdfs:label "Router-A <-> Router-B core link" ;
-    :hasInterface :if-router-a-ge000 , :if-router-b-ge001 .
