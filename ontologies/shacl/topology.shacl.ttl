@@ -16,7 +16,13 @@
     sh:property [ sh:path :forIntent ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] ;
     sh:property [ sh:path :forMetric ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] ;
     sh:property [ sh:path :hasGoal ; sh:nodeKind sh:IRI ] ;
-    sh:property [ sh:path :hasPlacement ; sh:nodeKind sh:IRI ] .
+    sh:property [ sh:path :hasPlacement ; sh:nodeKind sh:IRI ] ;
+    # The goal and the placement live in fluent nodes. A binding that still carries either one
+    # directly is the pre-migration shape and is refused, so nothing can write it again.
+    sh:property [ sh:path :pinnedBound ; sh:maxCount 0 ;
+                  sh:message "pinnedBound belongs on a goal fluent node, not on the binding" ] ;
+    sh:property [ sh:path :onInterface ; sh:maxCount 0 ;
+                  sh:message "onInterface belongs on a placement fluent node, not on the binding" ] .
 
 # The four times of a fluent. Both intervals are half-open: [validStart, validEnd) and
 # [recordedAt, supersededAt). An open end is an absent triple. Every time carries a zone

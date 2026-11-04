@@ -297,9 +297,29 @@ def test_binding_may_carry_only_the_fluent_that_changed(tmp_path):
     assert ok is True, report
 
 
-def test_old_shape_binding_still_passes_until_bind_intent_changes(tmp_path):
-    ok, report = _check(tmp_path, _old_binding())
+def test_a_binding_that_still_carries_the_goal_does_not_conform(tmp_path):
+    ok, report = _check(tmp_path, _old_binding(iface=False))
+    assert ok is False
+    assert "pinnedBound" in report
+
+
+def test_a_binding_that_still_carries_the_interface_does_not_conform(tmp_path):
+    ok, report = _check(tmp_path, _old_binding(pins=()))
+    assert ok is False
+    assert "onInterface" in report
+
+
+def test_a_fluent_shaped_binding_still_conforms_after_the_retired_shape_is_refused(tmp_path):
+    ok, report = _check(tmp_path, _fluent_binding(link=True))
     assert ok is True, report
+
+
+def test_load_ontologies_refuses_an_abox_file_in_the_old_shape_and_posts_nothing(tmp_path):
+    _abox_file(tmp_path, _old_binding(), name="intent-1.ttl")
+    with patch("requests.post") as post:
+        with pytest.raises(ValueError):
+            load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=tmp_path / "abox")
+    post.assert_not_called()
 
 
 def test_abox_failure_loads_nothing(tmp_path):
