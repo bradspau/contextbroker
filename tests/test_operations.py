@@ -199,8 +199,9 @@ def test_nonzero_rejects_unsafe_input():
 
 # ---------- interface_neighbours ----------
 def _sparql(rows):
-    def post(url, data=None, headers=None, timeout=None):
+    def post(url, data=None, headers=None, timeout=None, auth=None):
         post.sent = data["query"]
+        post.auth = auth
         return _resp({"results": {"bindings": rows}})
     return post
 
@@ -250,6 +251,18 @@ def test_neighbours_rejects_unsafe_identifiers_before_any_request(bad):
         with pytest.raises(ClientInputError):
             ops.interface_neighbours("r1", bad)
     post.assert_not_called()
+
+
+def test_neighbours_send_the_credential_when_set(monkeypatch):
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "testpassword0")
+    _, post = neighbours([])
+    assert post.auth == ("admin", "testpassword0")
+
+
+def test_neighbours_send_no_credential_when_unset(monkeypatch):
+    monkeypatch.delenv("FUSEKI_ADMIN_PASSWORD", raising=False)
+    _, post = neighbours([])
+    assert post.auth is None
 
 
 # ---------- wiring ----------

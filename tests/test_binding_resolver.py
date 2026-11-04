@@ -22,6 +22,32 @@ def resp(rows):
     return r
 
 
+def test_sends_the_credential_when_set(monkeypatch):
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "testpassword0")
+    with patch(POST, return_value=resp([])) as post:
+        resolve_binding("hsi-1")
+    assert post.call_args.kwargs["auth"] == ("admin", "testpassword0")
+    assert post.call_args.kwargs["headers"] == {"Accept": "application/sparql-results+json"}
+
+
+def test_sends_no_credential_when_unset(monkeypatch):
+    monkeypatch.delenv("FUSEKI_ADMIN_PASSWORD", raising=False)
+    with patch(POST, return_value=resp([])) as post:
+        resolve_binding("hsi-1")
+    assert post.call_args.kwargs["auth"] is None
+
+
+def test_fuseki_401_propagates_as_request_exception(monkeypatch):
+    import requests
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "testpassword0")
+    refused = Mock()
+    refused.raise_for_status.side_effect = requests.HTTPError("401 Client Error: Unauthorized")
+    with patch(POST, return_value=refused):
+        with pytest.raises(requests.RequestException) as exc:
+            resolve_binding("hsi-1")
+    assert "testpassword0" not in str(exc.value)
+
+
 def test_returns_none_when_no_rows():
     with patch(POST, return_value=resp([])):
         assert resolve_binding("hsi-1") is None
