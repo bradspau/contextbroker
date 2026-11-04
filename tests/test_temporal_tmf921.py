@@ -517,8 +517,8 @@ def test_a_current_question_still_checks_the_live_goal(real_resolver):
     out = graph_run(client, make_join({("latency_ms", "last"): 120.0}), mode="at")
     assert out["verdict"] == "success" and out["intent_status"] == "active"
     assert out["requirement"] == REQUIREMENT and client.gets == 1
-    drifted = graph_run(FakeClient(intent((LAT, 100))), make_join({}), mode="at")
-    assert drifted["reasons"] == ["goal changed: LatencyMetric pinned 150, now 100"]
+    changed = graph_run(FakeClient(intent((LAT, 100))), make_join({}), mode="at")
+    assert changed["reasons"] == ["goal changed: LatencyMetric pinned 150, now 100"]
 
 
 # ---------- TC4 and the within window (TEMP-04, D-20) ----------
