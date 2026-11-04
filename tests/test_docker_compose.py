@@ -158,3 +158,15 @@ def test_api_jwt_configuration():
     # the API container gets the public key only: no private key anywhere in compose
     assert "private" not in repr(api).lower()
     assert api["ports"] == ["8080:8080"]
+
+
+def test_api_healthcheck_uses_health_route():
+    api = yaml.safe_load(COMPOSE_PATH.read_text())["services"]["contextbroker-api"]
+    hc = api["healthcheck"]
+    test = hc["test"]
+    assert isinstance(test, list)
+    assert test[:3] == ["CMD", "python", "-c"]
+    assert "http://127.0.0.1:8080/health" in test[3]
+    assert "timeout=" in test[3]
+    assert "curl" not in repr(test)
+    assert (hc["interval"], hc["timeout"], hc["retries"], hc["start_period"]) == ("10s", "5s", 5, "10s")
