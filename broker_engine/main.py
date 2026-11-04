@@ -83,9 +83,13 @@ def build_mcp_server():
         return operations.interfaces_with_nonzero(device, metric_type, time_window, as_of, limit)
 
     @server.tool()
-    def query_interface_neighbours(device: str, interface: str) -> dict:
-        """Interfaces on the other end of the topology links of this interface."""
-        return operations.interface_neighbours(device, interface)
+    def query_interface_neighbours(device: str, interface: str, as_of: str | None = None,
+                                   known_at: str | None = None) -> dict:
+        """Interfaces on the other end of the topology links of this interface.
+
+        as_of ("10m") returns the links valid that long ago (now if omitted); known_at ("1h")
+        answers from what the broker had recorded that long ago (the latest if omitted)."""
+        return operations.interface_neighbours(device, interface, as_of=as_of, known_at=known_at)
 
     return server
 
@@ -163,6 +167,8 @@ def get_interfaces_nonzero(device: str, metric_type: str, time_window: str,
     return operations.interfaces_with_nonzero(device, metric_type, time_window, as_of, limit)
 
 
-@app.get("/context/neighbours", dependencies=[need(SCOPE_READ), _allow_only("device", "interface")])
-def get_neighbours(device: str, interface: str) -> dict:
-    return operations.interface_neighbours(device, interface)
+@app.get("/context/neighbours",
+         dependencies=[need(SCOPE_READ), _allow_only("device", "interface", "as_of", "known_at")])
+def get_neighbours(device: str, interface: str, as_of: str | None = None,
+                   known_at: str | None = None) -> dict:
+    return operations.interface_neighbours(device, interface, as_of=as_of, known_at=known_at)

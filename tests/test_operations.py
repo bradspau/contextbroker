@@ -265,6 +265,109 @@ def test_neighbours_send_no_credential_when_unset(monkeypatch):
     assert post.auth is None
 
 
+# ---------- interface_neighbours over link fluents (TEMP-04, TEMP-05) ----------
+def _topology():
+    """Router-A/ge0 linked to Router-B/ge1 for [T0, T1) and to Router-C/ge2 from T1; the
+    A-C link is corrected at T2 to A-D (superseded and reissued with the same interval)."""
+    import rdflib
+
+    from data_contracts import fluents as f
+    from tests.fluent_helpers import NS, T0, T1, T2, GraphFuseki
+    g = rdflib.Graph()
+    g.parse(data=f"""@prefix : <{NS}> .
+    @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+    :if-a a :Interface ; :onDevice "Router-A" ; :interfaceName "ge0" .
+    :if-b a :Interface ; :onDevice "Router-B" ; :interfaceName "ge1" .
+    :if-c a :Interface ; :onDevice "Router-C" ; :interfaceName "ge2" .
+    :if-d a :Interface ; :onDevice "Router-D" ; :interfaceName "ge3" .
+    :if-lone a :Interface ; :onDevice "Router-E" ; :interfaceName "ge4" .
+    :link-ab rdfs:label "A to B" . :link-ac rdfs:label "A to C" .
+    """, format="turtle")
+    ab = f.add_link_fluent(g, f"{NS}link-ab", f"{NS}if-a", f"{NS}if-b", T0, T0, T1)
+    ac = f.add_link_fluent(g, f"{NS}link-ac", f"{NS}if-a", f"{NS}if-c", T1, T1)
+    f.supersede(g, str(ac), T2)
+    f.add_link_fluent(g, f"{NS}link-ac", f"{NS}if-a", f"{NS}if-d", T1, T2, kind="fluent-reissue")
+    return GraphFuseki(g)
+
+
+FNOW = datetime(2026, 11, 5, 10, 0, 0, tzinfo=timezone.utc)  # T1 + 2 days
+
+
+def graph_neighbours(fuseki, device="Router-A", interface="ge0", **kw):
+    with patch("broker_engine.operations.requests.post", fuseki.post):
+        return ops.interface_neighbours(device, interface, now=FNOW, **kw)
+
+
+def _devices(out):
+    return [n["device"] for n in out["neighbours"]]
+
+
+def test_neighbours_at_a_past_time_lists_the_links_valid_then():
+    fuseki = _topology()
+    assert _devices(graph_neighbours(fuseki, as_of="60h")) == ["Router-B"]  # between T0 and T1
+    assert _devices(graph_neighbours(fuseki, as_of="24h")) == ["Router-D"]  # after T1, corrected
+    assert _devices(graph_neighbours(fuseki)) == ["Router-D"]
+    assert _devices(graph_neighbours(fuseki, as_of="60h", known_at="1h")) == ["Router-B"]
+
+
+def test_neighbours_before_any_link_is_empty_not_missing():
+    out = graph_neighbours(_topology(), as_of="5d")
+    assert out["neighbours"] == [] and out["quality"]["missing"] is False
+    out = graph_neighbours(_topology(), "Router-E", "ge4")
+    assert out["neighbours"] == [] and out["quality"]["missing"] is False
+
+
+def test_neighbours_unknown_interface_in_the_graph_is_missing():
+    out = graph_neighbours(_topology(), "Router-Z", "ge9", as_of="60h")
+    assert out["neighbours"] == [] and out["quality"]["missing"] is True
+
+
+def test_neighbours_what_was_known_before_a_correction_differs_from_after_it():
+    fuseki = _topology()
+    # the same valid time (36h ago, after T1); the correction was recorded at T2, 24h ago
+    before = graph_neighbours(fuseki, as_of="36h", known_at="25h")
+    after = graph_neighbours(fuseki, as_of="36h", known_at="23h")
+    assert _devices(before) == ["Router-C"] and _devices(after) == ["Router-D"]
+    assert _devices(graph_neighbours(fuseki, as_of="36h")) == ["Router-D"]
+    # before the broker recorded the A-C link (T1 is 48h ago) nothing is known about it
+    assert graph_neighbours(fuseki, as_of="36h", known_at="49h")["neighbours"] == []
+
+
+def test_neighbours_result_gains_valid_at_and_known_at_only_when_asked():
+    fuseki = _topology()
+    plain = graph_neighbours(fuseki)
+    assert "valid_at" not in plain and "known_at" not in plain
+    asked = graph_neighbours(fuseki, as_of="60h", known_at="31h")
+    assert asked["valid_at"] == "2026-11-02T22:00:00.000Z"
+    assert asked["known_at"] == "2026-11-04T03:00:00.000Z"
+    only_as_of = graph_neighbours(fuseki, as_of="60h")
+    assert only_as_of["valid_at"] == "2026-11-02T22:00:00.000Z" and only_as_of["known_at"] is None
+    only_known = graph_neighbours(fuseki, known_at="31h")
+    assert only_known["valid_at"] == "2026-11-05T10:00:00.000Z"
+
+
+def test_neighbours_query_carries_the_formatted_instants_and_no_caller_offset_text():
+    fuseki = _topology()
+    graph_neighbours(fuseki, as_of="60h", known_at="31h")
+    sent = fuseki.posts[-1][1]["data"]["query"]
+    assert '"2026-11-02T22:00:00.000Z"^^xsd:dateTime' in sent
+    assert '"2026-11-04T03:00:00.000Z"^^xsd:dateTime' in sent
+    assert "60h" not in sent and "31h" not in sent
+    graph_neighbours(fuseki)
+    assert "FILTER(!BOUND(?sa))" in fuseki.posts[-1][1]["data"]["query"]
+
+
+@pytest.mark.parametrize("kw", [
+    {"as_of": "PT1H"}, {"as_of": "10"}, {"as_of": "5m } UNION { ?s ?p ?o"},
+    {"as_of": "999d"}, {"known_at": "PT1H"}, {"known_at": "999d"}, {"known_at": 5},
+])
+def test_neighbours_rejects_bad_offsets_before_any_request(kw):
+    with patch("broker_engine.operations.requests.post") as post:
+        with pytest.raises(ClientInputError):
+            ops.interface_neighbours("r1", "e0", now=FNOW, **kw)
+    post.assert_not_called()
+
+
 # ---------- wiring ----------
 def test_agent_tools_are_registered_validated_and_described():
     import json

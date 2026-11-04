@@ -18,6 +18,7 @@ from broker_engine.validation import (
     window_seconds,
 )
 from data_contracts.envelope import DEFAULT_MAX_AGE_S
+from data_contracts.fluents import iso_ms
 from ingestion.telemetry_simulator import MEASUREMENT_NAME
 
 MAX_INTERFACES = 200
@@ -184,22 +185,43 @@ def interfaces_with_nonzero(device, metric_type, time_window, as_of=None,
     return out
 
 
-def interface_neighbours(device, interface, *, query_endpoint=FUSEKI_QUERY_ENDPOINT) -> dict:
+def interface_neighbours(device, interface, *, query_endpoint=FUSEKI_QUERY_ENDPOINT,
+                         as_of=None, known_at=None, now=None) -> dict:
     """Interfaces on the other end of every topology link this interface is on.
 
-    Declared (configured) topology, not discovered state. An interface that is not
-    in the graph is ``quality.missing``; one that is but has no links has an empty
-    list."""
+    Declared (configured) topology as recorded in the graph, read from the link fluents
+    valid at a valid time and as known at a knowledge time. ``as_of`` ("10m") is an offset
+    back from now for the valid time (now if omitted); ``known_at`` ("1h") is an offset
+    back from now for the knowledge time (the latest record if omitted). An interface that
+    is not in the graph is ``quality.missing``; one that is but had no link valid then has
+    an empty list. ``valid_at`` and ``known_at`` appear in the result only when asked."""
     _validate_token(device, "device")
     _validate_token(interface, "interface")
+    now = now or datetime.now(timezone.utc)
+    valid_s = window_seconds(as_of, "as_of") if as_of is not None else 0
+    known_s = window_seconds(known_at, "known_at") if known_at is not None else None
+    valid = iso_ms(now - timedelta(seconds=valid_s))
+    if known_s is None:
+        known_filter = "FILTER(!BOUND(?sa))"
+        known = None
+    else:
+        known = iso_ms(now - timedelta(seconds=known_s))
+        known_filter = (f'FILTER(?ra <= "{known}"^^xsd:dateTime && '
+                        f'(!BOUND(?sa) || "{known}"^^xsd:dateTime < ?sa))')
     sparql = f"""
     PREFIX : <http://example.org/network-ontology#>
     PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-    SELECT ?link ?label ?otherDevice ?otherName WHERE {{
+    PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+    SELECT ?self ?link ?label ?otherDevice ?otherName WHERE {{
       ?self :onDevice "{device}" ; :interfaceName "{interface}" .
       OPTIONAL {{
-        ?link :hasInterface ?self , ?other .
+        ?lf a :LinkFluent ; :ofLink ?link ; :hasInterface ?self , ?other ;
+            :validStart ?vs ; :recordedAt ?ra .
+        OPTIONAL {{ ?lf :validEnd ?ve }}
+        OPTIONAL {{ ?lf :supersededAt ?sa }}
         FILTER(?other != ?self)
+        FILTER(?vs <= "{valid}"^^xsd:dateTime && (!BOUND(?ve) || "{valid}"^^xsd:dateTime < ?ve))
+        {known_filter}
         ?other :onDevice ?otherDevice ; :interfaceName ?otherName .
         OPTIONAL {{ ?link rdfs:label ?label }}
       }}
@@ -211,6 +233,8 @@ def interface_neighbours(device, interface, *, query_endpoint=FUSEKI_QUERY_ENDPO
     rows = response.json()["results"]["bindings"]
     out = {"entity_id": f"{device}:{interface}", "state": "configured", "source": "fuseki",
            "observed_at": None, "neighbours": []}
+    if as_of is not None or known_at is not None:
+        out["valid_at"], out["known_at"] = valid, known
     if not rows:
         out["quality"] = _quality(missing=True)
         return out

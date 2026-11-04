@@ -312,6 +312,38 @@ def test_rest_endpoints_pass_arguments_through_and_reject_extras():
     with patch.object(main.operations, "interface_neighbours", return_value={"ok": 1}) as nb:
         assert c.get("/context/neighbours", params={"device": "r1", "interface": "e0"}).status_code == 200
         assert nb.call_args.args == ("r1", "e0")
+        assert nb.call_args.kwargs == {"as_of": None, "known_at": None}
+
+
+def test_rest_neighbours_pass_as_of_and_known_at_and_reject_others():
+    c = TestClient(main.app, headers=HEADERS)
+    with patch.object(main.operations, "interface_neighbours", return_value={"ok": 1}) as nb:
+        r = c.get("/context/neighbours", params={"device": "r1", "interface": "e0",
+                                                 "as_of": "10m", "known_at": "1h"})
+        assert r.status_code == 200
+        assert nb.call_args.args == ("r1", "e0")
+        assert nb.call_args.kwargs == {"as_of": "10m", "known_at": "1h"}
+        assert c.get("/context/neighbours", params={
+            "device": "r1", "interface": "e0", "query_endpoint": "http://evil"}).status_code == 422
+        assert c.get("/context/neighbours", params={
+            "device": "r1", "interface": "e0", "mode": "within"}).status_code == 422
+    # the real function refuses a malformed offset before any request
+    assert c.get("/context/neighbours", params={
+        "device": "r1", "interface": "e0", "as_of": "PT1H"}).status_code == 400
+    assert c.get("/context/neighbours", params={
+        "device": "r1", "interface": "e0", "known_at": "PT1H"}).status_code == 400
+
+
+def test_mcp_neighbours_tool_accepts_as_of_and_known_at():
+    server = main.build_mcp_server()
+    tool = next(t for t in asyncio.run(server.list_tools()) if t.name == "query_interface_neighbours")
+    assert set(tool.input_schema["properties"]) == {"device", "interface", "as_of", "known_at"}
+    assert tool.input_schema["required"] == ["device", "interface"]
+    with patch.object(main.operations, "interface_neighbours", return_value={"ok": 1}) as nb:
+        asyncio.run(server.call_tool("query_interface_neighbours", {
+            "device": "r1", "interface": "e0", "as_of": "10m", "known_at": "1h"}))
+    assert nb.call_args.args == ("r1", "e0")
+    assert nb.call_args.kwargs == {"as_of": "10m", "known_at": "1h"}
 
 
 def test_rest_bad_input_is_a_400():
