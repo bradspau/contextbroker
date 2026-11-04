@@ -13,7 +13,7 @@ import math
 
 import requests
 
-from broker_engine.sparql_resolver import FUSEKI_QUERY_ENDPOINT
+from broker_engine.sparql_resolver import FUSEKI_QUERY_ENDPOINT, fuseki_auth
 from broker_engine.validation import REQUEST_TIMEOUT_S
 from data_contracts.intent_bindings import IntentBinding
 from data_contracts.metric_map import _check_token, check_uri
@@ -55,6 +55,7 @@ def resolve_binding(
         query_endpoint,
         data={"query": sparql},
         headers={"Accept": "application/sparql-results+json"},
+        auth=fuseki_auth(),
         timeout=REQUEST_TIMEOUT_S,
     )
     response.raise_for_status()

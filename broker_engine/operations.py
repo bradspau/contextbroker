@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-from broker_engine.sparql_resolver import FUSEKI_QUERY_ENDPOINT
+from broker_engine.sparql_resolver import FUSEKI_QUERY_ENDPOINT, fuseki_auth
 from broker_engine.tsdb_joiner import VM_QUERY_ENDPOINT
 from broker_engine.validation import (
     _SAFE_WINDOW,
@@ -206,7 +206,7 @@ def interface_neighbours(device, interface, *, query_endpoint=FUSEKI_QUERY_ENDPO
     }}"""
     response = requests.post(query_endpoint, data={"query": sparql},
                              headers={"Accept": "application/sparql-results+json"},
-                             timeout=REQUEST_TIMEOUT_S)
+                             auth=fuseki_auth(), timeout=REQUEST_TIMEOUT_S)
     response.raise_for_status()
     rows = response.json()["results"]["bindings"]
     out = {"entity_id": f"{device}:{interface}", "state": "configured", "source": "fuseki",
