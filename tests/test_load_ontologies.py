@@ -142,11 +142,12 @@ def _fluent_binding(
     return text
 
 
-def _abox_file(tmp_path, text, name="b.ttl"):
+def _abox_file(tmp_path, text, name="b.ttl", marker=True):
+    """An ABox fixture; by default it starts with the marker that bind_intent writes."""
     d = tmp_path / "abox"
     d.mkdir(exist_ok=True)
     f = d / name
-    f.write_text(text)
+    f.write_text((loader.ABOX_MARKER + "\n" if marker else "") + text)
     return f
 
 
@@ -415,12 +416,88 @@ def test_repo_tbox_passes_the_allow_list():
     assert post.call_count == len(list(TBOX_DIR.glob("*.ttl")))
 
 
-def test_abox_files_are_not_subject_to_the_tbox_allow_list(tmp_path):
-    _abox_file(tmp_path, _fluent_binding(), name="not-on-the-list.ttl")
+def _ok_post():
     resp = Mock()
     resp.raise_for_status = Mock()
-    with patch("requests.post", return_value=resp) as post:
+    return patch("ingestion.load_ontologies.requests.post", return_value=resp)
+
+
+def test_abox_static_allow_list_names_only_the_demo_topology():
+    assert loader.ABOX_STATIC_ALLOWLIST == ("topology-demo.ttl",)
+
+
+def test_abox_files_are_not_subject_to_the_tbox_allow_list(tmp_path):
+    # a tool-written file loads whatever it is called
+    _abox_file(tmp_path, _fluent_binding(), name="not-on-the-list.ttl")
+    with _ok_post() as post:
         load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=tmp_path / "abox")
+    assert post.call_count == len(list(TBOX_DIR.glob("*.ttl"))) + 1
+
+
+def test_abox_file_on_the_static_list_loads_without_the_marker(tmp_path):
+    demo = (ROOT / "ontologies" / "abox" / "topology-demo.ttl").read_text()
+    _abox_file(tmp_path, demo, name="topology-demo.ttl", marker=False)
+    with _ok_post() as post:
+        load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=tmp_path / "abox")
+    assert post.call_count == len(list(TBOX_DIR.glob("*.ttl"))) + 1
+
+
+def test_abox_file_without_the_marker_is_refused_before_validation_and_post(tmp_path):
+    _abox_file(tmp_path, _fluent_binding(), name="licensed-ontology.ttl", marker=False)
+    _abox_file(tmp_path, _fluent_binding(), name="intent-2.ttl")
+    with patch("ingestion.load_ontologies.validate_shapes") as validate, \
+            patch("ingestion.load_ontologies.requests.post") as post:
+        with pytest.raises(ValueError, match="not written by the tooling; nothing loaded") as exc:
+            load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=tmp_path / "abox")
+    assert "licensed-ontology.ttl" in str(exc.value)
+    assert "intent-2.ttl" not in str(exc.value)
+    assert str(tmp_path) not in str(exc.value)
+    validate.assert_not_called()
+    post.assert_not_called()
+
+
+def test_old_intent_file_without_the_marker_is_refused(tmp_path):
+    _abox_file(tmp_path, _old_binding(), name="intent-1.ttl", marker=False)
+    with patch("ingestion.load_ontologies.requests.post") as post:
+        with pytest.raises(ValueError, match="not written by the tooling"):
+            load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=tmp_path / "abox")
+    post.assert_not_called()
+
+
+def test_the_marker_admits_a_file_only_on_its_first_line(tmp_path):
+    f = _abox_file(tmp_path, "", name="late.ttl", marker=False)
+    f.write_text("# a comment\n" + loader.ABOX_MARKER + "\n" + _fluent_binding())
+    with patch("ingestion.load_ontologies.requests.post") as post:
+        with pytest.raises(ValueError, match="not written by the tooling") as exc:
+            load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=tmp_path / "abox")
+    assert "late.ttl" in str(exc.value)
+    post.assert_not_called()
+
+
+def test_a_symlink_in_the_abox_dir_to_a_file_outside_is_refused(tmp_path):
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    target = outside / "x.ttl"
+    target.write_text(loader.ABOX_MARKER + "\n" + _fluent_binding())
+    d = tmp_path / "abox"
+    d.mkdir()
+    try:
+        (d / "linked.ttl").symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not supported on this platform")
+    with patch("ingestion.load_ontologies.validate_shapes") as validate, \
+            patch("ingestion.load_ontologies.requests.post") as post:
+        with pytest.raises(ValueError, match="links outside the ABox directory; nothing loaded") as exc:
+            load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=d)
+    assert "linked.ttl" in str(exc.value)
+    assert str(tmp_path) not in str(exc.value)
+    validate.assert_not_called()
+    post.assert_not_called()
+
+
+def test_repository_abox_directory_loads_with_the_tbox_one_post_each_plus_the_demo():
+    with _ok_post() as post:
+        load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=ROOT / "ontologies" / "abox")
     assert post.call_count == len(list(TBOX_DIR.glob("*.ttl"))) + 1
 
 

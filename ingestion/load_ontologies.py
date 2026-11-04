@@ -1,4 +1,8 @@
-"""SHACL-gated loader: validates TBox/ABox files, then POSTs them to Fuseki."""
+"""SHACL-gated loader: validates TBox/ABox files, then POSTs them to Fuseki.
+
+Only allow-listed TBox files load. An ABox file loads only if its name is on
+ABOX_STATIC_ALLOWLIST (the tracked demo topology) or its first line is ABOX_MARKER, which
+ingestion.bind_intent writes; any other file is refused before validation and before any POST."""
 import argparse
 import pathlib
 from pathlib import Path
@@ -18,9 +22,12 @@ DEFAULT_TTL_PATH = DEFAULT_TBOX_DIR / "topology.ttl"
 DEFAULT_DATA_ENDPOINT = "http://localhost:3030/network-dataset/data"
 # Only our own TBox loads; licensed ontology files are refused even if copied into the directory.
 TBOX_ALLOWLIST = ("topology.ttl",)
-# The first line of every ABox file ingestion.bind_intent writes. Plan 02-07's loader rule admits
-# an ABox file only when its first line is this marker (or its name is on the static list).
+# The first line of every ABox file ingestion.bind_intent writes. An ABox file loads only when its
+# first line is this marker or its name is on ABOX_STATIC_ALLOWLIST.
 ABOX_MARKER = "# written by ingestion.bind_intent"
+# Tracked demo data. Every other ABox file must have been written by bind_intent and start with
+# ABOX_MARKER, so a licensed or stale .ttl dropped into the directory is never loaded.
+ABOX_STATIC_ALLOWLIST = ("topology-demo.ttl",)
 
 
 class MissingCredential(SystemExit):
@@ -56,6 +63,31 @@ def load_ttl_to_fuseki(
     return response
 
 
+def _has_abox_marker(path: Path) -> bool:
+    """True when the first line of the file is exactly ABOX_MARKER. Reads one short line only."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            first = handle.readline(len(ABOX_MARKER) + 3)
+    except OSError:
+        return False
+    return first.rstrip("\r\n") == ABOX_MARKER
+
+
+def _abox_files(abox_dir: Path) -> list[Path]:
+    """The ABox files that may load; raises, naming the files only, for any that may not."""
+    found = sorted(Path(abox_dir).glob("*.ttl"))
+    refused = sorted(
+        f.name for f in found if f.name not in ABOX_STATIC_ALLOWLIST and not _has_abox_marker(f)
+    )
+    if refused:
+        raise ValueError("ABox file(s) not written by the tooling; nothing loaded: " + ", ".join(refused))
+    abox_real = Path(abox_dir).resolve()
+    for f in found:
+        if f.resolve().parent != abox_real:
+            raise ValueError(f"ABox file links outside the ABox directory; nothing loaded: {f.name}")
+    return found
+
+
 def validate_shapes(data_ttl: Path, shapes_ttl: Path) -> tuple[bool, str]:
     data = rdflib.Graph().parse(str(data_ttl), format="turtle")
     shapes = rdflib.Graph().parse(str(shapes_ttl), format="turtle")
@@ -85,7 +117,7 @@ def load_ontologies(
         if f.resolve().parent != tbox_real:
             raise ValueError(f"TBox file links outside the TBox directory; nothing loaded: {f.name}")
     if abox_dir is not None and Path(abox_dir).is_dir():
-        files += sorted(Path(abox_dir).glob("*.ttl"))
+        files += _abox_files(abox_dir)
     if not shapes_files:
         raise ValueError(f"no *.ttl files found in shacl_dir: {shacl_dir}")
     failures = []
