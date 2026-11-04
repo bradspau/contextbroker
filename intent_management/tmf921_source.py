@@ -28,7 +28,12 @@ from broker_engine.faults import log_fault
 from broker_engine.pruner import prune
 from broker_engine.temporal import temporal_observation
 from broker_engine.tsdb_joiner import join_observed_metric
-from broker_engine.validation import _SAFE_WINDOW, ClientInputError, window_seconds
+from broker_engine.validation import (
+    _SAFE_WINDOW,
+    _UNIT_SECONDS,
+    ClientInputError,
+    window_seconds,
+)
 from data_contracts.envelope import DEFAULT_MAX_AGE_S, build_observed
 from data_contracts.intent_bindings import IntentBinding
 from data_contracts.metric_map import load_metric_map
@@ -423,8 +428,9 @@ def assess_tmf921_as_of(
     push only changes which stored outcome is reported as `last_outcome`.
 
     The temporal TMF921 assess fails closed: unmapped metrics, a metric without an
-    operator, a time with no goal or no placement in force, a current goal that
-    differs from the pinned one, an unreachable server or binding store, and missing, stale,
+    operator, a time with no goal or no placement in force, a goal or placement
+    that started inside a "within" window, a current goal that differs from the
+    pinned one, an unreachable server or binding store, and missing, stale,
     conflicting or non-finite evidence are never a success. Reasons are fixed
     strings; server text never reaches the result.
     """
@@ -490,15 +496,25 @@ def assess_tmf921_as_of(
             known_life = life if life in ("ACKNOWLEDGED", "SUSPENDED", "TERMINATED") else "unknown"
             return result(Outcome.INCONCLUSIVE, ["intent not active"], status=known_life)
 
+    # A "within" window runs back from the as_of instant; a goal or placement recorded
+    # as starting inside it would judge the earlier samples against a different (or no)
+    # goal, so that metric is inconclusive.
+    window_start = at - timedelta(seconds=int(time_window[:-1]) * _UNIT_SECONDS[time_window[-1]])
     per, reasons, envs, outcomes = [], [], [], set()
     for uri, bound in binding.bounds.items():
         name = _short_name(uri)
         device, interface = binding.sources.get(uri, (None, None))
         mapping = metric_map.get(uri)
+        goal_start = binding.goal_intervals.get(uri, (None, None))[0]
+        place_start = binding.placement_intervals.get(uri, (None, None))[0]
         if mapping is None or device is None:
             problem = f"unmapped metric: {name}"
         elif mapping.operator not in OPERATORS:
             problem = f"no operator for metric: {name}"
+        elif mode == "within" and goal_start is not None and goal_start > window_start:
+            problem = f"goal not in force for the whole window: {name}"
+        elif mode == "within" and place_start is not None and place_start > window_start:
+            problem = f"placement not in force for the whole window: {name}"
         else:
             problem = None
         if problem:

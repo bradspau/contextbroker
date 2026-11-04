@@ -519,3 +519,100 @@ def test_a_current_question_still_checks_the_live_goal(real_resolver):
     assert out["requirement"] == REQUIREMENT and client.gets == 1
     drifted = graph_run(FakeClient(intent((LAT, 100))), make_join({}), mode="at")
     assert drifted["reasons"] == ["goal changed: LatencyMetric pinned 150, now 100"]
+
+
+# ---------- TC4 and the within window (TEMP-04, D-20) ----------
+def corrected_store():
+    """Placement olt1/pon0 from NOW-3d, corrected at NOW-1d to olt1/pon1 with the same
+    valid interval: the old record is superseded, the new one is recorded at NOW-1d."""
+    fx = graph_store(goal_changes=False)
+    old = fl.fluent_iri(BIND, "place", NOW - 3 * DAY)
+    g = rdflib.Graph()
+    fl.add_placement(g, BIND, IF1, NOW - 3 * DAY, NOW - DAY, kind="place-reissue")
+    fl.supersede(g, old, NOW - DAY)
+    fx.post("http://fuseki.test/ds/update",
+            data=fl.guarded_insert(g, [old], closed_by=("supersededAt",)).encode())
+    return fx
+
+
+def test_tc4_known_at_before_and_after_a_correction_gives_different_placements(real_resolver):
+    real_resolver["fx"] = corrected_store()
+    client = FakeClient()
+    before_join = make_join({("latency_ms", "last"): 50.0})
+    before = graph_run(client, before_join, as_of="2d", known_at="36h")
+    after_join = make_join({("latency_ms", "last"): 50.0})
+    after = graph_run(client, after_join, as_of="2d", known_at="12h")
+
+    assert before["verdict"] == after["verdict"] == "success"
+    assert [(c["device"], c["interface"]) for c in before_join.calls] == [("olt1", "pon0")]
+    assert [(c["device"], c["interface"]) for c in after_join.calls] == [("olt1", "pon1")]
+    assert before["per_interface"][0]["interface_name"] == "pon0"
+    assert after["per_interface"][0]["interface_name"] == "pon1"
+    assert before["known_at"] == (NOW - 36 * HOUR).isoformat()
+    assert after["known_at"] == (NOW - 12 * HOUR).isoformat()
+    assert_untouched(client)
+
+
+def test_a_time_before_the_first_fluent_is_inconclusive_not_success(real_resolver):
+    real_resolver["fx"] = graph_store()
+    client = FakeClient()
+    join = make_join({("latency_ms", "last"): 1.0, ("latency_ms", "max"): 1.0})
+    for mode in (None, "within"):
+        out = graph_run(client, join, as_of="4d", mode=mode)
+        assert out["verdict"] == "inconclusive"
+        assert out["reasons"] == ["no goal in force: LatencyMetric",
+                                  "no placement in force: LatencyMetric"]
+    assert join.calls == []
+    assert_untouched(client)
+
+
+def test_window_a_goal_that_started_inside_a_within_window_is_inconclusive(real_resolver):
+    real_resolver["fx"] = graph_store()  # goal 150 started at NOW - 24h
+    client = FakeClient()
+    join = make_join({("latency_ms", "max"): 120.0, ("latency_ms", "last"): 120.0})
+    # Window [NOW-25h, NOW-23h] contains the change at NOW-24h.
+    inside = graph_run(client, join, as_of="23h", mode="within", window="2h")
+    assert inside["verdict"] == "inconclusive"
+    assert inside["reasons"] == ["goal not in force for the whole window: LatencyMetric"]
+    assert inside["per_interface"][0]["reason"] == inside["reasons"][0]
+    assert join.calls == []
+    # Mode "at" is not affected, and a window that starts after the change is judged.
+    assert graph_run(client, join, as_of="23h", window="2h")["verdict"] == "success"
+    later = graph_run(client, join, as_of="12h", mode="within", window="2h")
+    assert later["verdict"] == "success" and later["goals"][0]["value"] == 150.0
+    # The goal that was in force for the whole window is judged as before.
+    whole = graph_run(client, join, as_of="40h", mode="within", window="2h")
+    assert whole["verdict"] == "failure" and whole["goals"][0]["value"] == 100.0
+    assert_untouched(client)
+
+
+def test_window_a_placement_that_started_inside_a_within_window_is_inconclusive(real_resolver):
+    real_resolver["fx"] = corrected_store()  # the corrected record starts at NOW - 3d
+    fx = real_resolver["fx"]
+    g = rdflib.Graph()
+    old = fl.fluent_iri(BIND, "place-reissue", NOW - DAY)
+    fl.close(g, old, NOW - 12 * HOUR)
+    fl.add_placement(g, BIND, IF0, NOW - 12 * HOUR, NOW - 12 * HOUR)
+    fx.post("http://fuseki.test/ds/update", data=fl.guarded_insert(g, [old]).encode())
+    join = make_join({("latency_ms", "max"): 50.0})
+    out = graph_run(FakeClient(), join, as_of="11h", mode="within", window="2h")
+    assert out["verdict"] == "inconclusive"
+    assert out["reasons"] == ["placement not in force for the whole window: LatencyMetric"]
+    assert join.calls == []
+
+
+def test_window_applies_to_a_within_question_about_now(real_resolver):
+    real_resolver["fx"] = graph_store()
+    client = FakeClient(intent((LAT, 150)))
+    join = make_join({("latency_ms", "max"): 120.0})
+    # Goal 150 started 24h ago, so a 2d window about now is not covered by one goal.
+    out = graph_run(client, join, mode="within", window="2d")
+    assert out["verdict"] == "inconclusive"
+    assert out["reasons"] == ["goal not in force for the whole window: LatencyMetric"]
+    assert join.calls == []
+    assert graph_run(client, join, mode="within", window="5m")["verdict"] == "success"
+
+
+def test_window_an_injected_binding_without_intervals_is_not_checked():
+    join = make_join({("latency_ms", "max"): 50.0})
+    assert run(join=join, mode="within", window="2h")["verdict"] == "success"
