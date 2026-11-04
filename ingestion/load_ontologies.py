@@ -18,6 +18,9 @@ DEFAULT_TTL_PATH = DEFAULT_TBOX_DIR / "topology.ttl"
 DEFAULT_DATA_ENDPOINT = "http://localhost:3030/network-dataset/data"
 # Only our own TBox loads; licensed ontology files are refused even if copied into the directory.
 TBOX_ALLOWLIST = ("topology.ttl",)
+# The first line of every ABox file ingestion.bind_intent writes. Plan 02-07's loader rule admits
+# an ABox file only when its first line is this marker (or its name is on the static list).
+ABOX_MARKER = "# written by ingestion.bind_intent"
 
 
 class MissingCredential(SystemExit):

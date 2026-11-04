@@ -187,25 +187,35 @@ def supersede(g: Graph, old_iri: str, at: datetime) -> None:
     g.add((URIRef(check_uri(old_iri, "fluent iri")), _p("supersededAt"), _time(at)))
 
 
-def guarded_insert(g: Graph, old_fluents) -> str:
+GUARD_BOTH = ("validEnd", "supersededAt")
+
+
+def guarded_insert(g: Graph, old_fluents, *, closed_by=GUARD_BOTH) -> str:
     """One SPARQL update that inserts every triple of `g` only if the guard holds.
 
-    The guard holds when each named old fluent exists and none of them has a
-    :validEnd or :supersededAt yet. Replaying the update, or naming an old fluent
-    that is absent or already closed, therefore adds nothing. With no old fluents
-    the WHERE is empty and the update always applies. The triples are serialised by
-    rdflib as N-Triples; only validated IRIs and code-formatted timestamps reach the
-    text.
+    The guard holds when each named old fluent exists and none of them has a triple
+    for a predicate in `closed_by` yet. The default is both :validEnd and
+    :supersededAt, which is right for a replace. A correction of a fluent that a
+    replace already closed (it has :validEnd, and the corrected copy keeps that end)
+    passes ("supersededAt",), so only an earlier correction blocks it. Replaying the
+    update, or naming an old fluent that is absent or already closed that way,
+    therefore adds nothing. With no old fluents the WHERE is empty and the update
+    always applies. The triples are serialised by rdflib as N-Triples; only validated
+    IRIs, the two fixed predicate names and code-formatted timestamps reach the text.
     """
     if len(g) == 0:
         raise ValueError("nothing to write")
+    names = tuple(closed_by)
+    if not names or any(n not in GUARD_BOTH for n in names):
+        raise ValueError("unknown guard predicate")
     olds = [check_uri(o, "fluent iri") for o in old_fluents]
     guard = ""
     if olds:
         exists = " ".join(f"FILTER EXISTS {{ <{o}> a ?c }}" for o in olds)
         values = " ".join(f"<{o}>" for o in olds)
+        preds = ", ".join(f":{n}" for n in names)
         absent = (f"FILTER NOT EXISTS {{ VALUES ?o {{ {values} }} ?o ?p ?x . "
-                  f"FILTER(?p IN (:validEnd, :supersededAt)) }}")
+                  f"FILTER(?p IN ({preds})) }}")
         guard = f"{exists} {absent}"
     triples = g.serialize(format="nt")
     return f"PREFIX : <{NS}>\nINSERT {{\n{triples}}} WHERE {{ {guard} }}"

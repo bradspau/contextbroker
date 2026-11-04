@@ -6,7 +6,8 @@ rdflib-backed stand-in (tests.fluent_helpers.GraphFuseki).
 """
 import re
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 import pytest
 import rdflib
@@ -15,6 +16,8 @@ from rdflib.plugins.sparql.processor import prepareUpdate
 from broker_engine.binding_resolver import fetch_fluents, resolve_binding
 from data_contracts import fluents as f
 from data_contracts.fluents import Fluent, select_in_force
+from ingestion.bind_intent import bind
+from ingestion.load_ontologies import validate_shapes
 from tests.fluent_helpers import IFACES_TTL, JIT, LAT, NS, T0, T1, T2, GraphFuseki
 
 POST = "broker_engine.binding_resolver.requests.post"
@@ -479,3 +482,181 @@ def test_two_open_goals_for_one_metric_are_a_duplicate():
     fx.post(UPDATE, data=f.guarded_insert(g, []).encode())
     with pytest.raises(ValueError, match="duplicate binding for metric"):
         read(fx, valid_at=T1 + HOUR)
+
+
+# ---- guarded_insert: which closings block (bead contextbroker-5xr) ------------------------------
+
+
+def test_a_correction_of_a_closed_fluent_is_not_blocked_by_its_end():
+    fx = fuseki()
+    first_bind(fx)
+    replace_goal(fx)  # the old goal now has a validEnd
+    old = f.fluent_iri(BIND, "goal", T0)
+    g = rdflib.Graph()
+    f.add_goal(g, BIND, 90.0, T0, T2, end=T1)  # the corrected copy keeps the old interval
+    f.supersede(g, old, T2)
+    fx.post(UPDATE, data=f.guarded_insert(g, [old], closed_by=("supersededAt",)).encode())
+    assert fx.graph.value(rdflib.URIRef(old), rdflib.URIRef(NS + "supersededAt")) is not None
+    # the default guard (a replace) refuses the same update
+    fx2 = fuseki()
+    first_bind(fx2)
+    replace_goal(fx2)
+    fx2.post(UPDATE, data=f.guarded_insert(g, [old]).encode())
+    assert fx2.graph.value(rdflib.URIRef(old), rdflib.URIRef(NS + "supersededAt")) is None
+    # a read at K before the correction still gets the old value, after it the corrected one
+    assert read(fx, valid_at=T0 + HOUR, known_at=T2 - HOUR).bounds == {LAT: 100.0}
+    assert read(fx, valid_at=T0 + HOUR, known_at=T2).bounds == {LAT: 90.0}
+    assert read(fx, valid_at=T1 + HOUR).bounds == {LAT: 150.0}
+
+
+def test_a_superseded_fluent_blocks_even_the_supersede_only_guard():
+    fx = fuseki()
+    first_bind(fx)
+    correct_placement(fx)
+    before = set(fx.graph)
+    old = f.fluent_iri(BIND, "place", T0)
+    g = rdflib.Graph()
+    f.add_placement(g, BIND, IF0, T0, T2 + HOUR)
+    f.supersede(g, old, T2 + HOUR)
+    fx.post(UPDATE, data=f.guarded_insert(g, [old], closed_by=("supersededAt",)).encode())
+    assert set(fx.graph) == before
+
+
+@pytest.mark.parametrize("bad", [(), ("validEnd", "x"), ("pinnedBound",)])
+def test_guarded_insert_refuses_an_unknown_guard_predicate(bad):
+    g = rdflib.Graph()
+    f.add_goal(g, BIND, 1.0, T0, T0)
+    with pytest.raises(ValueError):
+        f.guarded_insert(g, [f"{BIND}-goal-x"], closed_by=bad)
+
+
+# ---- bind() end to end: the real write path, read back with the real resolver --------------------
+
+@pytest.fixture(autouse=True)
+def _fuseki_credential(monkeypatch):
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "testpassword0")
+
+
+SHAPES = Path(__file__).resolve().parent.parent / "ontologies" / "shacl" / "topology.shacl.ttl"
+DATA = "http://fuseki.test/ds/data"
+QUOTE = ('@prefix quan: <http://tio.models.tmforum.org/tio/v3.6.0/QuantityOntology/> .\n'
+         '@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n'
+         '@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n'
+         '_:c quan:smaller ( <%s> [ rdf:value "%s"^^xsd:decimal ] ) .\n')
+
+
+def run_bind(fx, tmp_path, goal, place="olt1/pon0", at=T0, **kw):
+    client = Mock()
+    client.get_intent.return_value = {"expression": {"expressionValue": QUOTE % (LAT, goal)}}
+    with patch("requests.post", side_effect=fx.post):
+        return bind("i1", [f"LatencyMetric={place}"], abox_dir=tmp_path / "abox",
+                    query_endpoint=QUERY, data_endpoint=DATA, client=client, now=at, **kw)
+
+
+def assert_conforms(graph, tmp_path):
+    path = tmp_path / "whole.ttl"
+    path.write_text(graph.serialize(format="turtle"), encoding="utf-8")
+    ok, report = validate_shapes(path, SHAPES)
+    assert ok is True, report
+
+
+def val(fx, iri, name):
+    return fx.graph.value(rdflib.URIRef(iri), rdflib.URIRef(NS + name))
+
+
+def test_bind_replace_end_to_end(tmp_path):
+    fx = fuseki()
+    run_bind(fx, tmp_path, 25, at=T0)
+    goal0 = f.fluent_iri(BIND, "goal", T0)
+    assert f.parse_dt(str(val(fx, goal0, "validStart"))) == f.parse_dt(str(val(fx, goal0, "recordedAt"))) == T0
+    assert val(fx, goal0, "validEnd") is None
+
+    out, applied = run_bind(fx, tmp_path, 30, at=T1, replace=True)
+    assert applied and out.exists()
+    goal1 = f.fluent_iri(BIND, "goal", T1)
+    assert float(val(fx, goal0, "pinnedBound")) == 25.0
+    assert f.parse_dt(str(val(fx, goal0, "validEnd"))) == T1
+    assert float(val(fx, goal1, "pinnedBound")) == 30.0
+    assert f.parse_dt(str(val(fx, goal1, "validStart"))) == T1
+    assert val(fx, f.fluent_iri(BIND, "place", T1), "onInterface") is None  # placement unchanged
+    assert read(fx, valid_at=T0 + HOUR).bounds == {LAT: 25.0}
+    assert read(fx).bounds == {LAT: 30.0}
+    assert len(fx.updates()) == 2
+    assert_conforms(fx.graph, tmp_path)
+
+
+def test_bind_correct_tc4(tmp_path):
+    fx = fuseki()
+    run_bind(fx, tmp_path, 25, at=T0)
+    run_bind(fx, tmp_path, 30, at=T1, replace=True)
+    goals_before = {t for t in fx.graph if str(t[0]).startswith(BIND + "-goal-")}
+    run_bind(fx, tmp_path, 30, place="olt1/pon1", at=T2, correct=True)
+
+    old = f.fluent_iri(BIND, "place", T0)
+    new = f.fluent_iri(BIND, "place", T2)
+    assert f.parse_dt(str(val(fx, old, "supersededAt"))) == T2
+    assert str(val(fx, old, "onInterface")) == IF0  # kept
+    assert f.parse_dt(str(val(fx, new, "validStart"))) == T0  # the old start
+    assert val(fx, new, "validEnd") is None
+    assert f.parse_dt(str(val(fx, new, "recordedAt"))) == T2
+    assert {t for t in fx.graph if str(t[0]).startswith(BIND + "-goal-")} == goals_before
+
+    v = T1 + HOUR
+    assert read(fx, valid_at=v, known_at=T2 - HOUR).sources == {LAT: ("olt1", "pon0")}
+    assert read(fx, valid_at=v, known_at=T2).sources == {LAT: ("olt1", "pon1")}
+    assert_conforms(fx.graph, tmp_path)
+
+
+def test_bind_correct_of_a_goal_keeps_the_valid_interval(tmp_path):
+    fx = fuseki()
+    run_bind(fx, tmp_path, 25, at=T0)
+    run_bind(fx, tmp_path, 30, at=T1, replace=True)
+    run_bind(fx, tmp_path, 28, at=T2, correct=True)
+    new = f.fluent_iri(BIND, "goal", T2)
+    assert f.parse_dt(str(val(fx, new, "validStart"))) == T1  # the corrected (open) goal's start
+    assert val(fx, new, "validEnd") is None
+    assert read(fx, valid_at=T1 + HOUR, known_at=T2 - HOUR).bounds == {LAT: 30.0}
+    assert read(fx, valid_at=T1 + HOUR).bounds == {LAT: 28.0}
+    assert read(fx, valid_at=T0 + HOUR).bounds == {LAT: 25.0}  # the closed goal is untouched
+    assert_conforms(fx.graph, tmp_path)
+
+
+def test_bind_replace_valid_from_reissue(tmp_path):
+    fx = fuseki()
+    run_bind(fx, tmp_path, 25, at=T0)
+    v0 = T0 + DAY
+    run_bind(fx, tmp_path, 30, at=T1, replace=True, valid_from="2026-11-02T10:00:00Z")
+
+    old = f.fluent_iri(BIND, "goal", T0)
+    copy = f.fluent_iri(BIND, "goal-reissue", T1)
+    new = f.fluent_iri(BIND, "goal", T1)
+    assert f.parse_dt(str(val(fx, old, "supersededAt"))) == T1
+    assert float(val(fx, copy, "pinnedBound")) == 25.0
+    assert f.parse_dt(str(val(fx, copy, "validStart"))) == T0
+    assert f.parse_dt(str(val(fx, copy, "validEnd"))) == v0
+    assert f.parse_dt(str(val(fx, copy, "recordedAt"))) == T1
+    assert f.parse_dt(str(val(fx, new, "validStart"))) == v0
+    assert float(val(fx, new, "pinnedBound")) == 30.0
+
+    between = v0 + HOUR  # after the goal really changed, before the run
+    assert read(fx, valid_at=between, known_at=T1 - HOUR).bounds == {LAT: 25.0}
+    assert read(fx, valid_at=between).bounds == {LAT: 30.0}
+    assert read(fx, valid_at=v0 - HOUR).bounds == {LAT: 25.0}
+    assert_conforms(fx.graph, tmp_path)
+
+
+def test_bind_replace_without_valid_from_is_inconclusive_for_the_gap_not_wrong(tmp_path):
+    # Research Pitfall 10: asked with a knowledge time before the run about a valid time after
+    # it, the closed goal does not cover and the new one is not yet known: a named gap.
+    fx = fuseki()
+    run_bind(fx, tmp_path, 25, at=T0)
+    run_bind(fx, tmp_path, 30, at=T1, replace=True)
+    assert read(fx, valid_at=T1 + HOUR, known_at=T1 - HOUR).gaps == ((LAT, "goal"),)
+
+
+def test_bind_replay_changes_nothing(tmp_path):
+    fx = fuseki()
+    run_bind(fx, tmp_path, 25, at=T0)
+    before = set(fx.graph)
+    assert run_bind(fx, tmp_path, 25, at=T1, replace=True) == (None, False)
+    assert set(fx.graph) == before
