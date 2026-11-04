@@ -241,12 +241,29 @@ def test_agent_tool_declares_and_validates_temporal_arguments():
     props = next(t for t in tools.TOOLS if t["name"] == "assess_intent")["input_schema"]["properties"]
     assert props["mode"]["enum"] == ["at", "within"] and "10m" in props["as_of"]["description"]
     assert "30d" not in props["as_of"]["description"]
+    assert props["known_at"]["pattern"] == props["as_of"]["pattern"]
+    assert "1h" in props["known_at"]["description"] and "30d" not in props["known_at"]["description"]
     assert "as_of" in tools.SYSTEM_PROMPT and "evaluated_at" in tools.SYSTEM_PROMPT
+    assert "known_at" in tools.SYSTEM_PROMPT and "goals" in tools.SYSTEM_PROMPT
+    assert "goal in force then" in tools.SYSTEM_PROMPT
+    assert "read now from the TMF921 intent" not in tools.SYSTEM_PROMPT
+    assert "drift" not in tools.SYSTEM_PROMPT.lower()
     with patch.object(tools, "assess_intent", return_value={"verdict": "success"}) as a:
         content, is_err = tools.execute_tool(
             "assess_intent", {"intent_id": "i1", "time_window": "5m", "as_of": "10m", "mode": "at"})
     assert not is_err and a.call_args.kwargs == {"intent_id": "i1", "time_window": "5m",
                                                    "as_of": "10m", "mode": "at"}
+    with patch.object(tools, "assess_intent", return_value={"verdict": "success"}) as a:
+        content, is_err = tools.execute_tool(
+            "assess_intent", {"intent_id": "i1", "time_window": "5m", "as_of": "2d",
+                              "known_at": "36h"})
+    assert not is_err and a.call_args.kwargs["known_at"] == "36h"
+    content, is_err = tools.execute_tool(
+        "assess_intent", {"intent_id": "i1", "time_window": "5m", "known_at": "PT1H"})
+    assert is_err and "known_at" in json.loads(content)["error"]
+    content, is_err = tools.execute_tool(
+        "assess_intent", {"intent_id": "i1", "time_window": "5m", "known_on": "1h"})
+    assert is_err
     content, is_err = tools.execute_tool(
         "assess_intent", {"intent_id": "i1", "time_window": "5m", "mode": "sometime"})
     assert is_err and "mode" in json.loads(content)["error"]

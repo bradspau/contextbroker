@@ -37,7 +37,7 @@ SYSTEM_PROMPT = """You are a network operations assistant. Many questions are ab
   envelope: "value", "observed_at" and "quality" {"stale", "missing", "conflicts"}.
 
 For a past question use assess_intent's as_of ("was it compliant 10 minutes ago" is as_of="10m", mode="at"; "was it ever non-compliant in the last 30 minutes" is time_window="30m", mode="within").
-The goals judged are always read now from the TMF921 intent; nothing is pushed to the intent server for a past question. Say which moment the verdict describes (the evaluated_at field).
+A past question is judged against the goal in force then, as recorded by the broker, and the goals used are named in the result's goals field with the interval each was in force; nothing is pushed to the intent server and the intent server is not asked. Say which moment the verdict describes (the evaluated_at field). To ask what the broker knew at an earlier time about that moment (for example before a correction was recorded), add known_at, such as known_at="1h"; omit it for what the broker knows now, and the result's known_at says which knowledge time was used. If no goal or placement was recorded for the requested time the verdict is "inconclusive" and the reason says so. For a question about now the goal in force is also compared with the intent server's.
 
 time_window is digits plus s, m, h or d (for example "5m" or "1h"), never ISO-8601 such as "PT1H".
 
@@ -73,6 +73,12 @@ AS_OF = {
     "type": "string",
     "pattern": r"^[0-9]+[smhd]$",
     "description": 'Evaluate as of this long ago, e.g. "10m" for "10 minutes ago" (no further back than the telemetry retention). Omit for now.',
+}
+
+KNOWN_AT = {
+    "type": "string",
+    "pattern": r"^[0-9]+[smhd]$",
+    "description": 'Use what the broker had recorded this long ago, e.g. "1h" for "as known an hour ago" (no further back than the telemetry retention). Omit for what it knows now.',
 }
 
 TOOLS = [
@@ -138,6 +144,7 @@ TOOLS = [
                 "intent_id": {"type": "string"},
                 "time_window": TIME_WINDOW,
                 "as_of": AS_OF,
+                "known_at": KNOWN_AT,
                 "mode": {
                     "type": "string",
                     "enum": ["at", "within"],

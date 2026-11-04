@@ -376,3 +376,28 @@ def test_rest_over_retention_as_of_is_a_fixed_400_before_any_upstream_call():
     push.assert_not_called()
     asof.assert_not_called()
     vec.assert_not_called()
+
+
+def test_rest_passes_known_at_through_and_refuses_bad_values():
+    c = TestClient(main.app, headers=HEADERS)
+    with patch.object(main, "assess", return_value={"verdict": "success"}) as a:
+        r = c.post("/context/assess", json={"intent_id": "i1", "time_window": "5m",
+                                            "as_of": "10m", "known_at": "1h"})
+        assert r.status_code == 200
+        assert a.call_args.kwargs["known_at"] == "1h" and a.call_args.kwargs["as_of"] == "10m"
+        assert c.post("/context/assess", json={"intent_id": "i1", "time_window": "5m",
+                                               "known_on": "1h"}).status_code == 422
+    # Not mocked: the grammar and the retention limit are checked before any I/O.
+    bad = c.post("/context/assess", json={"intent_id": "i1", "time_window": "5m",
+                                          "known_at": "PT1H"})
+    assert bad.status_code == 400
+    far = c.post("/context/assess", json={"intent_id": "i1", "time_window": "5m",
+                                          "known_at": "31d"})
+    assert far.status_code == 400
+    assert far.json()["detail"] == "known_at is further back than the retention period"
+
+
+def test_main_assess_passes_known_at_to_assess_intent():
+    with patch.object(main, "assess_intent", return_value={"verdict": "success"}) as a:
+        main.assess("i1", "5m", as_of="2d", known_at="36h")
+    assert a.call_args.kwargs["known_at"] == "36h" and a.call_args.kwargs["as_of"] == "2d"

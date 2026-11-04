@@ -351,7 +351,8 @@ def test_system_prompt_forbids_own_verdict():
 def test_assess_intent_tool_registered_and_rejects_extra_args():
     names = {t["name"] for t in tools.TOOLS}
     assert "assess_intent" in names
-    assert tools._TOOL_ALLOWED_ARGS["assess_intent"] == {"intent_id", "time_window", "as_of", "mode"}
+    assert tools._TOOL_ALLOWED_ARGS["assess_intent"] == {"intent_id", "time_window", "as_of", "mode",
+                                                                 "known_at"}
     assert {t["function"]["name"] for t in tools.TOOLS_OPENAI} == names
     with patch("agent_harness.tools.assess_intent") as mock_tool:
         content, is_error = tools.execute_tool(
@@ -451,7 +452,7 @@ def test_assess_tool_has_no_source_property_in_either_schema():
         next(t for t in tools.TOOLS if t["name"] == "assess_intent")["input_schema"],
         next(t for t in tools.TOOLS_OPENAI if t["function"]["name"] == "assess_intent")["function"]["parameters"],
     ):
-        assert sorted(schema["properties"]) == ["as_of", "intent_id", "mode", "time_window"]
+        assert sorted(schema["properties"]) == ["as_of", "intent_id", "known_at", "mode", "time_window"]
         assert "source" not in schema["required"]
 
 

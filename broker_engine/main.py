@@ -29,11 +29,13 @@ max_as_of_seconds()
 
 
 def assess(intent_id: str, time_window: str, source: str = "tmf921",
-           as_of: str | None = None, mode: str | None = None) -> dict:
+           as_of: str | None = None, mode: str | None = None,
+           known_at: str | None = None) -> dict:
     """Thin wrapper over assess_intent using this module's joiner."""
     return assess_intent(
         intent_id, time_window,
         join=join_observed_metric, source=source, as_of=as_of, mode=mode,
+        known_at=known_at,
     )
 
 
@@ -59,11 +61,14 @@ def build_mcp_server():
     def assess_intent(
         intent_id: str, time_window: str,
         as_of: str | None = None, mode: Literal["at", "within"] | None = None,
+        known_at: str | None = None,
     ) -> dict:
         """Assess a TMF921 intent against observed telemetry and return verdict plus pruned context.
-        as_of ("10m") assesses as of that long ago; mode "within" checks the whole window.
-        The goals are read now from the TMF921 intent; a past question pushes nothing to the intent server."""
-        return assess(intent_id, time_window, as_of=as_of, mode=mode)
+        as_of ("10m") assesses as of that long ago; mode "within" checks the whole window;
+        known_at ("1h") uses what the broker had recorded that long ago.
+        A past question uses the goal in force then, from the network graph (named in goals),
+        and pushes nothing to the intent server."""
+        return assess(intent_id, time_window, as_of=as_of, mode=mode, known_at=known_at)
 
     @server.tool()
     def query_metric_history(device: str, interface: str, metric_type: str, time_window: str,
@@ -125,6 +130,7 @@ class AssessRequest(BaseModel):
     source: Literal["tmf921"] = "tmf921"
     as_of: str | None = None
     mode: Literal["at", "within"] | None = None
+    known_at: str | None = None
 
 
 @app.get("/context/metric",
@@ -138,7 +144,7 @@ def post_assess(body: AssessRequest, request: Request) -> dict:
     if request.query_params:
         raise HTTPException(422, "Undeclared query parameter(s)")
     return assess(body.intent_id, body.time_window, source=body.source,
-                  as_of=body.as_of, mode=body.mode)
+                  as_of=body.as_of, mode=body.mode, known_at=body.known_at)
 
 
 @app.get("/context/metric-history",
