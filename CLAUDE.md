@@ -1,11 +1,17 @@
 # Context Broker
 
 ## Commands
-- `venv/bin/python -m pytest -q` - full suite (716 pass, 15 skipped); live TMF921 tests need `TMF921_LIVE=1`
+- `venv/bin/python -m pytest -q` - full suite (928 pass, 15 skipped); live TMF921 tests need `TMF921_LIVE=1`
 - `python -m ingestion.bind_intent <intent_id> --place <Metric>=<device>/<interface> ...` - write a `:ServiceBinding`; `--replace` on an intent whose goal changed re-pins the changed goal
 - `scripts/create_demo_intent.sh <ttl>` - create and activate a TMF921 demo intent (intents are never evaluated until ACTIVE)
-- `docker start fuseki victoriametrics tmf921-server` - start the demo stack. Never `docker compose down -v` (deletes Fuseki data)
+- `docker start fuseki victoriametrics tmf921-server` - start the demo stack; `docker compose up -d contextbroker-api` then `docker network connect contextbroker-arch_default contextbroker-api` (lost on recreate, bead contextbroker-i2q). Never `docker compose down -v` (deletes Fuseki data)
 - `tmf921-server` belongs to compose project `contextbroker-arch`; restart it with `docker restart tmf921-server`
+
+## Auth and secrets
+- Fuseki enforces basic auth on every endpoint, including `/$/ping`. `FUSEKI_ADMIN_PASSWORD` (letters and digits only) is required in `.env` by compose, and in the shell environment for `ingestion.load_ontologies`, `ingestion.bind_intent` and `seed_graph.py`. Never print or commit it.
+- Every `/context/*` route needs a bearer JWT (RS256/ES256, `iss`/`aud` pinned, lifetime at most 3600 s): 401 if missing or invalid, 403 `{"detail": "insufficient scope"}` without `context:read` or `context:assess`. Mint with `scripts/mint_token.py` from a key kept outside the repo; the API gets only the public key (mode 644).
+- `GET /health` is unauthenticated and reports each upstream with fixed strings (200, or 503). The API container reports unhealthy without the tmf921 profile.
+- The graph intent path is gone (`source` is `tmf921` only; no `/context/intent/{id}`; no `:OperationalIntent`).
 
 ## Branches
 - Work on `fullnetwork` (pushed to `origin/fullnetwork`). Do not push `origin/master` unless asked.
