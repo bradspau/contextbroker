@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict
 from broker_engine.assess import assess_intent
 from broker_engine.auth import SCOPE_ASSESS, SCOPE_READ, need, require_token
 from broker_engine.faults import log_fault
+from broker_engine.health import probe_upstreams
 from broker_engine import operations
 from broker_engine.pruner import prune  # noqa: F401
 from broker_engine.validation import ClientInputError
@@ -105,6 +106,13 @@ async def _client_error(request: Request, exc: ClientInputError):
 async def _upstream_error(request: Request, exc: requests.RequestException):
     log_fault(log, exc, "upstream data store unavailable")
     return JSONResponse(status_code=502, content={"detail": "upstream data store unavailable"})
+
+
+@app.get("/health", dependencies=[_allow_only()])
+def get_health() -> JSONResponse:
+    """Public: whether each upstream answers, as fixed strings. Outside /context/, so no token."""
+    body = probe_upstreams()
+    return JSONResponse(status_code=200 if body["status"] == "ok" else 503, content=body)
 
 
 class AssessRequest(BaseModel):

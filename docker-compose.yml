@@ -73,6 +73,14 @@ services:
     # mounts an empty file: the API starts and refuses every /context/* call (no key configured).
     volumes:
       - ${HOST_BROKER_JWT_PUBLIC_KEY:-/dev/null}:/run/secrets/broker_jwt_public.pem:ro
+    # /health answers 503 when Fuseki, VictoriaMetrics or the TMF921 server does not answer, and
+    # urlopen raises on 503, so a degraded broker reports unhealthy. The image has no curl.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     depends_on:
       - fuseki
       - victoriametrics
