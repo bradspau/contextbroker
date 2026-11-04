@@ -312,3 +312,64 @@ def _binding_reply():
     r.raise_for_status = Mock()
     r.json.return_value = {"results": {"bindings": [{"b": {}}]}}
     return r
+
+
+# --- the Fuseki credential comes only from the environment (ACC-03) ---
+
+def test_main_exits_naming_the_variable_before_any_network_call(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("FUSEKI_ADMIN_PASSWORD", raising=False)
+    for extra in ([], ["--write-only"], ["--replace"]):
+        with patch.object(bind_intent, "Tmf921Client") as client_cls, \
+                patch("requests.post") as post, patch("requests.get") as get:
+            code = main(["intent-1", "--abox-dir", str(tmp_path / "abox"),
+                         "--place", "LatencyMetric=olt1/pon0", *extra])
+        assert code == 1
+        err = capsys.readouterr().err
+        assert "FUSEKI_ADMIN_PASSWORD" in err
+        post.assert_not_called()
+        get.assert_not_called()
+        client_cls.assert_not_called()
+    assert not (tmp_path / "abox").exists()
+
+
+def test_queries_carry_the_credential_when_set(tmp_path):
+    code, posts = _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0"])
+    assert code == 0
+    queries = [kw for u, kw in posts if u.endswith("/query")]
+    assert len(queries) >= 2  # the existence check and the interface lookup
+    for kw in queries:
+        assert kw["auth"] == ("admin", "testpassword0")
+
+
+def test_delete_bindings_has_no_default_credential(monkeypatch):
+    import inspect
+    from ingestion.load_ontologies import MissingCredential
+    assert inspect.signature(bind_intent.delete_bindings).parameters["auth"].default is None
+    with patch("requests.post", return_value=_ok_post()) as post:
+        bind_intent.delete_bindings("intent-1", "http://x/network-dataset/update")
+    assert post.call_args.kwargs["auth"] == ("admin", "testpassword0")
+    monkeypatch.delenv("FUSEKI_ADMIN_PASSWORD", raising=False)
+    with patch("requests.post") as post:
+        with pytest.raises(MissingCredential):
+            bind_intent.delete_bindings("intent-1", "http://x/network-dataset/update")
+    post.assert_not_called()
+
+
+def test_load_uses_the_environment_credential(tmp_path, monkeypatch):
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "other0value")
+    code, posts = _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0"], existing=True)
+    assert code != 0  # refused without --replace, but the existence query already carried it
+    assert all(kw["auth"] == ("admin", "other0value") for _, kw in posts)
+    code, posts = _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0", "--replace"],
+                       existing=True)
+    assert code == 0
+    writes = _writes(posts)
+    assert len(writes) == 2  # the delete, then the load
+    for _, kw in writes:
+        assert kw["auth"] == ("admin", "other0value")
+
+
+def test_credential_value_never_reaches_output(tmp_path, capsys):
+    _run(tmp_path, ["--place", "LatencyMetric=olt1/pon0"])
+    out = capsys.readouterr()
+    assert "testpassword0" not in out.out + out.err

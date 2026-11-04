@@ -1,3 +1,5 @@
+import runpy
+import sys
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -64,3 +66,28 @@ def test_load_ttl_to_fuseki_raises_on_http_error():
             assert False, "expected an exception"
         except Exception as exc:
             assert "500" in str(exc)
+
+
+SEED_SCRIPT = Path(__file__).resolve().parent.parent / "seed_graph.py"
+
+
+def test_seed_graph_exits_naming_the_variable_when_unset(monkeypatch):
+    monkeypatch.delenv("FUSEKI_ADMIN_PASSWORD", raising=False)
+    monkeypatch.setattr(sys, "argv", ["seed_graph.py"])
+    with patch("requests.post") as post:
+        with pytest.raises(SystemExit) as exc:
+            runpy.run_path(str(SEED_SCRIPT), run_name="__main__")
+    assert "FUSEKI_ADMIN_PASSWORD" in str(exc.value)
+    post.assert_not_called()
+
+
+def test_seed_graph_posts_with_the_environment_credential(monkeypatch):
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "seed0value")
+    monkeypatch.setattr(sys, "argv", ["seed_graph.py"])
+    mock_response = Mock()
+    mock_response.status_code = 204
+    mock_response.raise_for_status = Mock()
+    with patch("requests.post", return_value=mock_response) as post:
+        runpy.run_path(str(SEED_SCRIPT), run_name="__main__")
+    post.assert_called_once()
+    assert post.call_args.kwargs["auth"] == ("admin", "seed0value")
