@@ -1,12 +1,18 @@
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
 import rdflib
 
 import seed_graph
 
 ONTOLOGY_PATH = Path(__file__).resolve().parent.parent / "ontologies" / "tbox" / "topology.ttl"
 NS = rdflib.Namespace("http://example.org/network-ontology#")
+
+
+@pytest.fixture(autouse=True)
+def _fuseki_credential(monkeypatch):
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "testpassword0")
 
 
 def test_topology_ttl_defines_the_demo_topology():
@@ -42,7 +48,7 @@ def test_load_ttl_to_fuseki_posts_raw_turtle_bytes():
     _, kwargs = mock_post.call_args
     assert kwargs["headers"] == {"Content-Type": "text/turtle"}
     assert kwargs["data"] == ONTOLOGY_PATH.read_bytes()
-    assert kwargs["auth"] == ("admin", "admin")
+    assert kwargs["auth"] == ("admin", "testpassword0")
     assert response is mock_response
 
 

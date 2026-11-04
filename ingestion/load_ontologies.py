@@ -7,6 +7,7 @@ import requests
 import rdflib
 from pyshacl import validate
 
+from broker_engine.sparql_resolver import FUSEKI_PASSWORD_ENV, fuseki_auth
 from broker_engine.validation import REQUEST_TIMEOUT_S
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -19,11 +20,27 @@ DEFAULT_DATA_ENDPOINT = "http://localhost:3030/network-dataset/data"
 TBOX_ALLOWLIST = ("topology.ttl",)
 
 
+class MissingCredential(SystemExit):
+    """FUSEKI_ADMIN_PASSWORD is not set. The message names the variable, never a value."""
+
+
+def fuseki_credentials() -> tuple[str, str]:
+    """The Fuseki credential from the environment, or exit naming the variable."""
+    auth = fuseki_auth()
+    if auth is None:
+        raise MissingCredential(
+            f"{FUSEKI_PASSWORD_ENV} is not set; set it in the environment (there is no default)"
+        )
+    return auth
+
+
 def load_ttl_to_fuseki(
     ttl_path: Path,
     data_endpoint: str,
-    auth: tuple[str, str] | None = ("admin", "admin"),
+    auth: tuple[str, str] | None = None,
 ) -> requests.Response:
+    if auth is None:
+        auth = fuseki_credentials()
     payload = Path(ttl_path).read_bytes()
     response = requests.post(
         data_endpoint,
@@ -47,10 +64,12 @@ def load_ontologies(
     tbox_dir: Path,
     shacl_dir: Path,
     data_endpoint: str,
-    auth: tuple[str, str] | None = ("admin", "admin"),
+    auth: tuple[str, str] | None = None,
     abox_dir: Path | None = None,
     allow: tuple[str, ...] = TBOX_ALLOWLIST,
 ) -> None:
+    if auth is None:
+        auth = fuseki_credentials()
     files = sorted(Path(tbox_dir).glob("*.ttl"))
     shapes_files = sorted(Path(shacl_dir).glob("*.ttl"))
     if not files:
@@ -85,6 +104,7 @@ def main() -> None:
     ap.add_argument("--abox-dir", type=pathlib.Path, default=DEFAULT_ABOX_DIR)
     ap.add_argument("--endpoint", default=DEFAULT_DATA_ENDPOINT)
     args = ap.parse_args()
+    fuseki_credentials()
     load_ontologies(args.tbox_dir, args.shacl_dir, args.endpoint, abox_dir=args.abox_dir)
     print(f"Loaded {args.tbox_dir} into {args.endpoint}")
 

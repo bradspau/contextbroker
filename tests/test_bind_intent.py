@@ -21,6 +21,11 @@ INTENT = {"expression": {"expressionValue": (
     '_:c quan:smaller ( <' + LAT + '> [ rdf:value "25"^^xsd:decimal ] ) .\n')}}
 
 
+@pytest.fixture(autouse=True)
+def _fuseki_credential(monkeypatch):
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "testpassword0")
+
+
 def _sparql_reply(iris):
     r = Mock()
     r.raise_for_status = Mock()

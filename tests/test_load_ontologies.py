@@ -12,6 +12,12 @@ SHACL_DIR = ROOT / "ontologies" / "shacl"
 SHAPES = SHACL_DIR / "topology.shacl.ttl"
 ENDPOINT = "http://localhost:3030/network-dataset/data"
 
+
+@pytest.fixture(autouse=True)
+def _fuseki_credential(monkeypatch):
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "testpassword0")
+
+
 def _write(tmp_path, text):
     d = tmp_path / "tbox"
     d.mkdir()
@@ -230,6 +236,91 @@ def test_caller_can_pass_its_own_allow_list(tmp_path):
     with patch("requests.post", return_value=resp) as post:
         load_ontologies(d, SHACL_DIR, ENDPOINT, allow=("mine.ttl",))
     assert post.call_count == 1
+
+
+# --- the Fuseki credential comes only from the environment (ACC-03) ---
+
+def test_missing_credential_exits_naming_the_variable_and_does_nothing_else(monkeypatch):
+    monkeypatch.delenv("FUSEKI_ADMIN_PASSWORD", raising=False)
+    with patch("ingestion.load_ontologies.validate_shapes") as validate, \
+            patch("ingestion.load_ontologies.requests.post") as post:
+        with pytest.raises(SystemExit) as exc:
+            load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT)
+        with pytest.raises(SystemExit) as exc_one:
+            loader.load_ttl_to_fuseki(TBOX_DIR / "topology.ttl", ENDPOINT)
+    assert "FUSEKI_ADMIN_PASSWORD" in str(exc.value)
+    assert "FUSEKI_ADMIN_PASSWORD" in str(exc_one.value)
+    assert isinstance(exc.value, loader.MissingCredential)
+    validate.assert_not_called()
+    post.assert_not_called()
+
+
+def test_empty_credential_counts_as_unset(monkeypatch):
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "")
+    with patch("ingestion.load_ontologies.requests.post") as post:
+        with pytest.raises(loader.MissingCredential):
+            load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT)
+    post.assert_not_called()
+
+
+def test_loader_posts_with_the_environment_credential():
+    resp = Mock()
+    resp.raise_for_status = Mock()
+    with patch("requests.post", return_value=resp) as post:
+        load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT)
+    assert post.call_count >= 1
+    for call in post.call_args_list:
+        assert call.kwargs["auth"] == ("admin", "testpassword0")
+
+
+def test_credential_is_read_on_each_call(monkeypatch):
+    resp = Mock()
+    resp.raise_for_status = Mock()
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "rotated0value")
+    with patch("requests.post", return_value=resp) as post:
+        loader.load_ttl_to_fuseki(TBOX_DIR / "topology.ttl", ENDPOINT)
+    assert post.call_args.kwargs["auth"] == ("admin", "rotated0value")
+
+
+def test_explicit_auth_is_still_honoured(monkeypatch):
+    monkeypatch.delenv("FUSEKI_ADMIN_PASSWORD", raising=False)
+    resp = Mock()
+    resp.raise_for_status = Mock()
+    with patch("requests.post", return_value=resp) as post:
+        loader.load_ttl_to_fuseki(TBOX_DIR / "topology.ttl", ENDPOINT, auth=("admin", "explicit0"))
+    assert post.call_args.kwargs["auth"] == ("admin", "explicit0")
+
+
+def test_no_default_credential_in_signatures():
+    import inspect
+    for fn in (loader.load_ontologies, loader.load_ttl_to_fuseki):
+        assert inspect.signature(fn).parameters["auth"].default is None
+
+
+def test_main_exits_before_any_work_when_unset(monkeypatch):
+    monkeypatch.delenv("FUSEKI_ADMIN_PASSWORD", raising=False)
+    monkeypatch.setattr("sys.argv", ["load_ontologies", "--endpoint", "http://127.0.0.1:9/x"])
+    with patch("ingestion.load_ontologies.load_ontologies") as load, \
+            patch("ingestion.load_ontologies.validate_shapes") as validate, \
+            patch("ingestion.load_ontologies.requests.post") as post:
+        with pytest.raises(SystemExit) as exc:
+            loader.main()
+    assert "FUSEKI_ADMIN_PASSWORD" in str(exc.value)
+    load.assert_not_called()
+    validate.assert_not_called()
+    post.assert_not_called()
+
+
+def test_fuseki_auth_reads_the_environment_each_call(monkeypatch):
+    from broker_engine.sparql_resolver import fuseki_auth
+    monkeypatch.delenv("FUSEKI_ADMIN_PASSWORD", raising=False)
+    assert fuseki_auth() is None
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "")
+    assert fuseki_auth() is None
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "abc123")
+    assert fuseki_auth() == ("admin", "abc123")
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "def456")
+    assert fuseki_auth() == ("admin", "def456")
 
 
 # --- retiring the graph intent vocabulary (D-09) ---
