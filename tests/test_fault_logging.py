@@ -203,7 +203,8 @@ def test_rest_upstream_error_logs_class_and_reason(caplog):
     from unittest.mock import patch
     from fastapi.testclient import TestClient
     from broker_engine import main
-    c = TestClient(main.app, raise_server_exceptions=False)
+    from tests.auth_helpers import auth_headers
+    c = TestClient(main.app, headers=auth_headers("context:read"), raise_server_exceptions=False)
     params = {"device": "r1", "interface": "e0", "metric_type": "latency_ms",
               "time_window": "5m"}
     with patch("broker_engine.tsdb_joiner.requests.get",

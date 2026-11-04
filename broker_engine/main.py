@@ -1,4 +1,8 @@
-"""Broker REST interface (MCP server built but not mounted) over the joiner, pruner, operations queries and the TMF921 assess."""
+"""Broker REST interface (MCP server built but not mounted) over the joiner, pruner, operations queries and the TMF921 assess.
+
+REST callers present a bearer token (broker_engine/auth.py); every /context/* route is refused
+with 401 without one. The in-process MCP server and agent harness call broker functions directly
+and present none (D-08); a served MCP server must authenticate."""
 
 import logging
 from typing import Literal
@@ -9,6 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from broker_engine.assess import assess_intent
+from broker_engine.auth import SCOPE_ASSESS, SCOPE_READ, need, require_token
 from broker_engine.faults import log_fault
 from broker_engine import operations
 from broker_engine.pruner import prune  # noqa: F401
@@ -77,6 +82,7 @@ def build_mcp_server():
 
 
 app = FastAPI(title="Context Broker")
+app.middleware("http")(require_token)
 
 
 def _allow_only(*names: str):
@@ -110,12 +116,13 @@ class AssessRequest(BaseModel):
     mode: Literal["at", "within"] | None = None
 
 
-@app.get("/context/metric", dependencies=[_allow_only("device", "interface", "metric_type", "time_window")])
+@app.get("/context/metric",
+         dependencies=[need(SCOPE_READ), _allow_only("device", "interface", "metric_type", "time_window")])
 def get_metric(device: str, interface: str, metric_type: str, time_window: str) -> dict:
     return _metric(device, interface, metric_type, time_window)
 
 
-@app.post("/context/assess")
+@app.post("/context/assess", dependencies=[need(SCOPE_ASSESS)])
 def post_assess(body: AssessRequest, request: Request) -> dict:
     if request.query_params:
         raise HTTPException(422, "Undeclared query parameter(s)")
@@ -124,19 +131,21 @@ def post_assess(body: AssessRequest, request: Request) -> dict:
 
 
 @app.get("/context/metric-history",
-         dependencies=[_allow_only("device", "interface", "metric_type", "time_window", "as_of")])
+         dependencies=[need(SCOPE_READ),
+                       _allow_only("device", "interface", "metric_type", "time_window", "as_of")])
 def get_metric_history(device: str, interface: str, metric_type: str, time_window: str,
                        as_of: str | None = None) -> dict:
     return operations.metric_history(device, interface, metric_type, time_window, as_of)
 
 
 @app.get("/context/interfaces-nonzero",
-         dependencies=[_allow_only("device", "metric_type", "time_window", "as_of", "limit")])
+         dependencies=[need(SCOPE_READ),
+                       _allow_only("device", "metric_type", "time_window", "as_of", "limit")])
 def get_interfaces_nonzero(device: str, metric_type: str, time_window: str,
                            as_of: str | None = None, limit: int = operations.DEFAULT_INTERFACES) -> dict:
     return operations.interfaces_with_nonzero(device, metric_type, time_window, as_of, limit)
 
 
-@app.get("/context/neighbours", dependencies=[_allow_only("device", "interface")])
+@app.get("/context/neighbours", dependencies=[need(SCOPE_READ), _allow_only("device", "interface")])
 def get_neighbours(device: str, interface: str) -> dict:
     return operations.interface_neighbours(device, interface)

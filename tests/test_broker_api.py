@@ -7,10 +7,12 @@ from fastapi.testclient import TestClient
 
 from broker_engine import main
 from broker_engine.pruner import prune
+from tests.auth_helpers import auth_headers
 from data_contracts.envelope import build_observed
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
-client = TestClient(main.app)
+HEADERS = auth_headers("context:read", "context:assess")
+client = TestClient(main.app, headers=HEADERS)
 
 
 def healthy(i):
@@ -103,7 +105,7 @@ def _neighbour_params():
 
 
 def test_other_valueerror_is_not_400():
-    c = TestClient(main.app, raise_server_exceptions=False)
+    c = TestClient(main.app, headers=HEADERS, raise_server_exceptions=False)
     with patch("broker_engine.main.operations.interface_neighbours", side_effect=ValueError("secret upstream")):
         r = c.get("/context/neighbours", params=_neighbour_params())
     assert r.status_code == 500
@@ -114,7 +116,7 @@ def test_upstream_non_json_is_5xx_not_400():
     import requests as rq
     resp = type("R", (), {"raise_for_status": lambda self: None,
                           "json": lambda self: (_ for _ in ()).throw(rq.exceptions.JSONDecodeError("bad body SECRET", "", 0))})()
-    c = TestClient(main.app, raise_server_exceptions=False)
+    c = TestClient(main.app, headers=HEADERS, raise_server_exceptions=False)
     with patch("broker_engine.tsdb_joiner.requests.get", return_value=resp):
         r = c.get("/context/metric", params=_metric_params())
     assert r.status_code >= 500 and "SECRET" not in r.text
@@ -212,7 +214,7 @@ def test_default_source_is_tmf921():
         via.assert_called_once()
     # REST body without source
     with patch("broker_engine.assess.assess_via_tmf921", return_value=ret) as via:
-        r = TestClient(main.app).post("/context/assess", json={"intent_id": "I1", "time_window": "5m"})
+        r = TestClient(main.app, headers=HEADERS).post("/context/assess", json={"intent_id": "I1", "time_window": "5m"})
     assert r.status_code == 200 and r.json() == ret
     via.assert_called_once()
     # MCP tool without source
@@ -227,14 +229,14 @@ def test_default_source_is_tmf921():
 
 def test_tmf921_response_has_no_deprecated_key():
     with patch("broker_engine.assess.assess_via_tmf921", return_value={"verdict": "success"}):
-        r = TestClient(main.app).post(
+        r = TestClient(main.app, headers=HEADERS).post(
             "/context/assess", json={"intent_id": "I1", "time_window": "5m", "source": "tmf921"})
     assert "deprecated" not in r.json()
 
 
 def test_assess_source_tmf921_routes_to_new_path():
     with patch("broker_engine.assess.assess_via_tmf921", return_value={"verdict": "success", "source": "tmf921"}) as via:
-        r = TestClient(main.app).post(
+        r = TestClient(main.app, headers=HEADERS).post(
             "/context/assess", json={"intent_id": "I1", "time_window": "5m", "source": "tmf921"})
     assert r.status_code == 200 and r.json()["source"] == "tmf921"
     assert via.call_args.args == ("I1", "5m")
@@ -242,7 +244,7 @@ def test_assess_source_tmf921_routes_to_new_path():
 
 
 def test_assess_unknown_source_422_and_python_clientinputerror():
-    r = TestClient(main.app).post(
+    r = TestClient(main.app, headers=HEADERS).post(
         "/context/assess", json={"intent_id": "I1", "time_window": "5m", "source": "bogus"})
     assert r.status_code == 422
     from broker_engine.assess import assess_intent
@@ -252,7 +254,7 @@ def test_assess_unknown_source_422_and_python_clientinputerror():
 
 
 def test_assess_extra_field_still_422_with_source():
-    r = TestClient(main.app).post(
+    r = TestClient(main.app, headers=HEADERS).post(
         "/context/assess", json={"intent_id": "I1", "time_window": "5m", "source": "tmf921", "x": 1})
     assert r.status_code == 422
 
@@ -260,7 +262,7 @@ def test_assess_extra_field_still_422_with_source():
 def test_assess_tmf921_client_input_error_is_400():
     from broker_engine.validation import ClientInputError
     with patch("broker_engine.assess.assess_via_tmf921", side_effect=ClientInputError("bad")):
-        r = TestClient(main.app).post(
+        r = TestClient(main.app, headers=HEADERS).post(
             "/context/assess", json={"intent_id": "I1", "time_window": "5m", "source": "tmf921"})
     assert r.status_code == 400
 
@@ -279,7 +281,7 @@ def test_mcp_assess_tool_has_no_source_argument():
 
 def test_source_graph_is_refused_at_rest():
     with patch("broker_engine.assess.assess_via_tmf921") as via:
-        r = TestClient(main.app).post(
+        r = TestClient(main.app, headers=HEADERS).post(
             "/context/assess", json={"intent_id": "I1", "time_window": "5m", "source": "graph"})
     assert r.status_code == 422
     via.assert_not_called()
@@ -293,7 +295,7 @@ def test_intent_route_is_gone():
 # --- operations routes still answer (moved from tests/test_operations.py) ---
 
 def test_rest_endpoints_pass_arguments_through_and_reject_extras():
-    c = TestClient(main.app)
+    c = TestClient(main.app, headers=HEADERS)
     with patch.object(main.operations, "metric_history", return_value={"ok": 1}) as h:
         r = c.get("/context/metric-history", params={
             "device": "r1", "interface": "e0", "metric_type": "input_drops",
@@ -313,7 +315,7 @@ def test_rest_endpoints_pass_arguments_through_and_reject_extras():
 
 
 def test_rest_bad_input_is_a_400():
-    c = TestClient(main.app)
+    c = TestClient(main.app, headers=HEADERS)
     r = c.get("/context/metric-history", params={
         "device": "r1", "interface": "e0", "metric_type": "m", "time_window": "PT1H"})
     assert r.status_code == 400
@@ -322,7 +324,7 @@ def test_rest_bad_input_is_a_400():
 
 def test_rest_passes_as_of_and_mode_through():
     with patch.object(main, "assess", return_value={"verdict": "success"}) as a:
-        c = TestClient(main.app)
+        c = TestClient(main.app, headers=HEADERS)
         r = c.post("/context/assess", json={"intent_id": "i1", "time_window": "5m",
                                             "as_of": "10m", "mode": "within"})
         assert r.status_code == 200
