@@ -141,3 +141,21 @@ def test_compose_holds_no_literal_password_value():
     text = COMPOSE_PATH.read_text()
     assert "ADMIN_PASSWORD=admin" not in text
     assert "--passwd=/tmp/fuseki-passwd" in text
+
+
+def test_api_jwt_configuration():
+    services = yaml.safe_load(COMPOSE_PATH.read_text())["services"]
+    api = services["contextbroker-api"]
+    env = _env_as_dict(api["environment"])
+
+    assert env["BROKER_JWT_PUBLIC_KEY_FILE"] == "/run/secrets/broker_jwt_public.pem"
+    assert "BROKER_JWT_ISSUER" in env and "BROKER_JWT_AUDIENCE" in env
+
+    mounts = [v for v in api.get("volumes", []) if "broker_jwt_public.pem" in v]
+    assert mounts == ["${HOST_BROKER_JWT_PUBLIC_KEY:-/dev/null}:/run/secrets/broker_jwt_public.pem:ro"]
+    assert len([v for v in api.get("volumes", []) if v.endswith(":/run/secrets/broker_jwt_public.pem:ro")]) == 1
+
+    # the API container gets the public key only: no private key anywhere in compose
+    text = COMPOSE_PATH.read_text().lower()
+    assert "private" not in text
+    assert api["ports"] == ["8080:8080"]
