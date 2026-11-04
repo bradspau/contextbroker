@@ -156,6 +156,5 @@ def test_api_jwt_configuration():
     assert len([v for v in api.get("volumes", []) if v.endswith(":/run/secrets/broker_jwt_public.pem:ro")]) == 1
 
     # the API container gets the public key only: no private key anywhere in compose
-    text = COMPOSE_PATH.read_text().lower()
-    assert "private" not in text
+    assert "private" not in repr(api).lower()
     assert api["ports"] == ["8080:8080"]

@@ -189,5 +189,11 @@ def test_the_script_cap_equals_the_broker_cap():
 
 
 def test_the_script_imports_no_broker_module():
-    text = SCRIPT.read_text()
-    assert "broker_engine" not in text and "intent_management" not in text
+    import ast
+    imported = set()
+    for node in ast.walk(ast.parse(SCRIPT.read_text())):
+        if isinstance(node, ast.Import):
+            imported |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            imported.add((node.module or "").split(".")[0])
+    assert not imported & {"broker_engine", "intent_management", "data_contracts", "ingestion", "outcome_assurance"}

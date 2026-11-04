@@ -66,6 +66,13 @@ services:
       - VM_QUERY_ENDPOINT=http://victoriametrics:8428/api/v1/query
       - TMF921_BASE_URL=http://tmf921-server:8000/tmf-api/intentManagement/v5
       - FUSEKI_ADMIN_PASSWORD=${FUSEKI_ADMIN_PASSWORD:?set FUSEKI_ADMIN_PASSWORD in .env}
+      - BROKER_JWT_PUBLIC_KEY_FILE=/run/secrets/broker_jwt_public.pem
+      - BROKER_JWT_ISSUER=${BROKER_JWT_ISSUER:-}
+      - BROKER_JWT_AUDIENCE=${BROKER_JWT_AUDIENCE:-context-broker}
+    # The API verifies bearer tokens with a public key only. An unset HOST_BROKER_JWT_PUBLIC_KEY
+    # mounts an empty file: the API starts and refuses every /context/* call (no key configured).
+    volumes:
+      - ${HOST_BROKER_JWT_PUBLIC_KEY:-/dev/null}:/run/secrets/broker_jwt_public.pem:ro
     depends_on:
       - fuseki
       - victoriametrics

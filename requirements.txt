@@ -29,6 +29,7 @@ prettytable==3.18.0
 pycparser==3.12
 pydantic==2.13.5
 pydantic_core==2.46.5
+# PyJWT and cryptography are imported directly by broker_engine/auth.py and scripts/mint_token.py
 PyJWT==2.15.1
 pyshacl==0.40.1
 python-dotenv==1.2.3
