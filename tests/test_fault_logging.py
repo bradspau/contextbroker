@@ -85,7 +85,7 @@ def test_goal_recheck_after_success_logs_class_and_reason(caplog):
 def test_temporal_get_intent_logs_class_and_reason(caplog):
     import test_temporal_tmf921 as tt
     with caplog.at_level(logging.WARNING):
-        out = tt.assess_tmf921_as_of(tt.IID, "5m", as_of="10m", mode=None,
+        out = tt.assess_tmf921_as_of(tt.IID, "5m", as_of=None, mode="within",
                                      client=tt.FakeClient(get_exc=ConnectionError(CANARY)),
                                      join=tt.make_join({}), now=tt.NOW, metric_map=tt.MMAP,
                                      bindings=tt.B_LAT)

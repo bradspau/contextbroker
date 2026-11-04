@@ -182,11 +182,12 @@ def test_graph_source_is_a_client_error(source):
 def test_tmf921_source_routes_temporal_arguments():
     with patch.object(assess_mod, "assess_tmf921_as_of", return_value={"verdict": "success"}) as t, \
             patch.object(assess_mod, "assess_via_tmf921") as push:
-        for kw in ({"as_of": "10m"}, {"mode": "within"}):
+        for kw in ({"as_of": "10m"}, {"mode": "within"}, {"known_at": "1h"}):
             assert assess_intent("i1", "5m", source="tmf921", **kw) == {"verdict": "success"}
     push.assert_not_called()
-    assert [c.kwargs["as_of"] for c in t.call_args_list] == ["10m", None]
-    assert [c.kwargs["mode"] for c in t.call_args_list] == [None, "within"]
+    assert [c.kwargs["as_of"] for c in t.call_args_list] == ["10m", None, None]
+    assert [c.kwargs["mode"] for c in t.call_args_list] == [None, "within", None]
+    assert [c.kwargs["known_at"] for c in t.call_args_list] == [None, None, "1h"]
 
 
 # ---------- retention (TEMP-07) ----------

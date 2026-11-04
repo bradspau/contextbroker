@@ -1,8 +1,8 @@
 """Assess an intent through the TMF921 server: bind, push, poll, interpret.
 
-`assess_tmf921_as_of` is the read-only temporal variant (as_of, mode): it reads
-the bounds from the intent now, evaluates telemetry at a past instant or over a
-window in the broker, and pushes nothing.
+`assess_tmf921_as_of` is the read-only temporal variant (as_of, known_at, mode): it
+evaluates telemetry at a past instant or over a window in the broker, against the goal
+and placement in force then as recorded in the network graph, and pushes nothing.
 
 The TMF921 assess fails closed: stale, missing, conflicted, future-dated or unmappable evidence is
 never a success, and nothing is pushed unless every bound metric is pushable.
@@ -171,8 +171,13 @@ def _gap_reasons(binding) -> list[str]:
     return [f"no {kind} in force: {_short_name(uri)}" for uri, kind in binding.gaps]
 
 
-def _binding_for(intent_id: str, bindings=None) -> tuple[IntentBinding | None, str | None]:
+def _binding_for(intent_id: str, bindings=None, *, valid_at=None,
+                 known_at=None) -> tuple[IntentBinding | None, str | None]:
     """Find the binding for an intent: (binding, None) or (None, fixed reason).
+
+    `valid_at` and `known_at` (aware datetimes) select the goal and placement in force
+    then as known then; they are passed to the resolver only when given, so the
+    current-instant path still calls resolve_binding(intent_id) exactly as before.
 
     Reasons: "no binding for intent", "invalid binding", "binding store unavailable".
     An explicit `bindings` mapping is used alone. Otherwise the only source is the
@@ -186,7 +191,10 @@ def _binding_for(intent_id: str, bindings=None) -> tuple[IntentBinding | None, s
         binding = bindings.get(intent_id)
         return (binding, None) if binding else (None, "no binding for intent")
     try:
-        binding = resolve_binding(intent_id)
+        if valid_at is None and known_at is None:
+            binding = resolve_binding(intent_id)
+        else:
+            binding = resolve_binding(intent_id, valid_at=valid_at, known_at=known_at)
     except requests.RequestException:  # checked first: includes a non-JSON reply
         return None, "binding store unavailable"
     except ClientInputError:  # unsafe caller input is not a binding problem
@@ -359,7 +367,23 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
     return done(outcome, reasons, per, all_envs)
 
 
-TEMPORAL_REQUIREMENT = "goals read now from the TMF921 intent (no history is kept)"
+TEMPORAL_REQUIREMENT = ("goal in force now, pinned in the network graph and checked "
+                        "against the TMF921 intent")
+HISTORICAL_REQUIREMENT = "goal in force at the requested time, as recorded in the network graph"
+
+
+def _goal_entries(binding) -> list[dict]:
+    """One entry per judged metric, by short name: the goal and the interval it holds.
+
+    Numbers, times and pinned short names only. An injected test binding carries no
+    intervals, so its times are null.
+    """
+    entries = []
+    for uri, value in binding.bounds.items():
+        start, end = binding.goal_intervals.get(uri, (None, None))
+        entries.append({"metric": _short_name(uri), "value": float(value),
+                        "valid_from": start, "valid_to": end})
+    return sorted(entries, key=lambda e: e["metric"])
 
 
 def assess_tmf921_as_of(
@@ -368,6 +392,7 @@ def assess_tmf921_as_of(
     *,
     as_of: str | None,
     mode: str | None,
+    known_at: str | None = None,
     client: Tmf921Client | None = None,
     join=None,
     now: datetime | None = None,
@@ -376,15 +401,20 @@ def assess_tmf921_as_of(
 ) -> dict:
     """Temporal assess of a TMF921 intent: judged in the broker, nothing pushed.
 
-    `as_of` ("10m") is an offset back from now; `mode` is "at" (the default: the
-    last sample at that instant, judged fresh relative to it) or "within" (the
-    worst case over `time_window` ending then, in the direction of each bound's
+    `as_of` ("10m") is an offset back from now; `known_at` ("1h") is an offset back
+    from now for what the broker had recorded by then. `mode` is "at" (the default:
+    the last sample at that instant, judged fresh relative to it) or "within" (the
+    worst case over `time_window` ending then, in the direction of each goal's
     operator from metric_map.json). `mode` without `as_of` ends now.
 
-    The TMF921 server keeps no history of goals, so the goals are read now from
-    the intent (after the same check against the pinned binding as the push
-    path) and applied to the past telemetry. The server is never asked to judge a
-    past instant: its reports describe only what was pushed to it.
+    A past question (`as_of` or `known_at` given) reads the goal and the placement
+    in force at the as_of instant, as known at the known_at instant (latest when
+    absent), from the network graph's fluents only. The TMF921 server is not asked
+    at all: its live goal says nothing about the goal then, and an intent that has
+    ended stays answerable. The result names the goals used (`goals`, with
+    valid_from and valid_to) and the knowledge time (`known_at`). Without either
+    argument (`mode` only) the question is about now: the goal in force now is also
+    checked against the TMF921 intent and a non-active intent is inconclusive.
 
     Read-only: no observation is pushed, no high-water mark is written and the
     stored fulfilment outcome is not updated (`last_outcome` is that stored value,
@@ -393,9 +423,10 @@ def assess_tmf921_as_of(
     push only changes which stored outcome is reported as `last_outcome`.
 
     The temporal TMF921 assess fails closed: unmapped metrics, a metric without an
-    operator, a goal that differs from the pinned one, an unreachable server or binding store, and missing,
-    stale, conflicting or non-finite evidence are never a success. Reasons are
-    fixed strings; server text never reaches the result.
+    operator, a time with no goal or no placement in force, a current goal that
+    differs from the pinned one, an unreachable server or binding store, and missing, stale,
+    conflicting or non-finite evidence are never a success. Reasons are fixed
+    strings; server text never reaches the result.
     """
     # Caller input first: a bad value is a client error before any I/O.
     _check_intent_id(intent_id)
@@ -404,45 +435,60 @@ def assess_tmf921_as_of(
     if mode not in (None, "at", "within"):
         raise ClientInputError(f"Unknown mode: {mode!r}")
     offset_s = window_seconds(as_of, "as_of") if as_of is not None else 0
+    known_s = window_seconds(known_at, "known_at") if known_at is not None else None
+    historical = as_of is not None or known_at is not None
     mode = mode or "at"
     now = now or _utcnow()
     at = now - timedelta(seconds=offset_s)
+    known = now - timedelta(seconds=known_s) if known_s is not None else None
     join = join or join_observed_metric
     prev = TMF921_STORE.last_outcome(intent_id)
     previous = prev.value if prev else None
+    goals: list[dict] = []
 
     def result(outcome, reasons, per=None, envs=(), status="active", changes=()):
-        out = _result(outcome, reasons, per, envs, previous, status, changes)
-        out.update(jsonable_encoder({"mode": mode, "as_of": as_of, "evaluated_at": at,
-                                     "requirement": TEMPORAL_REQUIREMENT}))
+        # The lifecycle is not read for a past question.
+        out = _result(outcome, reasons, per, envs, previous,
+                      "unknown" if historical else status, changes)
+        extra = {"mode": mode, "as_of": as_of, "evaluated_at": at,
+                 "requirement": HISTORICAL_REQUIREMENT if historical else TEMPORAL_REQUIREMENT}
+        if historical:
+            extra.update({"known_at": known or now, "goals": goals})
+        out.update(jsonable_encoder(extra))
         return out
 
-    binding, reason = _binding_for(intent_id, bindings)
+    if historical:
+        binding, reason = _binding_for(intent_id, bindings, valid_at=at, known_at=known)
+    else:
+        binding, reason = _binding_for(intent_id, bindings)
     if binding is None:
         return result(Outcome.INCONCLUSIVE, [reason], status="unknown")
+    if historical:
+        goals = _goal_entries(binding)
     if binding.gaps:  # before any TMF921 call or telemetry read
         return result(Outcome.INCONCLUSIVE, _gap_reasons(binding), status="unknown")
     try:
         metric_map = load_metric_map() if metric_map is None else metric_map
     except ValueError:
         return result(Outcome.INCONCLUSIVE, ["invalid binding"], status="unknown")
-    client = client or Tmf921Client()
-    try:
-        doc = client.get_intent(intent_id)
-        ok = _bounds_match(doc, binding)
-    except ClientInputError:
-        return result(Outcome.INCONCLUSIVE, ["invalid binding"], status="unknown")
-    except Exception as exc:  # Tmf921Error and anything unexpected: no server text
-        log_fault(log, exc, "intent server unavailable")
-        return result(Outcome.INCONCLUSIVE, ["intent server unavailable"])
-    if not ok:
-        reasons, changes = _goal_changes(doc, binding)
-        return result(Outcome.INCONCLUSIVE, reasons, status="unknown", changes=changes)
+    if not historical:
+        client = client or Tmf921Client()
+        try:
+            doc = client.get_intent(intent_id)
+            ok = _bounds_match(doc, binding)
+        except ClientInputError:
+            return result(Outcome.INCONCLUSIVE, ["invalid binding"], status="unknown")
+        except Exception as exc:  # Tmf921Error and anything unexpected: no server text
+            log_fault(log, exc, "intent server unavailable")
+            return result(Outcome.INCONCLUSIVE, ["intent server unavailable"])
+        if not ok:
+            reasons, changes = _goal_changes(doc, binding)
+            return result(Outcome.INCONCLUSIVE, reasons, status="unknown", changes=changes)
 
-    life = doc.get("lifecycleStatus") if isinstance(doc, dict) else None
-    if life != "ACTIVE":  # before any telemetry is read; server text is never echoed
-        known = life if life in ("ACKNOWLEDGED", "SUSPENDED", "TERMINATED") else "unknown"
-        return result(Outcome.INCONCLUSIVE, ["intent not active"], status=known)
+        life = doc.get("lifecycleStatus") if isinstance(doc, dict) else None
+        if life != "ACTIVE":  # before any telemetry is read; server text is never echoed
+            known_life = life if life in ("ACKNOWLEDGED", "SUSPENDED", "TERMINATED") else "unknown"
+            return result(Outcome.INCONCLUSIVE, ["intent not active"], status=known_life)
 
     per, reasons, envs, outcomes = [], [], [], set()
     for uri, bound in binding.bounds.items():
