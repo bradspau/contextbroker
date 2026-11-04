@@ -49,8 +49,9 @@ structure below by a strangler migration.
 | LQM, System 1 / investigation models, state reconciliation, syslog parsing | Stubs |
 | Redpanda, Qdrant, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 928 tests passing plus 15 live TMF921 tests that are skipped
-unless `TMF921_LIVE=1` (`pytest`). The work is on the `fullnetwork` branch
+The test suite has 1211 tests passing and 23 skipped (`pytest`): 15 live TMF921 tests, skipped
+unless `TMF921_LIVE=1`, and 8 real-engine Fuseki parity tests, skipped unless
+`FUSEKI_PARITY_URL` is set (see [Running the tests](#running-the-tests)). The work is on the `fullnetwork` branch
 (pushed to GitHub) and has not been reviewed by anyone else.
 
 ## Demo status
@@ -111,10 +112,12 @@ python -m ingestion.telemetry_simulator --hsi          # or --hsi-breach for lat
 - After any Degraded evaluation the TMF921 server replaces the failed goal in the
   intent with the value it observed (its best-effort proposal, by design). It does
   not mark the change and keeps no copy of the original, so the goal recorded when
-  the intent was bound is the only record of what was asked for. The broker reports
+  the intent was bound is the only record of what was asked for (the graph keeps it as a
+  goal fluent with its valid and recorded times). The broker reports
   the difference as `inconclusive` and does not judge the cause. To assess again
   the intent must be re-created (new id) and bound again; `bind_intent --replace`
-  on the same intent pins the changed goal.
+  on the same intent closes the old goal and pins the changed one (the original stays in
+  the graph as a closed goal, which a past `assess` can still read).
 - A current-moment `tmf921` `failure` says only "goal not met": the server's
   JSON reason (`40.535 ms < 25 ms: FAIL`) names no metric. The failing condition
   is only in its TR290 report (`icm:about bbf:Lat_Check`). The past-question
@@ -223,7 +226,7 @@ The solution has two graphs that are **not** merged, queried together or kept in
 | Dataset | `network-dataset` | a TDB2 store at `/app/tdb2-data` |
 | Persistence | Docker volume `fuseki-data` (TDB2), survives restarts | Docker volume `tdb2-tmf921`, survives restarts |
 | Ontology | our own small one in `ontologies/tbox/topology.ttl` | the licensed TM Forum TIO ontology (never in this repo) |
-| Holds | resources and service bindings (devices, interfaces, topology links) | service intents (e.g. HSI bandwidth and latency) and their reports |
+| Holds | resources and service bindings (devices, interfaces, topology links), with the history of each goal, placement and link | service intents (e.g. HSI bandwidth and latency) and their reports |
 | Broker access | direct SPARQL | REST only |
 | Used by | the neighbours query and the bindings | `source: "tmf921"` (the only source) |
 
@@ -231,7 +234,10 @@ Intents live only in the TMF921 graph. The network graph holds the devices, inte
 topology links, and is connected to an intent by a binding. A
 binding lives in the network graph as a `:ServiceBinding` resource (written with
 `python -m ingestion.bind_intent`) that maps a TMF921 intent and metric URI to a device,
-an interface and a pinned goal. There is no other source of bindings: with no binding
+an interface and a pinned goal. The goal, the placement and each topology link's interface pair
+are kept as versions with a valid time and a knowledge time (see
+[`design/bitemporal-fluents.md`](design/bitemporal-fluents.md)), so the graph can answer what
+was in force at a past time and what the broker knew then. There is no other source of bindings: with no binding
 in the network graph an assess of that intent is `inconclusive`.
 `data_contracts/metric_map.json` maps metric URIs to metric names. Nothing yet answers "which interfaces
 carry this service" from a graph.
@@ -336,18 +342,35 @@ Turtle file to Fuseki's Graph Store endpoint (`/network-dataset/data`) with basi
 as user `admin` and the password in the `FUSEKI_ADMIN_PASSWORD` environment variable.
 There is no default: the loader exits naming the variable when it is unset.
 `python -m ingestion.load_ontologies` (options `--tbox-dir`, `--shacl-dir`,
-`--abox-dir`, `--endpoint`) validates then loads `ontologies/tbox/*.ttl` and the bindings in `ontologies/abox/*.ttl`. The legacy
+`--abox-dir`, `--endpoint`) validates then loads `ontologies/tbox/*.ttl` and the ABox files in `ontologies/abox/*.ttl`. The legacy
 `python seed_graph.py [ttl] [endpoint]` still works as a shim and loads a single
-file without SHACL validation.
+file without SHACL validation (the schema only; it does not load the demo topology).
 
-Only allow-listed TBox files load, which today is `topology.ttl`. A licensed file
-copied into `ontologies/tbox` is refused before anything loads.
+Only allow-listed TBox files load, which today is `topology.ttl`, and the TBox is
+schema only (no individuals). A licensed file copied into `ontologies/tbox` is refused
+before anything loads.
+
+An ABox file loads only if it is `topology-demo.ttl` (the static allow-list) or its first
+line is exactly `# written by ingestion.bind_intent`, the marker `bind_intent` writes. Any
+other file in `ontologies/abox` is refused before validation, with nothing loaded, and the
+refusal names file names only. `topology-demo.ttl` is tracked in git (a `.gitignore`
+negation); every other ABox file is untracked.
 
 A store that was loaded before the old graph intent path was removed still holds its
 triples. `ontologies/migrations/001-retire-operational-intent.ru` removes them. Run it
 once per store, only with the operator's go-ahead: it deletes triples from the live
 network graph. The ontology loader only adds triples, so reloading the new
 `topology.ttl` does not remove them.
+
+A store that was loaded before bindings and links became versioned (Phase 2) still holds
+the old shape: `:pinnedBound` and `:onInterface` on each binding and `:hasInterface` on the
+link. `ontologies/migrations/002-bitemporal-fluents.ru` converts it in one request: each
+binding gets a goal and a placement version and the link gets a link version, all valid and
+recorded from the moment it runs, and the old triples are removed. Run it once per store,
+only with the operator's go-ahead, with the triple counts checked before and after. The
+runbook, the pre-flight query and the count formula are in
+[`design/bitemporal-fluents.md`](design/bitemporal-fluents.md); the credentialed in-container
+update shape is in [`design/fuseki-auth.md`](design/fuseki-auth.md).
 
 ### `ingestion/telemetry_simulator.py`
 
@@ -592,9 +615,19 @@ source venv/bin/activate
 python -m ingestion.load_ontologies
 ```
 
-Validates against `ontologies/shacl` and loads `ontologies/tbox/topology.ttl` and any bindings in `ontologies/abox/`: the topology link between `Router-A`/`GigabitEthernet0/0/0`
-and `Router-B`/`GigabitEthernet0/0/1`. Export `FUSEKI_ADMIN_PASSWORD` first (see
-[The Fuseki credential](#the-fuseki-credential)).
+Validates against `ontologies/shacl` and loads the schema `ontologies/tbox/topology.ttl` and
+the ABox files in `ontologies/abox/`. The demo topology is
+`ontologies/abox/topology-demo.ttl`: the two interfaces `Router-A`/`GigabitEthernet0/0/0` and
+`Router-B`/`GigabitEthernet0/0/1` and the link between them, held as a link version valid from
+2026-11-05. `python seed_graph.py` loads the schema only. Export `FUSEKI_ADMIN_PASSWORD` first
+(see [The Fuseki credential](#the-fuseki-credential)).
+
+> **A store from before Phase 2 needs migration 002 instead.** The demo file is for a fresh
+> store. Loading it into a store that still has the old link shape, or that migration 002
+> already converted, gives the link a second open version. Convert the old store with
+> `ontologies/migrations/002-bitemporal-fluents.ru` (see
+> [`design/bitemporal-fluents.md`](design/bitemporal-fluents.md) and the in-container
+> credentialed update in [`design/fuseki-auth.md`](design/fuseki-auth.md)).
 
 > **Note: the network graph is persistent.** Fuseki stores it in TDB2 on the
 > `fuseki-data` volume, so the loaded ontology survives container restarts and
@@ -677,9 +710,15 @@ or interface, whether or not an intent covers it. `assess_intent` is the tool fo
 |---|---|---|
 | What were the min, max and last values of a metric on an interface? | `GET /context/metric-history?device=&interface=&metric_type=&time_window=[&as_of=]` | `query_metric_history` |
 | Which interfaces of a device had a non-zero value (e.g. `input_drops`)? | `GET /context/interfaces-nonzero?device=&metric_type=&time_window=[&as_of=&limit=]` | `query_interfaces_with_nonzero` |
-| What is at the other end of this interface's links? | `GET /context/neighbours?device=&interface=` | `query_interface_neighbours` |
+| What is at the other end of this interface's links? | `GET /context/neighbours?device=&interface=[&as_of=&known_at=]` | `query_interface_neighbours` |
 
-- `time_window` and `as_of` use the same `5m`/`1h` format as above (`as_of` up to 30 days).
+- `time_window` and `as_of` use the same `5m`/`1h` format as above (`as_of` up to the retention
+  period, 30 days by default; see [Asking about the past](#asking-about-the-past)).
+- `neighbours` also takes `as_of` (the links valid then) and `known_at` (the links as the broker
+  knew them then; the latest record when omitted). Both are offsets back from now. The result
+  adds `valid_at` and `known_at` only when one was given. An interface in the graph with no link
+  valid at that time is an empty list, not missing; one that is not in the graph is
+  `quality.missing`.
 - **No data is never zero.** An interface or device with no samples in the window is
   `quality.missing`, not an empty "none had drops". An unknown interface in the
   topology graph is `quality.missing`; a known one with no links has an empty list.
@@ -689,7 +728,8 @@ or interface, whether or not an intent covers it. `assess_intent` is the tool fo
 - `interfaces-nonzero` counts a negative value as non-zero, sorts worst first, and
   returns at most `limit` (default 50, maximum 200) with `truncated` set when cut.
 - Neighbours are the **declared** topology in Fuseki (state `configured`), not
-  discovered state, and the graph currently holds only the Router-A/Router-B link.
+  discovered state, and the graph currently holds only the Router-A/Router-B link. The
+  other three queries are unchanged: they take no `known_at`.
 - Metric history and non-zero queries read the telemetry's metric names
   (`interface_metrics_<metric_type>`), so they cover whatever the simulator or a real
   feed writes there.
@@ -697,38 +737,59 @@ or interface, whether or not an intent covers it. `assess_intent` is the tool fo
 ## Asking about the past
 
 `assess_intent` (REST `POST /context/assess`, the MCP tool and the agent tool) takes
-two optional arguments. With neither, the assessment is a current one.
+three optional arguments: `as_of`, `mode` and `known_at`. With none of them, the assessment is a
+current one.
 
 | Question | Arguments |
 |---|---|
 | Was it compliant 10 minutes ago? | `{"time_window":"2m","as_of":"10m"}` (mode `at`) |
 | Was it ever non-compliant in the last 30 minutes? | `{"time_window":"30m","mode":"within"}` |
 | Was it ever non-compliant in the 5 minutes ending 8 minutes ago? | `{"time_window":"5m","as_of":"8m","mode":"within"}` |
+| What did the broker know, an hour ago, about the goal in force 10 minutes ago? | `{"time_window":"2m","as_of":"10m","known_at":"1h"}` |
 
-- `as_of` is an offset back from now (`90s`, `10m`, `2h`, `1d`), up to 30 days.
+- `as_of` is an offset back from now (`90s`, `10m`, `2h`, `1d`), up to the retention period.
+  `known_at` is an offset in the same form: the moment whose knowledge to use (the latest
+  record when omitted). Both are limited by `BROKER_RETENTION_PERIOD` (digits then `h` or `d`,
+  at least `1d`, default `30d`; set it in `.env`, see `.env.example`). The one variable feeds
+  VictoriaMetrics' `-retentionPeriod` and the API's limit, so the API never accepts a time the
+  store has already dropped. A request beyond it is refused (HTTP 400,
+  `as_of is further back than the retention period`; for `known_at` the text names `known_at`).
+  A bad value stops the API at start-up.
 - `at` (the default when `as_of` is set) uses the latest sample at that moment. It
   must be fresh relative to that moment, not to now, so a reading from 10 minutes ago
   is judged on how old it was then. `time_window` is how far before that moment to look.
 - `within` takes the worst case over `time_window` ending then. The worst case depends
   on the intent's operator: the maximum for `<` and `<=`, the minimum for `>` and `>=`,
   and for `==` both extremes, so a sample on either side of the target counts.
-- The response adds `mode`, `as_of`, `evaluated_at` (the moment it describes) and
-  `requirement`. The requirement is always the intent's **current** definition: the
-  TMF921 server keeps no history, so if the goal changed since then, the past answer is
-  judged against today's goal.
-- A historical assessment never updates the intent's current fulfilment state.
-- The broker reads the goals now
-  from the TMF921 intent (after the same changed-goal check against the pinned binding, so
-  a changed goal is `inconclusive`), takes each goal's direction from the
-  `operator` in `data_contracts/metric_map.json` (latency, jitter, packet loss `<`;
-  bandwidths `>=`; verified live against the server on 2026-10-28, not read from
-  each intent) and judges
-  the past telemetry itself. The TMF921 server keeps no history and is never asked
-  about the past: nothing is pushed, no high-water mark is written and the stored
-  outcome is not updated. `requirement` says "goals read now from the TMF921 intent
-  (no history is kept)", `per_interface` has one entry per goal metric (`condition`
+- The response adds `mode`, `as_of`, `evaluated_at` (the moment it describes),
+  `requirement`, `goals` and `known_at`. A past question (any `as_of` or `known_at`) is judged
+  against the **goal and placement in force at that time**, as the broker had recorded them at
+  `known_at`, read from the network graph's versions. `goals` lists each goal used:
+  `{"metric": "LatencyMetric", "value": 100.0, "valid_from": ..., "valid_to": ...}` (numbers,
+  times and pinned metric names only; `valid_to` is null while the goal is open). `known_at` is
+  the knowledge instant used (the request time when none was given). `requirement` is the fixed
+  string `goal in force at the requested time, as recorded in the network graph`. A current
+  question keeps its own fixed requirement string and has no `goals` or `known_at`.
+- A correction changes the answer: if a placement was wrong and was corrected, the same `as_of`
+  with a `known_at` before the correction joins the old interface and with a `known_at` after it
+  joins the corrected one. The superseded record is never deleted.
+- **No goal in force is `inconclusive`, never `success`.** A time before the graph recorded the
+  goal (for example before migration 002, which starts history at the moment it ran), or any other
+  uncovered time, gives `inconclusive` with the fixed reason `no goal in force: <Metric>` or
+  `no placement in force: <Metric>`, and nothing is judged. With `mode: "within"`, a goal or
+  placement that started inside the window is `inconclusive` too:
+  `goal not in force for the whole window: <Metric>` or
+  `placement not in force for the whole window: <Metric>`, because samples before the change
+  would be judged against a later goal.
+- A historical assessment never updates the intent's current fulfilment state. The broker takes
+  each goal's direction from the `operator` in `data_contracts/metric_map.json` (latency, jitter,
+  packet loss `<`; bandwidths `>=`; verified live against the server on 2026-10-28, not read from
+  each intent) and judges the past telemetry itself. The TMF921 server is never asked about
+  the past, not even for the intent's lifecycle, so a terminated intent can still be asked about
+  (`intent_status` is `unknown`): nothing is pushed, no high-water mark is written and the stored
+  outcome is not updated. `per_interface` has one entry per goal metric (`condition`
   is the metric's short name), and one failing metric fails the whole intent.
-- Data must still be in VictoriaMetrics (default retention is about a month); with no
+- Telemetry must still be in VictoriaMetrics (within the retention period); with no
   sample in the period the result is `inconclusive` ("missing observation"), never `success`.
 - A current assess (neither argument) judges the latest sample in the window. Use
   `mode: "within"` for an operator-aware worst case over the whole window.
@@ -757,16 +818,33 @@ into an image).
    The helper is for the demo only; the broker has no create call.
 4. Bind the intent to an interface. In this broker a "goal" is one metric together with its limit (for example latency under 20 ms); the TMF921 specification groups an intent's expectations as requirements, goals and constraints, and does not define the limit's name. This reads the intent's current goals from
    the TMF921 server, checks the interface exists in the network graph, validates
-   the binding against the SHACL shapes, writes `ontologies/abox/<intent_id>.ttl`
-   and loads it into Fuseki, so the pinned values come from the server and are
-   not typed by hand:
+   the new versions against the SHACL shapes, and applies them to Fuseki as **one** SPARQL
+   update, so the pinned values come from the server and are not typed by hand:
    `python -m ingestion.bind_intent <intent_id> --place LatencyMetric=olt1/pon0`
    Use one `--place <MetricShortName>=<device>/<interface>` per metric in the intent
-   (the short name is the part of the metric URI after `#`). `--write-only` writes the
-   file without loading it. If the intent already has a binding in the graph the tool
-   refuses unless you pass `--replace`, which writes the new file, then removes the old
-   binding from Fuseki, then loads the new one. If that load fails the intent has no
-   binding until the file is loaded again. `--replace` pins whatever goal the server
+   (the short name is the part of the metric URI after `#`). The file
+   `ontologies/abox/<intent_id>.ttl` (it starts with the line `# written by
+   ingestion.bind_intent`) is written only **after** Fuseki has confirmed the update, so it never
+   gets ahead of the graph; it holds only this run's new versions. `--write-only` writes the
+   file and applies nothing; a file written for `--replace` or `--correct` must then be applied
+   by running `bind_intent` again, because loading it with `load_ontologies` would add an open
+   version without closing the old one. History is kept, nothing is deleted:
+   - A new intent is bound without a flag. If the intent already has a binding the tool
+     refuses unless you pass `--replace` or `--correct` (never both).
+   - `--replace` means the goal changed. The old goal is closed at the run's instant and the new
+     one opens, in the same update, so a failed update leaves the previous binding in place.
+     `--valid-from YYYY-MM-DDTHH:MM:SSZ` (only with `--replace`) states when the goal really
+     changed, earlier than the run; the old record is superseded and reissued ending then.
+   - `--correct` means the earlier record was wrong. The old version is kept and marked
+     superseded, and the corrected one carries the same valid interval, so "what did the broker
+     know at K" still returns the old value for a K before the correction.
+   - If nothing differs, the tool exits 0 with `Nothing changed: the binding already matches
+     the intent.` and writes nothing.
+   - A metric the binding holds that the intent no longer has is refused
+     (`the intent no longer has <Metric>; bind it under a new intent id`): a metric cannot be
+     dropped.
+
+   `--replace` pins whatever goal the server
    currently holds, so never use it on an intent that reported "goal changed"
    (or "intent goal unreadable"); create a new intent instead. The broker's only record
    of the requested goal is this pin: the server rewrites a failed goal in place
@@ -775,7 +853,7 @@ into an image).
    now 40.535`, and `goal_changes` in the result), says "goal set changed" if the
    metric set differs, and does not judge the cause; the verdict stays `inconclusive`.
    "intent goal unreadable" remains only for goals the broker cannot read.
-   The tool refuses, writing and loading nothing, if the
+   The tool refuses, writing and applying nothing, if the
    goals cannot be read, a metric has no placement or no metric-map entry, or the
    interface is not in the topology. The metric map
    (`data_contracts/metric_map.json`, `METRIC_MAP_PATH`) maps the five HSI metrics to
@@ -814,7 +892,7 @@ A marker for such a change would have to come from the intent server. Re-create 
 bind the new id. Do not use `bind_intent --replace` on an intent that reported a changed goal: it
 re-pins whatever goal the server now holds, which is the changed one (verified
 live: the latency limit 25 became the observed 40.535 and `--replace` pinned
-40.535 without a warning). Per-intent locks and high-water marks are in-process, so
+40.535 without a warning; the original 25 stays in the graph as the closed goal). Per-intent locks and high-water marks are in-process, so
 run a single broker process. Observations pushed by other clients are invisible to the broker.
 
 Known behaviours / troubleshooting:
@@ -844,6 +922,17 @@ Docker required to run the suite:
 
 ```bash
 pytest tests/ -v
+```
+
+`tests/test_fuseki_parity.py` runs the real bind, resolve, neighbours and migration-002 code
+against a real Fuseki 6.1.0, which the mocks cannot show (one update request is one
+transaction; the engine's time comparison). It is skipped unless `FUSEKI_PARITY_URL` is set
+to a **throwaway** dataset URL on 127.0.0.1 or localhost, and it refuses the persistent store
+(port 3030 and `network-dataset`) before sending anything. Its module docstring has the exact
+throwaway-container command; the test uses the dummy credential `parity0`, never the real one:
+
+```bash
+FUSEKI_PARITY_URL=http://127.0.0.1:3939/parity-dataset venv/bin/python -m pytest -q tests/test_fuseki_parity.py
 ```
 
 ## Shutting down

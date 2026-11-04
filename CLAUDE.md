@@ -1,8 +1,8 @@
 # Context Broker
 
 ## Commands
-- `venv/bin/python -m pytest -q` - full suite (928 pass, 15 skipped); live TMF921 tests need `TMF921_LIVE=1`
-- `python -m ingestion.bind_intent <intent_id> --place <Metric>=<device>/<interface> ...` - write a `:ServiceBinding`; `--replace` on an intent whose goal changed re-pins the changed goal
+- `venv/bin/python -m pytest -q` - full suite (1211 pass, 23 skipped); live TMF921 tests need `TMF921_LIVE=1`, the real-engine parity tests need `FUSEKI_PARITY_URL`
+- `python -m ingestion.bind_intent <intent_id> --place <Metric>=<device>/<interface> ...` - write a `:ServiceBinding` as goal and placement fluents in one SPARQL update; on an existing binding pass `--replace` (the goal changed: close the old goal, open the new) or `--correct` (the earlier record was wrong: keep it, mark it superseded), never both; `--replace --valid-from YYYY-MM-DDTHH:MM:SSZ` says when the goal really changed. Nothing is deleted, and `--replace` on an intent whose goal changed re-pins the changed goal (the original stays as a closed goal)
 - `scripts/create_demo_intent.sh <ttl>` - create and activate a TMF921 demo intent (intents are never evaluated until ACTIVE)
 - `docker start fuseki victoriametrics tmf921-server` - start the demo stack; `docker compose up -d contextbroker-api` then `docker network connect contextbroker-arch_default contextbroker-api` (lost on recreate, bead contextbroker-i2q). Never `docker compose down -v` (deletes Fuseki data)
 - `tmf921-server` belongs to compose project `contextbroker-arch`; restart it with `docker restart tmf921-server`
@@ -40,7 +40,10 @@
 
 ## Gotchas
 - TMF921 server evaluates latency, jitter and packet loss with strict `<`; bandwidth with `>=` (`data_contracts/metric_map.json`).
-- After a Degraded evaluation the server replaces the failed goal with the observed value (Flow 3) and keeps no original; the goal pinned in the graph is the only record.
+- After a Degraded evaluation the server replaces the failed goal with the observed value (Flow 3) and keeps no original; the goal pinned in the graph (a goal fluent with its valid and recorded times) is the only record.
+- Fluent times are `:validStart`/`:validEnd` (not `:validFrom`/`:validTo`) because migration 001 deletes every triple with those two predicates. `assess` and `neighbours` take `as_of` and `known_at` offsets, limited by `BROKER_RETENTION_PERIOD` (default `30d`, digits then `h` or `d`).
+- ABox files load only with the `# written by ingestion.bind_intent` first line or by the static allow-list (`topology-demo.ttl`). `ontologies/abox/topology-demo.ttl` is tracked through a `.gitignore` negation and is for fresh stores only; a store from before Phase 2 needs `ontologies/migrations/002-bitemporal-fluents.ru` (one-way, run only after the operator's go-ahead; runbook in `design/bitemporal-fluents.md`).
+- `tests/test_fuseki_parity.py` needs `FUSEKI_PARITY_URL` (a throwaway dataset on 127.0.0.1 or localhost) and refuses port 3030 and `network-dataset`; never point it at the persistent store.
 - Fuseki needs host port 3030; another project's container (BBF_921_java) may hold it.
 - `tests/test_bind_intent.py` assumes the query endpoint URL ends in `/query`.
 
