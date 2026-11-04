@@ -1,6 +1,10 @@
 from pathlib import Path
 
+import re
+
 import yaml
+
+from broker_engine.validation import max_as_of_seconds
 
 COMPOSE_PATH = Path(__file__).resolve().parent.parent / "docker-compose.yml"
 
@@ -170,3 +174,26 @@ def test_api_healthcheck_uses_health_route():
     assert "timeout=" in test[3]
     assert "curl" not in repr(test)
     assert (hc["interval"], hc["timeout"], hc["retries"], hc["start_period"]) == ("10s", "5s", 5, "10s")
+
+
+def test_retention_is_one_value_for_victoriametrics_and_the_api():
+    services = yaml.safe_load(COMPOSE_PATH.read_text())["services"]
+    vm = services["victoriametrics"]
+    assert vm["command"] == ["-retentionPeriod=${BROKER_RETENTION_PERIOD:-30d}"]
+    assert vm["ports"] == ["127.0.0.1:8428:8428"]
+    assert vm["volumes"] == ["vm-data:/victoria-metrics-data"]
+
+    api_env = services["contextbroker-api"]["environment"]
+    api_item = "BROKER_RETENTION_PERIOD=${BROKER_RETENTION_PERIOD:-30d}"
+    assert api_item in api_env
+
+    pattern = re.compile(r"\$\{BROKER_RETENTION_PERIOD:-([^}]*)\}")
+    vm_default = pattern.search(vm["command"][0]).group(1)
+    api_default = pattern.search(api_item).group(1)
+    assert vm_default == api_default
+    assert max_as_of_seconds({"BROKER_RETENTION_PERIOD": api_default}) == 2592000
+
+    for name, svc in services.items():
+        if name in ("victoriametrics", "contextbroker-api"):
+            continue
+        assert "BROKER_RETENTION_PERIOD" not in repr(svc), name

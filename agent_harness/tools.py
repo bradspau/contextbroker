@@ -72,7 +72,7 @@ TIME_WINDOW = {
 AS_OF = {
     "type": "string",
     "pattern": r"^[0-9]+[smhd]$",
-    "description": 'Evaluate as of this long ago, e.g. "10m" for "10 minutes ago" (up to 30d). Omit for now.',
+    "description": 'Evaluate as of this long ago, e.g. "10m" for "10 minutes ago" (no further back than the telemetry retention). Omit for now.',
 }
 
 TOOLS = [

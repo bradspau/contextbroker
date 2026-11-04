@@ -6,6 +6,9 @@ services:
       - "127.0.0.1:8428:8428"
     volumes:
       - vm-data:/victoria-metrics-data
+    # One value feeds this flag and the API's as_of limit (BROKER_RETENTION_PERIOD below).
+    # A unit (h or d) is required: a bare number means months to VictoriaMetrics.
+    command: ["-retentionPeriod=${BROKER_RETENTION_PERIOD:-30d}"]
     restart: unless-stopped
 
   fuseki:
@@ -69,6 +72,7 @@ services:
       - BROKER_JWT_PUBLIC_KEY_FILE=/run/secrets/broker_jwt_public.pem
       - BROKER_JWT_ISSUER=${BROKER_JWT_ISSUER:-}
       - BROKER_JWT_AUDIENCE=${BROKER_JWT_AUDIENCE:-context-broker}
+      - BROKER_RETENTION_PERIOD=${BROKER_RETENTION_PERIOD:-30d}
     # The API verifies bearer tokens with a public key only. An unset HOST_BROKER_JWT_PUBLIC_KEY
     # mounts an empty file: the API starts and refuses every /context/* call (no key configured).
     volumes:

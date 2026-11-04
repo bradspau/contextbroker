@@ -8,7 +8,7 @@ from broker_engine import assess as assess_mod
 from broker_engine.assess import assess_intent
 from broker_engine.temporal import temporal_observation
 from broker_engine.tsdb_joiner import join_observed_metric
-from broker_engine.validation import ClientInputError, MAX_AS_OF_S, window_seconds
+from broker_engine.validation import ClientInputError, max_as_of_seconds, window_seconds
 from data_contracts.envelope import ContextEnvelope, Quality, StateCategory
 from outcome_assurance.evaluate import Outcome, evaluate_intent
 
@@ -31,8 +31,13 @@ def test_window_seconds():
     assert window_seconds("0s", "as_of") == 0
 
 
+@pytest.fixture(autouse=True)
+def _default_retention(monkeypatch):
+    monkeypatch.delenv("BROKER_RETENTION_PERIOD", raising=False)
+
+
 @pytest.mark.parametrize("bad", ["PT10M", "10", "m", "-5m", "10m\n", "1.5h", "", "10 m",
-                                 f"{MAX_AS_OF_S + 1}s", "99999d"])
+                                 f"{max_as_of_seconds() + 1}s", "99999d"])
 def test_window_seconds_rejects(bad):
     with pytest.raises(ClientInputError):
         window_seconds(bad, "as_of")
@@ -150,7 +155,7 @@ def test_within_equals_unusable_evidence_is_inconclusive_not_success():
 
 
 @pytest.mark.parametrize("kw", [{"as_of": "PT10M"}, {"as_of": "10"}, {"mode": "recent"},
-                                {"mode": "AT"}, {"as_of": f"{MAX_AS_OF_S + 1}s"}])
+                                {"mode": "AT"}, {"as_of": f"{max_as_of_seconds() + 1}s"}])
 def test_bad_temporal_arguments_are_client_errors(kw):
     join = _join_by_agg({"last": 0.0})
     with patch.object(assess_mod, "assess_via_tmf921") as push, \
@@ -184,12 +189,57 @@ def test_tmf921_source_routes_temporal_arguments():
     assert [c.kwargs["mode"] for c in t.call_args_list] == [None, "within"]
 
 
+# ---------- retention (TEMP-07) ----------
+@pytest.mark.parametrize("env,expected", [({}, 2592000), ({"BROKER_RETENTION_PERIOD": ""}, 2592000),
+                                          ({"BROKER_RETENTION_PERIOD": "48h"}, 172800),
+                                          ({"BROKER_RETENTION_PERIOD": "30d"}, 2592000),
+                                          ({"BROKER_RETENTION_PERIOD": "24h"}, 86400)])
+def test_max_as_of_seconds_accepts(env, expected):
+    assert max_as_of_seconds(env) == expected
+
+
+@pytest.mark.parametrize("bad", ["30", "30m", "12h", "1w", "30d\n", "-1d", "d", "0d", "30s", "1.5d"])
+def test_max_as_of_seconds_rejects_without_echoing_the_value(bad):
+    with pytest.raises(ValueError) as exc:
+        max_as_of_seconds({"BROKER_RETENTION_PERIOD": bad})
+    # The message is one fixed string that names the variable; it never carries the value.
+    assert str(exc.value) == ("BROKER_RETENTION_PERIOD must be digits then h or d, "
+                              "at least 1d, for example 30d")
+
+
+def test_over_limit_reason_is_fixed_and_never_echoes_the_value():
+    with pytest.raises(ClientInputError) as exc:
+        window_seconds("2592001s", "as_of")
+    assert str(exc.value) == "as_of is further back than the retention period"
+    with pytest.raises(ClientInputError) as exc:
+        window_seconds("99999d", "known_at")
+    assert str(exc.value) == "known_at is further back than the retention period"
+    assert window_seconds("2592000s", "as_of") == 2592000
+
+
+def test_window_limit_follows_the_retention_variable(monkeypatch):
+    monkeypatch.setenv("BROKER_RETENTION_PERIOD", "48h")
+    assert window_seconds("47h", "as_of") == 47 * 3600
+    with pytest.raises(ClientInputError):
+        window_seconds("3d", "as_of")
+
+
+def test_over_retention_as_of_is_refused_before_any_upstream_call():
+    with patch.object(assess_mod, "assess_via_tmf921") as push, \
+            patch.object(assess_mod, "assess_tmf921_as_of") as asof:
+        with pytest.raises(ClientInputError):
+            assess_intent("i1", "5m", as_of="31d")
+    push.assert_not_called()
+    asof.assert_not_called()
+
+
 # ---------- plumbing ----------
 def test_agent_tool_declares_and_validates_temporal_arguments():
     import json
     from agent_harness import tools
     props = next(t for t in tools.TOOLS if t["name"] == "assess_intent")["input_schema"]["properties"]
     assert props["mode"]["enum"] == ["at", "within"] and "10m" in props["as_of"]["description"]
+    assert "30d" not in props["as_of"]["description"]
     assert "as_of" in tools.SYSTEM_PROMPT and "evaluated_at" in tools.SYSTEM_PROMPT
     with patch.object(tools, "assess_intent", return_value={"verdict": "success"}) as a:
         content, is_err = tools.execute_tool(
