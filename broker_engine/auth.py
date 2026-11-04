@@ -48,14 +48,15 @@ class AuthConfig:
     audience: str
 
 
-# (path, st_mtime_ns, st_size) -> key bytes; a rewritten key file changes the stat and is re-read.
-_key_cache: dict[tuple[str, int, int], bytes] = {}
+# (path, st_mtime_ns, st_size, st_ino, st_ctime_ns) -> key bytes; a rewritten or replaced key file
+# changes the stat and is re-read.
+_key_cache: dict[tuple[str, int, int, int, int], bytes] = {}
 
 
 def _read_key_file(path: str) -> bytes | None:
     try:
         st = os.stat(path)
-        stamp = (path, st.st_mtime_ns, st.st_size)
+        stamp = (path, st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
         if stamp in _key_cache:
             return _key_cache[stamp]
         if not Path(path).is_file():
