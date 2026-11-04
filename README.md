@@ -538,7 +538,13 @@ mkdir -p ~/keys && chmod 700 ~/keys
 openssl ecparam -name prime256v1 -genkey -noout -out ~/keys/broker_jwt_private.pem
 chmod 600 ~/keys/broker_jwt_private.pem
 openssl ec -in ~/keys/broker_jwt_private.pem -pubout -out ~/keys/broker_jwt_public.pem
+chmod 644 ~/keys/broker_jwt_public.pem
 ```
+
+The API container runs as uid 10001 and reads the bind-mounted public key, so the public
+key file must be readable by others (mode 644; it is not a secret). With mode 600 the API
+cannot read it, logs `authentication refused: not configured` and answers every
+`/context/*` call with `401`, even for a valid token.
 
 Point compose at the public key and name the issuer in `.env` (`HOST_BROKER_JWT_PUBLIC_KEY`
 and `BROKER_JWT_ISSUER`; the private key never goes in `.env` or the repository), apply
