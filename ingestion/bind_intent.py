@@ -15,13 +15,15 @@ from pathlib import Path
 
 import requests
 
-from broker_engine.sparql_resolver import FUSEKI_QUERY_ENDPOINT
+from broker_engine.sparql_resolver import FUSEKI_QUERY_ENDPOINT, fuseki_auth
 from broker_engine.validation import REQUEST_TIMEOUT_S, ClientInputError
 from data_contracts.metric_map import _check_token, check_uri, load_metric_map
 from ingestion.load_ontologies import (
     DEFAULT_ABOX_DIR,
     DEFAULT_DATA_ENDPOINT,
     DEFAULT_SHACL_DIR,
+    MissingCredential,
+    fuseki_credentials,
     load_ttl_to_fuseki,
     validate_shapes,
 )
@@ -119,7 +121,7 @@ def find_interface(device: str, iface: str, query_endpoint: str) -> str:
     """
     resp = requests.post(query_endpoint, data={"query": sparql},
                          headers={"Accept": "application/sparql-results+json"},
-                         timeout=REQUEST_TIMEOUT_S)
+                         auth=fuseki_auth(), timeout=REQUEST_TIMEOUT_S)
     resp.raise_for_status()
     try:
         rows = resp.json()["results"]["bindings"]
@@ -136,7 +138,7 @@ def find_interface(device: str, iface: str, query_endpoint: str) -> str:
 def _post_sparql(query_endpoint, sparql):
     resp = requests.post(query_endpoint, data={"query": sparql},
                          headers={"Accept": "application/sparql-results+json"},
-                         timeout=REQUEST_TIMEOUT_S)
+                         auth=fuseki_auth(), timeout=REQUEST_TIMEOUT_S)
     resp.raise_for_status()
     try:
         return resp.json()["results"]["bindings"]
@@ -153,9 +155,13 @@ def binding_exists(intent_id: str, query_endpoint: str) -> bool:
     return bool(rows)
 
 
-def delete_bindings(intent_id: str, update_endpoint: str, auth=("admin", "admin")) -> None:
-    """Delete every :ServiceBinding node for the intent, with all its triples."""
+def delete_bindings(intent_id: str, update_endpoint: str, auth=None) -> None:
+    """Delete every :ServiceBinding node for the intent, with all its triples.
+
+    With no auth the credential comes from the environment (exit naming the variable if unset)."""
     _check_intent_id(intent_id)
+    if auth is None:
+        auth = fuseki_credentials()
     update = f"""
     PREFIX : <{NS}>
     DELETE {{ ?b ?p ?o }} WHERE {{
@@ -275,6 +281,11 @@ def main(argv=None) -> int:
                     help="replace an existing binding for the intent (deletes the old one "
                          "from Fuseki first; with --write-only nothing is deleted)")
     args = ap.parse_args(argv)
+    try:
+        fuseki_credentials()  # before any network call, including the TMF921 read
+    except MissingCredential as exc:
+        print(f"Refused: {exc}. Nothing was written or loaded.", file=sys.stderr)
+        return 1
     try:
         out, loaded = bind(args.intent_id, args.place, abox_dir=args.abox_dir,
                            write_only=args.write_only, data_endpoint=args.endpoint,

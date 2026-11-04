@@ -26,11 +26,23 @@ import requests
 FUSEKI_QUERY_ENDPOINT = os.environ.get(
     "FUSEKI_QUERY_ENDPOINT", "http://fuseki:3030/network-dataset/query"
 )
+FUSEKI_USER = "admin"
+FUSEKI_PASSWORD_ENV = "FUSEKI_ADMIN_PASSWORD"
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8081"))
 DEFAULT_JSONP_CALLBACK = "_jqjsp"
 # Only allow valid JS identifiers as the callback name — it gets embedded
 # directly in the response as executable JavaScript.
 _SAFE_CALLBACK = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+
+
+def fuseki_auth():
+    """("admin", value) from FUSEKI_ADMIN_PASSWORD, or None when it is unset or empty.
+
+    Read on every call. The value is only ever passed as the requests auth argument;
+    it is never logged or put in a response. Duplicated from the broker on purpose: this
+    image imports nothing from it."""
+    value = os.environ.get(FUSEKI_PASSWORD_ENV, "")
+    return (FUSEKI_USER, value) if value else None
 
 
 class JsonpProxyHandler(BaseHTTPRequestHandler):
@@ -52,6 +64,7 @@ class JsonpProxyHandler(BaseHTTPRequestHandler):
                 FUSEKI_QUERY_ENDPOINT,
                 params={"query": query},
                 headers={"Accept": "application/sparql-results+json"},
+                auth=fuseki_auth(),
                 timeout=10,
             )
             response.raise_for_status()
