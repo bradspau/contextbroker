@@ -15,5 +15,36 @@
     sh:targetClass :ServiceBinding ;
     sh:property [ sh:path :forIntent ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] ;
     sh:property [ sh:path :forMetric ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] ;
-    sh:property [ sh:path :onInterface ; sh:nodeKind sh:IRI ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path :hasGoal ; sh:nodeKind sh:IRI ] ;
+    sh:property [ sh:path :hasPlacement ; sh:nodeKind sh:IRI ] .
+
+# The four times of a fluent. Both intervals are half-open: [validStart, validEnd) and
+# [recordedAt, supersededAt). An open end is an absent triple. Every time carries a zone
+# (Z or an offset) so that comparisons never mix naive and aware values.
+:FluentTimesShape a sh:NodeShape ;
+    sh:property [ sh:path :validStart ; sh:datatype xsd:dateTime ;
+                  sh:pattern "(Z|[+-][0-9]{2}:[0-9]{2})$" ;
+                  sh:minCount 1 ; sh:maxCount 1 ; sh:lessThan :validEnd ] ;
+    sh:property [ sh:path :validEnd ; sh:datatype xsd:dateTime ;
+                  sh:pattern "(Z|[+-][0-9]{2}:[0-9]{2})$" ; sh:maxCount 1 ] ;
+    sh:property [ sh:path :recordedAt ; sh:datatype xsd:dateTime ;
+                  sh:pattern "(Z|[+-][0-9]{2}:[0-9]{2})$" ;
+                  sh:minCount 1 ; sh:maxCount 1 ; sh:lessThan :supersededAt ] ;
+    sh:property [ sh:path :supersededAt ; sh:datatype xsd:dateTime ;
+                  sh:pattern "(Z|[+-][0-9]{2}:[0-9]{2})$" ; sh:maxCount 1 ] .
+
+:GoalFluentShape a sh:NodeShape ;
+    sh:targetClass :GoalFluent ;
+    sh:node :FluentTimesShape ;
     sh:property [ sh:path :pinnedBound ; sh:datatype xsd:double ; sh:minCount 1 ; sh:maxCount 1 ] .
+
+:PlacementFluentShape a sh:NodeShape ;
+    sh:targetClass :PlacementFluent ;
+    sh:node :FluentTimesShape ;
+    sh:property [ sh:path :onInterface ; sh:nodeKind sh:IRI ; sh:minCount 1 ; sh:maxCount 1 ] .
+
+:LinkFluentShape a sh:NodeShape ;
+    sh:targetClass :LinkFluent ;
+    sh:node :FluentTimesShape ;
+    sh:property [ sh:path :ofLink ; sh:nodeKind sh:IRI ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path :hasInterface ; sh:nodeKind sh:IRI ; sh:minCount 2 ; sh:maxCount 2 ] .

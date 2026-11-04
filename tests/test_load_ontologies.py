@@ -26,7 +26,7 @@ def _write(tmp_path, text):
 
 
 def test_load_ontologies_posts_nothing_on_violation(tmp_path):
-    d = _write(tmp_path, _binding(forIntent=False))
+    d = _write(tmp_path, _old_binding(forIntent=False))
     with patch("requests.post") as post:
         with pytest.raises(ValueError, match="forIntent"):
             load_ontologies(d, SHACL_DIR, ENDPOINT, allow=("bad.ttl",))
@@ -72,7 +72,7 @@ BINDING_PREFIXES = """@prefix : <http://example.org/network-ontology#> .
 """
 
 
-def _binding(forIntent=True, forMetric=True, iface=True, pins=('"0.0"^^xsd:double',)):
+def _old_binding(forIntent=True, forMetric=True, iface=True, pins=('"0.0"^^xsd:double',)):
     parts = []
     if forIntent:
         parts.append(':forIntent "intent-1"')
@@ -85,6 +85,63 @@ def _binding(forIntent=True, forMetric=True, iface=True, pins=('"0.0"^^xsd:doubl
     return BINDING_PREFIXES + ":b1 a :ServiceBinding ; " + " ; ".join(parts) + " .\n"
 
 
+IF_A = ":if-router-a-ge000"
+IF_B = ":if-router-b-ge001"
+
+
+def _fluent_binding(
+    *,
+    forIntent=True,
+    forMetric=True,
+    goal=True,
+    placement=True,
+    link=False,
+    goal_start='"2026-01-01T00:00:00Z"^^xsd:dateTime',
+    goal_end=None,
+    goal_recorded='"2026-01-01T00:00:00Z"^^xsd:dateTime',
+    goal_superseded=None,
+    goal_pins=('"0.0"^^xsd:double',),
+    place_iface=(IF_A,),
+    link_ifaces=(IF_A, IF_B),
+    link_of=True,
+):
+    """A fluent-shaped binding file: a binding node plus the fluents it points at."""
+    bparts = []
+    if forIntent:
+        bparts.append(':forIntent "intent-1"')
+    if forMetric:
+        bparts.append(':forMetric "http://example.org/metric/input_drops"')
+    if goal:
+        bparts.append(":hasGoal :g1")
+    if placement:
+        bparts.append(":hasPlacement :p1")
+    text = BINDING_PREFIXES + ":b1 a :ServiceBinding ; " + " ; ".join(bparts) + " .\n"
+    if goal:
+        gparts = [":pinnedBound " + p for p in goal_pins]
+        if goal_start:
+            gparts.append(f":validStart {goal_start}")
+        if goal_recorded:
+            gparts.append(f":recordedAt {goal_recorded}")
+        if goal_end:
+            gparts.append(f":validEnd {goal_end}")
+        if goal_superseded:
+            gparts.append(f":supersededAt {goal_superseded}")
+        text += ":g1 a :GoalFluent ; " + " ; ".join(gparts) + " .\n"
+    if placement:
+        pparts = [':validStart "2026-01-01T00:00:00Z"^^xsd:dateTime',
+                  ':recordedAt "2026-01-01T00:00:00Z"^^xsd:dateTime']
+        pparts += [f":onInterface {i}" for i in place_iface]
+        text += ":p1 a :PlacementFluent ; " + " ; ".join(pparts) + " .\n"
+    if link:
+        lparts = [':validStart "2026-01-01T00:00:00+00:00"^^xsd:dateTime',
+                  ':recordedAt "2026-01-01T00:00:00+00:00"^^xsd:dateTime']
+        if link_of:
+            lparts.append(":ofLink :link-router-a-router-b")
+        lparts += [f":hasInterface {i}" for i in link_ifaces]
+        text += ":l1 a :LinkFluent ; " + " ; ".join(lparts) + " .\n"
+    return text
+
+
 def _abox_file(tmp_path, text, name="b.ttl"):
     d = tmp_path / "abox"
     d.mkdir(exist_ok=True)
@@ -93,52 +150,170 @@ def _abox_file(tmp_path, text, name="b.ttl"):
     return f
 
 
-def test_service_binding_shape_accepts_complete_binding(tmp_path):
-    ok, report = validate_shapes(_abox_file(tmp_path, _binding()), SHAPES)
+def _check(tmp_path, text):
+    return validate_shapes(_abox_file(tmp_path, text), SHAPES)
+
+
+def test_fluent_binding_shape_accepts_complete_binding(tmp_path):
+    ok, report = _check(tmp_path, _fluent_binding(link=True))
     assert ok is True, report
 
 
-def test_service_binding_shape_rejects_missing_interface(tmp_path):
-    ok, report = validate_shapes(_abox_file(tmp_path, _binding(iface=False)), SHAPES)
+def test_open_goal_fluent_conforms(tmp_path):
+    ok, report = _check(tmp_path, _fluent_binding())
+    assert ok is True, report
+
+
+def test_closed_goal_fluent_conforms(tmp_path):
+    text = _fluent_binding(goal_end='"2026-02-01T00:00:00Z"^^xsd:dateTime')
+    ok, report = _check(tmp_path, text)
+    assert ok is True, report
+
+
+def test_superseded_goal_fluent_conforms(tmp_path):
+    text = _fluent_binding(goal_superseded='"2026-03-01T00:00:00Z"^^xsd:dateTime')
+    ok, report = _check(tmp_path, text)
+    assert ok is True, report
+
+
+def test_offset_zone_conforms(tmp_path):
+    text = _fluent_binding(goal_start='"2026-01-01T00:00:00+00:00"^^xsd:dateTime',
+                           goal_recorded='"2026-01-01T00:00:00+00:00"^^xsd:dateTime')
+    ok, report = _check(tmp_path, text)
+    assert ok is True, report
+
+
+def test_valid_end_equal_to_start_is_rejected(tmp_path):
+    text = _fluent_binding(goal_end='"2026-01-01T00:00:00Z"^^xsd:dateTime')
+    ok, report = _check(tmp_path, text)
+    assert ok is False
+    assert "validStart" in report
+
+
+def test_valid_end_before_start_is_rejected(tmp_path):
+    text = _fluent_binding(goal_end='"2025-12-31T00:00:00Z"^^xsd:dateTime')
+    ok, report = _check(tmp_path, text)
+    assert ok is False
+    assert "validStart" in report
+
+
+def test_superseded_before_recorded_is_rejected(tmp_path):
+    text = _fluent_binding(goal_superseded='"2025-12-31T00:00:00Z"^^xsd:dateTime')
+    ok, report = _check(tmp_path, text)
+    assert ok is False
+    assert "recordedAt" in report
+
+
+def test_timestamp_without_zone_is_rejected(tmp_path):
+    text = _fluent_binding(goal_start='"2026-01-01T00:00:00"^^xsd:dateTime')
+    ok, report = _check(tmp_path, text)
+    assert ok is False
+    assert "validStart" in report
+
+
+def test_plain_string_time_is_rejected(tmp_path):
+    text = _fluent_binding(goal_start='"2026-01-01T00:00:00Z"')
+    ok, report = _check(tmp_path, text)
+    assert ok is False
+    assert "validStart" in report
+
+
+def test_ill_typed_datetime_is_rejected(tmp_path):
+    text = _fluent_binding(goal_start='"yesterday"^^xsd:dateTime')
+    ok, report = _check(tmp_path, text)
+    assert ok is False
+    assert "validStart" in report
+
+
+def test_goal_fluent_without_recorded_at_is_rejected(tmp_path):
+    ok, report = _check(tmp_path, _fluent_binding(goal_recorded=None))
+    assert ok is False
+    assert "recordedAt" in report
+
+
+def test_goal_fluent_without_valid_start_is_rejected(tmp_path):
+    ok, report = _check(tmp_path, _fluent_binding(goal_start=None))
+    assert ok is False
+    assert "validStart" in report
+
+
+def test_goal_fluent_with_two_goals_is_rejected(tmp_path):
+    text = _fluent_binding(goal_pins=('"0.0"^^xsd:double', '"1.0"^^xsd:double'))
+    ok, report = _check(tmp_path, text)
+    assert ok is False
+    assert "pinnedBound" in report
+
+
+def test_integer_goal_is_rejected(tmp_path):
+    ok, report = _check(tmp_path, _fluent_binding(goal_pins=("5",)))
+    assert ok is False
+    assert "pinnedBound" in report
+
+
+def test_non_numeric_goal_is_rejected(tmp_path):
+    ok, report = _check(tmp_path, _fluent_binding(goal_pins=('"abc"',)))
+    assert ok is False
+    assert "pinnedBound" in report
+
+
+def test_placement_fluent_without_interface_is_rejected(tmp_path):
+    ok, report = _check(tmp_path, _fluent_binding(place_iface=()))
     assert ok is False
     assert "onInterface" in report
 
 
-def test_service_binding_shape_rejects_two_pins(tmp_path):
-    text = _binding(pins=('"0.0"^^xsd:double', '"1.0"^^xsd:double'))
-    ok, report = validate_shapes(_abox_file(tmp_path, text), SHAPES)
+def test_placement_fluent_with_two_interfaces_is_rejected(tmp_path):
+    ok, report = _check(tmp_path, _fluent_binding(place_iface=(IF_A, IF_B)))
     assert ok is False
-    assert "pinnedBound" in report
+    assert "onInterface" in report
 
 
-def test_non_numeric_pin_is_rejected(tmp_path):
-    ok, report = validate_shapes(_abox_file(tmp_path, _binding(pins=('"abc"',))), SHAPES)
+def test_link_fluent_with_one_interface_is_rejected(tmp_path):
+    ok, report = _check(tmp_path, _fluent_binding(link=True, link_ifaces=(IF_A,)))
     assert ok is False
-    assert "pinnedBound" in report
+    assert "hasInterface" in report
 
 
-def test_integer_pin_is_rejected(tmp_path):
-    ok, report = validate_shapes(_abox_file(tmp_path, _binding(pins=("5",))), SHAPES)
+def test_link_fluent_without_link_is_rejected(tmp_path):
+    ok, report = _check(tmp_path, _fluent_binding(link=True, link_of=False))
     assert ok is False
-    assert "pinnedBound" in report
+    assert "ofLink" in report
 
 
-def test_service_binding_shape_rejects_missing_intent(tmp_path):
-    ok, report = validate_shapes(_abox_file(tmp_path, _binding(forIntent=False)), SHAPES)
+def test_binding_without_intent_is_rejected(tmp_path):
+    ok, report = _check(tmp_path, _fluent_binding(forIntent=False))
     assert ok is False
     assert "forIntent" in report
 
 
-def test_service_binding_shape_rejects_missing_metric(tmp_path):
-    ok, report = validate_shapes(_abox_file(tmp_path, _binding(forMetric=False)), SHAPES)
+def test_binding_without_metric_is_rejected(tmp_path):
+    ok, report = _check(tmp_path, _fluent_binding(forMetric=False))
     assert ok is False
     assert "forMetric" in report
 
 
+def test_binding_may_carry_only_the_fluent_that_changed(tmp_path):
+    ok, report = _check(tmp_path, _fluent_binding(placement=False))
+    assert ok is True, report
+
+
+def test_old_shape_binding_still_passes_until_bind_intent_changes(tmp_path):
+    ok, report = _check(tmp_path, _old_binding())
+    assert ok is True, report
+
+
 def test_abox_failure_loads_nothing(tmp_path):
-    _abox_file(tmp_path, _binding(iface=False))
+    _abox_file(tmp_path, _fluent_binding(goal_end='"2025-12-31T00:00:00Z"^^xsd:dateTime'))
     with patch("requests.post") as post:
-        with pytest.raises(ValueError, match="onInterface"):
+        with pytest.raises(ValueError, match="validStart"):
+            load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=tmp_path / "abox")
+    post.assert_not_called()
+
+
+def test_naive_time_in_abox_loads_nothing(tmp_path):
+    _abox_file(tmp_path, _fluent_binding(goal_start='"2026-01-01T00:00:00"^^xsd:dateTime'))
+    with patch("requests.post") as post:
+        with pytest.raises(ValueError, match="SHACL validation failed; nothing loaded"):
             load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=tmp_path / "abox")
     post.assert_not_called()
 
@@ -152,7 +327,7 @@ def test_abox_dir_absent_is_not_an_error(tmp_path):
 
 
 def test_abox_files_are_posted_after_validation(tmp_path):
-    _abox_file(tmp_path, _binding())
+    _abox_file(tmp_path, _fluent_binding(link=True))
     resp = Mock()
     resp.raise_for_status = Mock()
     with patch("requests.post", return_value=resp) as post:
@@ -221,7 +396,7 @@ def test_repo_tbox_passes_the_allow_list():
 
 
 def test_abox_files_are_not_subject_to_the_tbox_allow_list(tmp_path):
-    _abox_file(tmp_path, _binding(), name="not-on-the-list.ttl")
+    _abox_file(tmp_path, _fluent_binding(), name="not-on-the-list.ttl")
     resp = Mock()
     resp.raise_for_status = Mock()
     with patch("requests.post", return_value=resp) as post:
@@ -400,7 +575,7 @@ def _graph(*texts):
 
 
 def _binding_fixture():
-    return _binding()  # a complete :ServiceBinding pointing at an existing interface
+    return _old_binding()  # a complete :ServiceBinding pointing at an existing interface
 
 
 def test_tbox_has_no_graph_intent_vocabulary():
