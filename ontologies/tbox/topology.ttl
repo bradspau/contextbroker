@@ -12,11 +12,28 @@
 :Interface a owl:Class ;
     rdfs:label "Interface" .
 
+### Fluents ###
+# A fluent is one version of a fact. Each carries a valid interval [validStart, validEnd)
+# (when the fact held in the network) and a knowledge interval [recordedAt, supersededAt)
+# (when the broker held it as true). An open end is an absent triple.
+
+:GoalFluent a owl:Class ;
+    rdfs:label "Goal Fluent" ;
+    rdfs:comment "One version of a binding's goal (one metric with its limit), with a valid interval and a knowledge interval." .
+
+:PlacementFluent a owl:Class ;
+    rdfs:label "Placement Fluent" ;
+    rdfs:comment "One version of the interface a binding is placed on, with a valid interval and a knowledge interval." .
+
+:LinkFluent a owl:Class ;
+    rdfs:label "Link Fluent" ;
+    rdfs:comment "One version of the interface pair that makes up a link, with a valid interval and a knowledge interval." .
+
 ### Properties ###
 
 :ServiceBinding a owl:Class ;
     rdfs:label "Service Binding" ;
-    rdfs:comment "Maps one (intent, metric) pair to an interface plus the bound pinned at binding time." .
+    rdfs:comment "The stable identity of one (intent, metric) pair. Its goal and its placement live in fluent nodes." .
 
 :forIntent a owl:DatatypeProperty ;
     rdfs:domain :ServiceBinding ;
@@ -27,17 +44,45 @@
     rdfs:range xsd:string ;
     rdfs:comment "A metric URI." .
 
-:onInterface a owl:ObjectProperty ;
+:hasGoal a owl:ObjectProperty ;
     rdfs:domain :ServiceBinding ;
+    rdfs:range :GoalFluent .
+
+:hasPlacement a owl:ObjectProperty ;
+    rdfs:domain :ServiceBinding ;
+    rdfs:range :PlacementFluent .
+
+:ofLink a owl:ObjectProperty ;
+    rdfs:domain :LinkFluent ;
+    rdfs:range :TopologicalLink .
+
+:onInterface a owl:ObjectProperty ;
+    rdfs:domain :PlacementFluent ;
     rdfs:range :Interface .
 
 :pinnedBound a owl:DatatypeProperty ;
-    rdfs:domain :ServiceBinding ;
+    rdfs:domain :GoalFluent ;
     rdfs:range xsd:double .
 
 :hasInterface a owl:ObjectProperty ;
-    rdfs:domain :TopologicalLink ;
+    rdfs:domain :LinkFluent ;
     rdfs:range :Interface .
+
+:validStart a owl:DatatypeProperty ;
+    rdfs:range xsd:dateTime ;
+    rdfs:comment "First instant at which the fluent held in the network; the valid interval includes it." .
+
+:validEnd a owl:DatatypeProperty ;
+    rdfs:range xsd:dateTime ;
+    rdfs:comment "First instant at which the fluent no longer held; the valid interval excludes it. Absent while the fluent is open." .
+
+:recordedAt a owl:DatatypeProperty ;
+    rdfs:range xsd:dateTime ;
+    rdfs:comment "First instant at which the broker held the fluent as true; the knowledge interval includes it." .
+
+:supersededAt a owl:DatatypeProperty ;
+    rdfs:range xsd:dateTime ;
+    rdfs:comment "First instant at which the broker no longer held the fluent as true; the knowledge interval excludes it. Absent while the fluent is believed." .
 
 :onDevice a owl:DatatypeProperty ;
     rdfs:domain :Interface ;

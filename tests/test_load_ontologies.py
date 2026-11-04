@@ -590,8 +590,10 @@ def test_tbox_has_no_graph_intent_vocabulary():
                                     or "intent-core-health-01" in str(x) for x in t)]
     # What stays: bindings and topology.
     for kept in ("ServiceBinding", "forIntent", "forMetric", "onInterface", "pinnedBound",
-                 "TopologicalLink", "Interface", "hasInterface", "onDevice", "interfaceName"):
-        assert (rdflib.URIRef(NETWORK_NS + kept), None, None) in g
+                 "TopologicalLink", "Interface", "hasInterface", "onDevice", "interfaceName",
+                 "GoalFluent", "PlacementFluent", "LinkFluent", "hasGoal", "hasPlacement",
+                 "ofLink", "validStart", "validEnd", "recordedAt", "supersededAt"):
+        assert (rdflib.URIRef(NETWORK_NS + kept), None, None) in g, kept
 
 
 def test_retire_migration_turns_the_old_tbox_into_the_new_one():
@@ -620,3 +622,61 @@ def test_retire_migration_only_deletes():
     assert re.search(r"\bDELETE\b", body, re.I)
     for word in ("INSERT", "CLEAR", "DROP", "LOAD", "CREATE"):
         assert not re.search(rf"\b{word}\b", body, re.I), word
+
+
+# --- the fluent vocabulary (TEMP-06, D-01, D-02, D-19) ---
+
+def _tbox_graph():
+    import rdflib
+    return rdflib.Graph().parse(TBOX_DIR / "topology.ttl", format="turtle")
+
+
+def test_fluent_vocabulary_domains_and_ranges():
+    import rdflib
+    from rdflib import OWL, RDFS, XSD
+    N = rdflib.Namespace(NETWORK_NS)
+    g = _tbox_graph()
+    for cls in ("GoalFluent", "PlacementFluent", "LinkFluent"):
+        assert (N[cls], rdflib.RDF.type, OWL.Class) in g, cls
+        assert g.value(N[cls], RDFS.label) is not None, cls
+        assert g.value(N[cls], RDFS.comment) is not None, cls
+    objects = {
+        "hasGoal": (N.ServiceBinding, N.GoalFluent),
+        "hasPlacement": (N.ServiceBinding, N.PlacementFluent),
+        "ofLink": (N.LinkFluent, N.TopologicalLink),
+    }
+    for name, (dom, rng) in objects.items():
+        assert (N[name], rdflib.RDF.type, OWL.ObjectProperty) in g, name
+        assert g.value(N[name], RDFS.domain) == dom, name
+        assert g.value(N[name], RDFS.range) == rng, name
+    for name in ("validStart", "validEnd", "recordedAt", "supersededAt"):
+        assert (N[name], rdflib.RDF.type, OWL.DatatypeProperty) in g, name
+        assert g.value(N[name], RDFS.range) == XSD.dateTime, name
+        assert g.value(N[name], RDFS.domain) is None, name
+        assert g.value(N[name], RDFS.comment) is not None, name
+    assert g.value(N.pinnedBound, RDFS.domain) == N.GoalFluent
+    assert g.value(N.pinnedBound, RDFS.range) == XSD.double
+    assert g.value(N.onInterface, RDFS.domain) == N.PlacementFluent
+    assert g.value(N.onInterface, RDFS.range) == N.Interface
+    assert g.value(N.hasInterface, RDFS.domain) == N.LinkFluent
+    assert g.value(N.hasInterface, RDFS.range) == N.Interface
+
+
+def test_service_binding_comment_names_goal_not_bound():
+    import rdflib
+    N = rdflib.Namespace(NETWORK_NS)
+    comment = str(_tbox_graph().value(N.ServiceBinding, rdflib.RDFS.comment))
+    assert "goal" in comment
+    assert "bound" not in comment.lower().replace("pinnedbound", "")
+
+
+def test_retire_migration_keeps_fluents():
+    from rdflib.compare import isomorphic
+    fluents = _fluent_binding(link=True)
+    tbox = (TBOX_DIR / "topology.ttl").read_text()
+    g = _graph(tbox, fluents)
+    expected = _graph(tbox, fluents)
+    before = len(g)
+    g.update(MIGRATION.read_text())
+    assert len(g) == before
+    assert isomorphic(g, expected)
