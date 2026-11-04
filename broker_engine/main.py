@@ -18,11 +18,14 @@ from broker_engine.faults import log_fault
 from broker_engine.health import probe_upstreams
 from broker_engine import operations
 from broker_engine.pruner import prune  # noqa: F401
-from broker_engine.validation import ClientInputError
+from broker_engine.validation import ClientInputError, max_as_of_seconds
 from broker_engine.tsdb_joiner import join_observed_metric
 from outcome_assurance.evaluate import evaluate_intent  # noqa: F401
 
 log = logging.getLogger(__name__)
+
+# A bad BROKER_RETENTION_PERIOD stops start-up here instead of failing every temporal request.
+max_as_of_seconds()
 
 
 def assess(intent_id: str, time_window: str, source: str = "tmf921",

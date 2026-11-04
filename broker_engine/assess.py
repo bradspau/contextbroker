@@ -22,7 +22,8 @@ def assess_intent(
     included, gets a ClientInputError instead of a silent fallback.
 
     Temporal queries (with neither argument the behaviour is unchanged).
-    `as_of` ("10m") evaluates as of that long ago, up to 30d. `mode` is "at"
+    `as_of` ("10m") evaluates as of that long ago, no further back than
+    BROKER_RETENTION_PERIOD, the VictoriaMetrics retention. `mode` is "at"
     (default when as_of is set): the latest sample at that instant, which must
     be fresh relative to it. "within": the worst case over the `time_window`
     ending at that instant (now if no as_of), so a breach anywhere in it counts.

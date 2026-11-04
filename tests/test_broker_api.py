@@ -331,3 +331,48 @@ def test_rest_passes_as_of_and_mode_through():
         assert a.call_args.kwargs["as_of"] == "10m" and a.call_args.kwargs["mode"] == "within"
         assert c.post("/context/assess", json={"intent_id": "i1", "time_window": "5m",
                                                "mode": "bogus"}).status_code == 422
+
+
+# ---------- retention (TEMP-07) ----------
+def _import_main_in_subprocess(retention):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    env = dict(os.environ)
+    env.pop("BROKER_RETENTION_PERIOD", None)
+    if retention is not None:
+        env["BROKER_RETENTION_PERIOD"] = retention
+    return subprocess.run([sys.executable, "-c", "import broker_engine.main"], env=env,
+                          cwd=Path(__file__).resolve().parent.parent,
+                          capture_output=True, text=True, timeout=60)
+
+
+def test_bad_retention_stops_the_api_at_start_up():
+    bad = _import_main_in_subprocess("30")
+    assert bad.returncode != 0
+    assert "BROKER_RETENTION_PERIOD" in bad.stderr
+
+
+@pytest.mark.parametrize("retention", ["30d", None])
+def test_good_or_unset_retention_lets_the_api_start(retention):
+    ok = _import_main_in_subprocess(retention)
+    assert ok.returncode == 0, ok.stderr
+
+
+def test_rest_over_retention_as_of_is_a_fixed_400_before_any_upstream_call():
+    c = TestClient(main.app, headers=HEADERS)
+    with patch("broker_engine.assess.assess_via_tmf921") as push, \
+            patch("broker_engine.assess.assess_tmf921_as_of") as asof, \
+            patch("broker_engine.operations._vector") as vec:
+        r = c.post("/context/assess", json={"intent_id": "i1", "time_window": "5m", "as_of": "31d"})
+        assert r.status_code == 400
+        assert r.json() == {"detail": "as_of is further back than the retention period"}
+        r = c.get("/context/metric-history", params={
+            "device": "r1", "interface": "e0", "metric_type": "input_drops",
+            "time_window": "5m", "as_of": "31d"})
+        assert r.status_code == 400
+        assert r.json() == {"detail": "as_of is further back than the retention period"}
+    push.assert_not_called()
+    asof.assert_not_called()
+    vec.assert_not_called()
