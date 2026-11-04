@@ -47,7 +47,7 @@ You may use the other tools only to look up supporting detail.
 
 - query_metric_history(device, interface, metric_type, time_window, as_of): min, max, last and sample count of one metric over a window, now or in the past.
 - query_interfaces_with_nonzero(device, metric_type, time_window, as_of, limit): which interfaces of a device had a non-zero value in the window.
-- query_interface_neighbours(device, interface): the interfaces at the other end of the declared topology links.
+- query_interface_neighbours(device, interface, as_of, known_at): the interfaces at the other end of the declared topology links valid at that time (now by default). as_of and known_at work as for assess_intent: as_of asks about an earlier moment, known_at asks what the broker had recorded by then, and the result's valid_at and known_at say which times were used.
 
 Use assess_intent only when asked whether a declared intent or requirement is met. For other questions ("what happened on...", "which interfaces had...", "what is connected to...") use the query tools and report what they return. These results carry no verdict; do not call anything compliant or non-compliant from them. In all of them quality.missing means there is no data (never zero or none), and quality.stale means the latest sample is old.
 
@@ -128,10 +128,15 @@ TOOLS = [
     },
     {
         "name": "query_interface_neighbours",
-        "description": "The interfaces at the other end of the declared topology links of an interface. Declared topology, not discovered state; quality.missing means the interface is not in the graph.",
+        "description": "The interfaces at the other end of the declared topology links of an interface, optionally as the links stood at an earlier time (as_of) and as the broker knew them at an earlier time (known_at). Declared topology, not discovered state; quality.missing means the interface is not in the graph, while an empty list means no link was valid then.",
         "input_schema": {
             "type": "object",
-            "properties": {"device": {"type": "string"}, "interface": {"type": "string"}},
+            "properties": {
+                "device": {"type": "string"},
+                "interface": {"type": "string"},
+                "as_of": AS_OF,
+                "known_at": KNOWN_AT,
+            },
             "required": ["device", "interface"],
         },
     },

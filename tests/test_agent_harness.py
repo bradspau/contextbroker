@@ -570,3 +570,45 @@ def test_time_window_format_is_declared_to_the_model():
         assert re.match(window["pattern"], "5m") and re.match(window["pattern"], "1h")
         assert not re.match(window["pattern"], "PT1H")
     assert "PT1H" in tools.SYSTEM_PROMPT and '"5m"' in tools.SYSTEM_PROMPT
+
+
+def test_neighbours_tool_declares_as_of_and_known_at_in_both_schemas():
+    for schema in (
+        next(t for t in tools.TOOLS if t["name"] == "query_interface_neighbours")["input_schema"],
+        next(t for t in tools.TOOLS_OPENAI
+             if t["function"]["name"] == "query_interface_neighbours")["function"]["parameters"],
+    ):
+        assert sorted(schema["properties"]) == ["as_of", "device", "interface", "known_at"]
+        assert schema["properties"]["as_of"] == tools.AS_OF
+        assert schema["properties"]["known_at"] == tools.KNOWN_AT
+        assert sorted(schema["required"]) == ["device", "interface"]
+
+
+def test_execute_tool_passes_as_of_and_known_at_to_neighbours():
+    args = {"device": "r1", "interface": "e0", "as_of": "10m", "known_at": "1h"}
+    with patch("agent_harness.tools.query_interface_neighbours", return_value={"neighbours": []}) as nb:
+        content, is_error = tools.execute_tool("query_interface_neighbours", args)
+    assert not is_error
+    nb.assert_called_once_with(device="r1", interface="e0", as_of="10m", known_at="1h")
+
+
+def test_execute_tool_refuses_an_undeclared_neighbours_argument():
+    with patch("agent_harness.tools.query_interface_neighbours") as nb:
+        content, is_error = tools.execute_tool(
+            "query_interface_neighbours",
+            {"device": "r1", "interface": "e0", "query_endpoint": "http://evil"})
+    nb.assert_not_called()
+    assert is_error and "query_endpoint" in json.loads(content)["error"]
+
+
+def test_neighbours_bad_offset_is_a_tool_error_the_model_can_read():
+    content, is_error = tools.execute_tool(
+        "query_interface_neighbours", {"device": "r1", "interface": "e0", "as_of": "PT1H"})
+    assert is_error and "as_of" in json.loads(content)["error"]
+
+
+def test_system_prompt_describes_neighbours_at_a_past_time():
+    line = next(l for l in tools.SYSTEM_PROMPT.splitlines()
+                if l.startswith("- query_interface_neighbours("))
+    assert "device, interface, as_of, known_at" in line
+    assert "valid" in line and "as_of" in line and "known_at" in line and "assess_intent" in line
