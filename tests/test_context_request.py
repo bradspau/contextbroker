@@ -1271,3 +1271,126 @@ def test_the_configured_link_is_read_at_the_requests_valid_time(rig):
     # The demo link was valid from 2026-11-05, so two days back it was not in force.
     out = ask_events(body={**EVENTS, "as_of": "2d"}).json()
     assert out["events"]["configured"]["status"] == "not_held" and out["events"]["conflicts"] == []
+
+
+# ---- every case where no conflict may be claimed, and the verdict never sees a conflict ----
+
+A_IFACE = NS + "if-router-a-ge000"
+B_IFACE = NS + "if-router-b-ge001"
+OLT_EVENTS = {"purpose": "diagnosis", "scope": {"device": "olt1"}, "classes": ["events"]}
+NO_CONFLICT = {"device": "Router-A", "status": "not_held", "value": None, "fluents": [],
+               "authority_cut": False}
+
+
+def test_no_link_in_force_is_stated_as_not_held_and_gives_no_conflict(olt):
+    put(event(1, **OLT_EVENT))
+    out = ask_events(body=OLT_EVENTS).json()
+    assert out["events"]["configured"] == {**NO_CONFLICT, "device": "olt1"}
+    assert out["events"]["conflicts"] == [] and out["fluent_values"] == []
+    [envelope] = out["events"]["envelopes"]
+    assert envelope["value"] == "link_down" and envelope["quality"]["conflicts"] == []
+
+
+def test_a_link_up_event_with_the_link_in_force_has_an_envelope_and_no_conflict(rig):
+    put(event(1, kind="link_up"))
+    out = ask_events().json()
+    [envelope] = out["events"]["envelopes"]
+    assert envelope["value"] == "link_up" and envelope["quality"]["conflicts"] == []
+    assert out["events"]["configured"]["status"] == "held"
+    assert out["events"]["conflicts"] == []
+
+
+def test_unrecognised_events_get_no_envelope_and_no_configured_read(rig):
+    put(event(1, kind=None), event(2, kind=None, at=NOW - 30 * S))
+    out = ask_events().json()
+    assert out["events"]["envelopes"] == [] and out["events"]["configured"] is None
+    assert out["events"]["conflicts"] == [] and out["fluent_values"] == []
+    assert len(out["events"]["events"]) == 2
+    rig.untouched()  # not one Fuseki query
+
+
+def test_an_ambiguous_recognised_event_is_never_reconciled(rig):
+    put(event(1, mapping="ambiguous", device=None, candidates=("Router-A", "router-a"),
+              kind="link_down", source_host="rtr"))
+    out = ask_events().json()
+    [shown] = out["events"]["events"]
+    assert shown["mapping"] == "ambiguous" and "ambiguous" in shown["flags"] and shown["kind"] == "link_down"
+    assert out["events"]["envelopes"] == [] and out["events"]["configured"] is None
+    assert out["events"]["conflicts"] == []
+    rig.untouched()
+
+
+def test_an_ambiguous_event_beside_a_mapped_one_leaves_the_mapped_one_reconciled(rig):
+    put(event(1), event(2, mapping="ambiguous", device=None, candidates=("Router-A", "router-a"),
+                        kind="link_down", source_host="rtr", at=NOW - 30 * S))
+    out = ask_events().json()
+    assert [e["event_id"][-1] for e in out["events"]["envelopes"]] == ["1"]
+    assert [c["event_id"][-1] for c in out["events"]["conflicts"]] == ["1"]
+
+
+def test_two_fluents_in_force_on_one_link_are_invalid_and_claim_no_conflict(rig):
+    put(event(1))
+    f.add_link_fluent(rig.fx.graph, NS + "link-router-a-router-b", A_IFACE, B_IFACE,
+                      datetime(2026, 11, 5, tzinfo=timezone.utc), datetime(2026, 11, 5, 6, tzinfo=timezone.utc),
+                      kind="fluent-reissue")
+    out = ask_events().json()
+    assert out["events"]["configured"] == {**NO_CONFLICT, "status": "invalid"}
+    assert out["events"]["conflicts"] == [] and out["fluent_values"] == []
+    [envelope] = out["events"]["envelopes"]
+    assert envelope["quality"]["conflicts"] == []
+
+
+def test_a_malformed_link_record_is_invalid_and_claims_no_conflict(rig):
+    put(event(1))
+    fluent = rdflib.URIRef(NS + "link-router-a-router-b-fluent-demo")
+    rig.fx.graph.remove((fluent, rdflib.URIRef(NS + "validStart"), None))
+    rig.fx.graph.add((fluent, rdflib.URIRef(NS + "validStart"), rdflib.Literal("yesterday")))
+    out = ask_events().json()
+    assert out["events"]["configured"] == {**NO_CONFLICT, "status": "invalid"}
+    assert out["events"]["conflicts"] == []
+
+
+def test_a_link_recorded_after_the_known_at_instant_is_not_held(rig):
+    # The demo link was recorded on 2026-11-05. The event was ingested before that (and stamped later,
+    # so it is flagged future-dated), and its time is inside the window that ends now.
+    put(event(1, at=NOW - 60 * S, ingest=NOW - 2 * 86400 * S - 59 * S))
+    out = ask_events(body={**EVENTS, "known_at": "2d", "window_seconds": 3600}).json()
+    assert [e["event_id"][-1] for e in out["events"]["events"]] == ["1"]
+    assert out["events"]["configured"]["status"] == "not_held" and out["events"]["conflicts"] == []
+
+
+def test_a_fuseki_failure_during_the_configured_read_is_the_existing_502_and_records_nothing(rig):
+    put(event(1))
+    before = get_store().situation_count()
+    with patch("requests.post", side_effect=requests.ConnectionError("tcp://secret-host:3030 refused")):
+        r = ask_events()
+    assert r.status_code == 502 and r.json() == {"detail": "upstream data store unavailable"}
+    assert "secret-host" not in r.text
+    assert get_store().situation_count() == before
+
+
+def test_a_conflict_never_reaches_the_verdict_or_the_assess_call(olt):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt)
+    live_goal(olt)
+    # A link with both ends on olt1, in force: a link_down event on olt1 now conflicts.
+    f.add_link_fluent(olt.fx.graph, NS + "link-olt1-loop", IF0, IF1, T0, T0)
+    put(event(1, **OLT_EVENT))
+    base = {"purpose": "assurance", "scope": OLT_PON0, "intent_id": "i1"}
+    judged = {"verdict": "success", "reasons": [], "context": [], "goals": []}
+    results = {}
+    for name, classes in (("without", ["goals", "observations"]),
+                          ("with", ["goals", "observations", "events"])):
+        with patch("broker_engine.context_request.assess_tmf921_as_of",
+                   side_effect=lambda *a, **kw: dict(judged)) as spy:
+            r = assure({**base, "classes": classes}, authority=ALL_FOUR)
+        assert r.status_code == 200, r.text
+        [call] = spy.call_args_list
+        results[name] = (r.json(), call)
+    without, with_events = results["without"], results["with"]
+    assert with_events[0]["events"]["conflicts"] and without[0]["events"] is None
+    def shape(call):  # the recording joiner is a fresh closure per request; everything else must match
+        return call.args, {k: v for k, v in call.kwargs.items() if k != "join"}
+    assert shape(with_events[1]) == shape(without[1])
+    assert with_events[0]["verdict"] == without[0]["verdict"] == {"verdict": "success", "reasons": []}
+    assert with_events[0]["eligibility"]["classes"]["goals"] == without[0]["eligibility"]["classes"]["goals"]

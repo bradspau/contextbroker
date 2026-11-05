@@ -9,25 +9,12 @@ timezone, so their event time is None and never guessed (D-14). See
 `data_contracts.syslog_events` for the vocabulary and the rules.
 """
 import re
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable
 
 from data_contracts.syslog_events import MAX_LINE_BYTES, HostMapping, ParsedLine, Quarantined
 
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
-
-
-@dataclass(frozen=True)
-class SyslogEvent:
-    """Normalised event. ``raw`` is the original input; non-str input is preserved as-is."""
-
-    # Remains for the reconciler until plan 05-05 rewrites it and removes this class.
-    raw: "str | Any"
-    device_id: str | None
-    severity: int | None
-    event_time: datetime | None
-    message: str
 
 
 # PRI: "<" 1 to 3 ASCII digits ">" with no leading zero except the single digit 0.

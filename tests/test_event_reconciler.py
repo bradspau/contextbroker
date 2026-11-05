@@ -139,11 +139,11 @@ def test_no_field_or_provenance_reference_holds_message_text():
     assert result.envelope.provenance[0].reference == EVENT_ID
 
 
-def test_the_module_reads_no_clock_and_holds_no_earlier_text_comparison():
+def test_the_module_reads_no_clock_and_holds_no_whole_message_comparison():
     source = Path(event_reconciler.__file__).read_text()
     assert "datetime.now" not in source and "utcnow" not in source
-    for gone in ("system1-event-reconciler-stub", "unresolved device", "_norm", "SyslogEvent"):
-        assert gone not in source
+    assert not hasattr(event_reconciler, "_norm")
+    assert set(vars(ReconcileResult)["__dataclass_fields__"]) == {"envelope", "conflicts"}
 
 
 def test_the_reconciler_imports_only_data_contracts_and_the_standard_library():
