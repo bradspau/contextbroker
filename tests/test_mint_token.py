@@ -197,3 +197,31 @@ def test_the_script_imports_no_broker_module():
         elif isinstance(node, ast.ImportFrom):
             imported.add((node.module or "").split(".")[0])
     assert not imported & {"broker_engine", "intent_management", "data_contracts", "ingestion", "outcome_assurance"}
+
+
+def _load_script():
+    spec = importlib.util.spec_from_file_location("mint_token_under_test", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_authority_claim_round_trips_through_the_broker_parser(tmp_path, keys):
+    path = _write_key(tmp_path, keys["ec"])
+    r = _run(*_ok_args(path, "--entity", "Router-A", "--purpose", "diagnosis", "--class", "topology"))
+    assert r.returncode == 0 and r.stderr == ""
+    claims = auth.verify_token(r.stdout.strip(), _cfg(keys["ec"]))
+    assert claims["authority"] == {"entities": ["Router-A"], "purposes": ["diagnosis"],
+                                   "classes": ["topology"]}
+    authority = auth.authority_of(claims)
+    assert authority.entities == {"Router-A"}
+    assert authority.purposes == {"diagnosis"} and authority.classes == {"topology"}
+
+
+def test_the_script_constants_equal_the_broker_constants():
+    from data_contracts import context_contract
+    module = _load_script()
+    assert module.PURPOSES == context_contract.PURPOSES
+    assert module.CONTEXT_CLASSES == context_contract.CONTEXT_CLASSES
+    assert module.CLAIM_AUTHORITY == auth.CLAIM_AUTHORITY
+    assert (module.KEY_ENTITIES, module.KEY_PURPOSES, module.KEY_CLASSES) == auth.AUTHORITY_KEYS

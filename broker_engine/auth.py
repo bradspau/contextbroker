@@ -5,6 +5,12 @@ private key kept outside the repository and the image. Every request under /cont
 a valid RS256 or ES256 token; an unauthenticated request is refused before routing, body parsing
 or any upstream call. Responses and logs carry fixed strings only: never token text, claim
 values or library messages.
+
+The requester is the token's `sub` (never a request field). Authority, meaning which entities,
+purposes and context classes a caller may ask about, rides in the signed `authority` claim, so the
+broker stays verify-only with no deny list. A route that needs it declares need(SCOPE_...) and then
+need_authority_claims(); a token with the scope but no usable authority claim is refused with a
+fixed reason before the route body runs.
 """
 import logging
 import os
@@ -16,6 +22,8 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from broker_engine.faults import log_fault
+from broker_engine.validation import _SAFE_TOKEN
+from data_contracts.context_contract import CONTEXT_CLASSES, ENTITY_WILDCARD, PURPOSES, Authority
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +35,9 @@ DEFAULT_AUDIENCE = "context-broker"
 SCOPE_READ = "context:read"
 SCOPE_ASSESS = "context:assess"
 _KNOWN_SCOPES = (SCOPE_READ, SCOPE_ASSESS)
+CLAIM_AUTHORITY = "authority"
+AUTHORITY_KEYS = ("entities", "purposes", "classes")  # scripts/mint_token.py keeps a copy (tests pin it)
+MAX_REQUESTER_LENGTH = 128
 
 ENV_KEY_FILE = "BROKER_JWT_PUBLIC_KEY_FILE"
 ENV_KEY = "BROKER_JWT_PUBLIC_KEY"
@@ -46,6 +57,14 @@ class AuthConfig:
     public_key: bytes
     issuer: str
     audience: str
+
+
+@dataclass(frozen=True)
+class Caller:
+    """Who is asking and under what authority; authority is None when the claims are absent or unusable."""
+    requester: str
+    scopes: frozenset[str]
+    authority: Authority | None
 
 
 # (path, st_mtime_ns, st_size, st_ino, st_ctime_ns) -> key bytes; a rewritten or replaced key file
@@ -118,8 +137,35 @@ def scopes_of(claims: dict) -> frozenset[str]:
     return frozenset(s for s in raw.split() if s in _KNOWN_SCOPES)
 
 
-def authenticate(authorization_header: str | None) -> frozenset[str]:
-    """The scopes of the bearer token in the header, or AuthError."""
+def _usable_entity(item) -> bool:
+    return isinstance(item, str) and (
+        item == ENTITY_WILDCARD
+        or (len(item) <= MAX_REQUESTER_LENGTH and _SAFE_TOKEN.match(item) is not None))
+
+
+def authority_of(claims: dict) -> Authority | None:
+    """The authority in the "authority" claim, or None. Pure and total: it never raises.
+
+    The claim must be a dict whose three keys each hold a list. Entities keep only "*" (exact) and
+    safe device names, so a glob is dropped; purposes and classes keep only the closed sets. If any
+    of the three is empty after that, the result is None: a partial authority grants nothing.
+    """
+    raw = claims.get(CLAIM_AUTHORITY) if isinstance(claims, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    lists = [raw.get(key) for key in AUTHORITY_KEYS]
+    if not all(isinstance(item, list) for item in lists):
+        return None
+    entities = frozenset(i for i in lists[0] if _usable_entity(i))
+    purposes = frozenset(i for i in lists[1] if isinstance(i, str) and i in PURPOSES)
+    classes = frozenset(i for i in lists[2] if isinstance(i, str) and i in CONTEXT_CLASSES)
+    if not (entities and purposes and classes):
+        return None
+    return Authority(entities=entities, purposes=purposes, classes=classes)
+
+
+def authenticate(authorization_header: str | None) -> Caller:
+    """The Caller for the bearer token in the header, or AuthError."""
     cfg = load_auth_config()
     if cfg is None:
         log.warning("authentication refused: not configured")
@@ -129,7 +175,8 @@ def authenticate(authorization_header: str | None) -> frozenset[str]:
     if not token:
         log.warning("authentication refused: missing bearer token")
         raise AuthError("missing bearer token")
-    return scopes_of(verify_token(token, cfg))
+    claims = verify_token(token, cfg)
+    return Caller(requester=claims["sub"], scopes=scopes_of(claims), authority=authority_of(claims))
 
 
 def _is_protected(path: str) -> bool:
@@ -148,7 +195,9 @@ async def require_token(request: Request, call_next):
     """Default-deny HTTP middleware for /context/*; runs before routing and body parsing."""
     if _is_protected(request.url.path):
         try:
-            request.state.scopes = authenticate(request.headers.get("authorization"))
+            caller = authenticate(request.headers.get("authorization"))
+            request.state.scopes = caller.scopes
+            request.state.caller = caller
         except AuthError:
             return _denied()
     return await call_next(request)
@@ -162,5 +211,21 @@ def need(scope: str):
             raise HTTPException(401, "authentication required", headers={"WWW-Authenticate": "Bearer"})
         if scope not in scopes:
             raise HTTPException(403, "insufficient scope")
+
+    return Depends(check)
+
+
+def need_authority_claims():
+    """A route dependency that answers 403 when the token carries no usable authority claims.
+
+    Declare it after need(scope): the scope is checked first. The reason is fixed text, never a
+    claim value.
+    """
+    def check(request: Request) -> None:
+        caller = getattr(request.state, "caller", None)
+        if caller is None:
+            raise HTTPException(401, "authentication required", headers={"WWW-Authenticate": "Bearer"})
+        if caller.authority is None:
+            raise HTTPException(403, "authority claims required")
 
     return Depends(check)

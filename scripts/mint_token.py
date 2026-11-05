@@ -2,7 +2,8 @@
 """Mint a short-lived bearer token for the Context Broker REST API.
 
 usage: python scripts/mint_token.py --key ~/keys/broker_jwt_private.pem --sub alice \\
-           --scope context:read --issuer my-issuer [--ttl 900] [--audience context-broker]
+           --scope context:read --issuer my-issuer [--ttl 900] [--audience context-broker] \\
+           [--entity Router-A --purpose diagnosis --class topology]
 
 The broker only verifies tokens; it never holds a private key. This operator tool signs one
 with a private key that must live outside the repository and must not be readable by group or
@@ -26,6 +27,12 @@ MAX_TTL_S = 3600  # equals broker_engine.auth.MAX_TOKEN_LIFETIME_S (tests/test_m
 DEFAULT_TTL_S = 900
 DEFAULT_AUDIENCE = "context-broker"
 SCOPES = ("context:read", "context:assess")
+# Copies of data_contracts.context_contract.PURPOSES / CONTEXT_CLASSES and broker_engine.auth
+# CLAIM_AUTHORITY / AUTHORITY_KEYS; tests/test_mint_token.py pins them equal.
+PURPOSES = ("assurance", "diagnosis", "reporting")
+CONTEXT_CLASSES = ("topology", "goals", "observations")
+CLAIM_AUTHORITY = "authority"
+KEY_ENTITIES, KEY_PURPOSES, KEY_CLASSES = "entities", "purposes", "classes"
 MIN_RSA_BITS = 2048
 REPO = Path(__file__).resolve().parent.parent
 
@@ -39,6 +46,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--key", required=True, help="path to the private key PEM, outside the repository")
     p.add_argument("--sub", required=True, help="token subject (the requester)")
     p.add_argument("--scope", action="append", choices=SCOPES, help="repeatable; at least one")
+    p.add_argument("--entity", action="append",
+                   help="repeatable; a device name, or * for all (authority claim)")
+    p.add_argument("--purpose", action="append", choices=PURPOSES,
+                   help="repeatable; a purpose the caller may name (authority claim)")
+    p.add_argument("--class", dest="classes", action="append", choices=CONTEXT_CLASSES,
+                   help="repeatable; a context class the caller may ask for (authority claim)")
     p.add_argument("--ttl", type=int, default=DEFAULT_TTL_S, help=f"seconds, at most {MAX_TTL_S}")
     p.add_argument("--issuer", default=os.environ.get("BROKER_JWT_ISSUER"),
                    help="default: BROKER_JWT_ISSUER")
@@ -88,6 +101,12 @@ def main(argv=None) -> int:
         "sub": args.sub, "iss": args.issuer, "aud": args.audience,
         "iat": now, "exp": now + args.ttl, "scope": " ".join(dict.fromkeys(args.scope)),
     }
+    if args.entity or args.purpose or args.classes:
+        claims[CLAIM_AUTHORITY] = {
+            KEY_ENTITIES: list(dict.fromkeys(args.entity or [])),
+            KEY_PURPOSES: list(dict.fromkeys(args.purpose or [])),
+            KEY_CLASSES: list(dict.fromkeys(args.classes or [])),
+        }
     print(jwt.encode(claims, key, algorithm=algorithm))
     return 0
 
