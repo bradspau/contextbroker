@@ -130,7 +130,7 @@ moment (D-07 to D-11):
   stored. No device found: `unmapped`, the device is empty and the host stays as written. Two or
   more found, which only the case-insensitive step can produce: `ambiguous`, with every candidate
   stored and none chosen.
-- No domain stripping and no address resolution. `Router-A.example.net` does not match `Router-A`.
+- No domain stripping and no address resolution. `edge-sw-1.example.net` does not match `edge-sw-1`.
   The nil host `-` never maps.
 - **Unmapped events are kept, counted and never returned** for a device request.
 - **The mapping is frozen at ingest** (D-11). A later change to the topology does not touch stored
