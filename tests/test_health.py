@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from broker_engine import health, main
 
 OK_BODY = {"status": "ok", "fuseki": "answering", "victoriametrics": "answering", "tmf921": "answering",
-           "state": "answering"}
+           "state": "answering", "evictions": {"outcomes": 0, "marks": 0, "situations": 0}}
 CANARY = "CANARY http://10.9.9.9:3030"
 client = TestClient(main.app)
 
@@ -52,7 +52,7 @@ def _dispatch(overrides=None, calls=None):
     return get
 
 
-def test_all_answering_is_200_with_exactly_five_keys():
+def test_all_answering_is_200_with_exactly_six_keys():
     with patch("broker_engine.health.requests.get", side_effect=_dispatch()):
         r = client.get("/health")
     assert r.status_code == 200

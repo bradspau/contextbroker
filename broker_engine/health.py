@@ -1,8 +1,10 @@
 """Upstream health for GET /health (OPS-01): is each store answering, in fixed strings only.
 
-The result holds five keys with fixed values: "status" ("ok" or "degraded") and "fuseki",
+The result holds six keys with fixed values: "status" ("ok" or "degraded") and "fuseki",
 "victoriametrics", "tmf921" and "state", each "answering" or "not answering". "state" is the durable
-state store (D-04). The body never carries a URL, hostname, port, version, path or response text,
+state store (D-04). A sixth key, "evictions", is {"outcomes": n, "marks": n, "situations": n} with
+whole-number counts of the entries each state table has evicted (D-12), or null when the state store
+does not answer. The body never carries a URL, hostname, port, version, path or response text,
 because the route is public. Results are cached for a short window so that a flood of unauthenticated
 requests makes at most three upstream probes and one state ping per window.
 """
@@ -57,24 +59,29 @@ def _probe(name: str, url: str, auth) -> str:
     return NOT_ANSWERING
 
 
-def _probe_state() -> str:
-    """Whether the state store answers a ping; the class of a fault is logged, never its text."""
+def _probe_state() -> tuple[str, dict | None]:
+    """(state result, eviction counts or None). The ping and the counters are one cached probe, so a
+    flood of requests cannot starve the store lock. The class of a fault is logged, never its text."""
     try:
-        get_store().ping()
+        store = get_store()
+        store.ping()
+        counts = store.evictions()
+        evictions = {name: int(counts[name]) for name in ("outcomes", "marks", "situations")}
     except Exception as exc:  # noqa: BLE001 - any fault means "not answering"
         log_fault(log, exc, "health probe failed: state")
-        return NOT_ANSWERING
-    return ANSWERING
+        return NOT_ANSWERING, None
+    return ANSWERING, evictions
 
 
 def _run_probes() -> dict:
     targets = _targets()
     with ThreadPoolExecutor(max_workers=len(targets)) as pool:
         results = list(pool.map(lambda t: _probe(*t), targets))
-    state = _probe_state()
+    state, evictions = _probe_state()
     body = {"status": "ok" if all(r == ANSWERING for r in [*results, state]) else "degraded"}
     body.update({name: result for (name, _, _), result in zip(targets, results)})
     body["state"] = state
+    body["evictions"] = evictions
     return body
 
 
