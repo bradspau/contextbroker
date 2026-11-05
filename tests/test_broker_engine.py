@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 
@@ -170,3 +171,83 @@ def test_join_aggregate_validated():
     from broker_engine.validation import ClientInputError
     with pytest.raises(ClientInputError):
         join_observed_metric("r1", "eth0", "utilization", "5m", aggregate="x}")
+
+
+def _record_of(env):
+    from data_contracts.envelope import ProvenanceRecord
+    assert len(env.provenance) == 1
+    rec = env.provenance[0]
+    assert isinstance(rec, ProvenanceRecord)
+    return rec
+
+
+def test_joined_envelope_carries_one_provenance_record():
+    from data_contracts.envelope import ProvenanceRecord
+    now = datetime.fromtimestamp(TS, timezone.utc)
+    r = _resp({"data": {"result": [{"value": [TS, "3"]}]}})
+    r2 = _resp({"data": {"result": [{"value": [TS, str(TS)]}]}})
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]):
+        env = join_observed_metric("r1", "eth0", "latency_ms", "5m", now=now)
+    assert env.provenance == [ProvenanceRecord(
+        "victoriametrics", "interface_metrics_latency_ms", env.observed_at, now)]
+    assert env.provenance[0].observed_at is not None
+    assert env.to_dict()["provenance"] == [{
+        "source_system": "victoriametrics",
+        "reference": "interface_metrics_latency_ms",
+        "observed_at": env.observed_at.isoformat(),
+        "retrieved_at": now.isoformat(),
+    }]
+
+
+def test_joined_provenance_retrieved_at_is_callers_now_when_as_of_shifts_query():
+    from datetime import timedelta
+    now = datetime.fromtimestamp(TS, timezone.utc)
+    past = now - timedelta(minutes=10)
+    r = _resp({"data": {"result": [{"value": [TS, "3"]}]}})
+    r2 = _resp({"data": {"result": [{"value": [TS, str(past.timestamp())]}]}})
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]) as g:
+        env = join_observed_metric("r1", "eth0", "latency_ms", "5m", now=now, as_of="10m")
+    assert g.call_args_list[0].kwargs["params"]["time"] == past.timestamp()
+    rec = _record_of(env)
+    assert rec.retrieved_at == now
+    assert rec.observed_at == env.observed_at == past
+
+
+def test_missing_and_unreadable_answers_carry_one_record_without_observation_time():
+    now = datetime.fromtimestamp(TS, timezone.utc)
+    answers = [
+        _resp({"data": {"result": []}}),
+        _resp({"data": {"result": [{"value": [TS, "NaN"]}]}}),
+        _resp({"data": {"result": [{"value": [TS, "not-a-number"]}]}}),
+    ]
+    for answer in answers:
+        with patch("broker_engine.tsdb_joiner.requests.get", return_value=answer):
+            env = join_observed_metric("r1", "eth0", "latency_ms", "5m", now=now)
+        assert env.quality.missing
+        rec = _record_of(env)
+        assert rec.source_system == "victoriametrics"
+        assert rec.reference == "interface_metrics_latency_ms"
+        assert rec.observed_at is None
+        assert rec.retrieved_at == now
+
+
+def test_multiple_series_keep_conflict_and_carry_one_record():
+    now = datetime.fromtimestamp(TS, timezone.utc)
+    r = _resp({"data": {"result": [
+        {"metric": {"job": "a"}, "value": [TS, "500"]},
+        {"metric": {"job": "b"}, "value": [TS, "10"]},
+    ]}})
+    r2 = _resp({"data": {"result": [{"value": [TS, str(TS)]}]}})
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]):
+        env = join_observed_metric("r1", "eth0", "latency_ms", "5m", now=now)
+    assert env.quality.conflicts == ["multiple series match selector (2)"]
+    assert _record_of(env).reference == "interface_metrics_latency_ms"
+
+
+def test_provenance_reference_comes_from_pinned_names_not_the_answer():
+    now = datetime.fromtimestamp(TS, timezone.utc)
+    r = _resp({"data": {"result": [{"metric": {"__name__": "evil text"}, "value": [TS, "3"]}]}})
+    r2 = _resp({"data": {"result": [{"value": [TS, str(TS)]}]}})
+    with patch("broker_engine.tsdb_joiner.requests.get", side_effect=[r, r2]):
+        env = join_observed_metric("r1", "eth0", "utilization", "5m", now=now)
+    assert "evil" not in json.dumps(env.to_dict())

@@ -1,4 +1,6 @@
-"""Context envelope: the shared data contract for facts passed through the broker."""
+"""Context envelope: the shared data contract for facts passed through the broker.
+
+Every envelope carries its provenance as a list of ProvenanceRecord."""
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -21,6 +23,31 @@ class Quality:
     conflicts: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ProvenanceRecord:
+    """Where one piece of evidence came from, in four fields.
+
+    source_system: the system that held it (for example "victoriametrics").
+    reference: a record or query reference the broker built itself: a pinned
+        metric or series name, a fluent IRI or a component name and version.
+        Never text taken from an upstream answer.
+    observed_at: when the evidence was observed, or None if that is unknown.
+    retrieved_at: when the broker read it, or None.
+    """
+    source_system: str
+    reference: str
+    observed_at: datetime | None
+    retrieved_at: datetime | None
+
+    def to_dict(self) -> dict:
+        return {
+            "source_system": self.source_system,
+            "reference": self.reference,
+            "observed_at": self.observed_at.isoformat() if self.observed_at else None,
+            "retrieved_at": self.retrieved_at.isoformat() if self.retrieved_at else None,
+        }
+
+
 @dataclass
 class ContextEnvelope:
     entity_id: str
@@ -29,7 +56,7 @@ class ContextEnvelope:
     source: str
     observed_at: datetime | None
     quality: Quality
-    provenance: dict = field(default_factory=dict)
+    provenance: list[ProvenanceRecord] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -43,7 +70,7 @@ class ContextEnvelope:
                 "missing": self.quality.missing,
                 "conflicts": list(self.quality.conflicts),
             },
-            "provenance": dict(self.provenance),
+            "provenance": [record.to_dict() for record in self.provenance],
         }
 
 

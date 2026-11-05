@@ -14,7 +14,7 @@ from broker_engine.validation import (
     _validate_token,
     window_seconds,
 )
-from data_contracts.envelope import ContextEnvelope, build_observed
+from data_contracts.envelope import ContextEnvelope, ProvenanceRecord, build_observed
 from ingestion.telemetry_simulator import MEASUREMENT_NAME
 
 log = logging.getLogger(__name__)
@@ -37,7 +37,12 @@ def join_observed_metric(
     observed_at, the time of the last sample, describes).
 
     `as_of` ("10m") evaluates the window as it stood that long ago: the query
-    runs at now - as_of and freshness is judged against that instant, not now."""
+    runs at now - as_of and freshness is judged against that instant, not now.
+
+    The envelope carries one ProvenanceRecord: source "victoriametrics",
+    reference the series name, observed_at the envelope's sample time and
+    retrieved_at the caller's now (when the broker read it), even when as_of
+    moves the query instant into the past."""
     _validate_token(device, "device")
     _validate_token(interface, "interface")
     _validate_token(metric_type, "metric_type")
@@ -49,15 +54,14 @@ def join_observed_metric(
 
     if now is None:
         now = datetime.now(timezone.utc)
+    retrieved = now
     params_extra: dict = {}
     if as_of is not None:
         now = now - timedelta(seconds=window_seconds(as_of, "as_of"))
         params_extra = {"time": now.timestamp()}
 
-    selector = (
-        f'{MEASUREMENT_NAME}_{metric_type}'
-        f'{{device="{device}", interface="{interface}"}}'
-    )
+    series = f"{MEASUREMENT_NAME}_{metric_type}"
+    selector = f'{series}{{device="{device}", interface="{interface}"}}'
     promql = f'{aggregate}_over_time({selector}[{time_window}])'
 
     response = requests.get(query_endpoint, params={"query": promql, **params_extra},
@@ -66,19 +70,20 @@ def join_observed_metric(
     result = response.json()["data"]["result"]
 
     entity_id = f"{device}:{interface}"
-    if not result:
-        return build_observed(entity_id, None, "victoriametrics", None, now)
-    raw = result[0]["value"][1]
-    try:
-        value = float(raw)
-    except (TypeError, ValueError, OverflowError):
-        value = None
+    value = None
+    if result:
+        try:
+            value = float(result[0]["value"][1])
+        except (TypeError, ValueError, OverflowError):
+            value = None
     if value is None or not math.isfinite(value):
-        # Unreadable or non-finite: there is no sample to date, so it is missing.
+        # Empty, unreadable or non-finite: there is no sample to date, so it is missing.
         env = build_observed(entity_id, None, "victoriametrics", None, now)
     else:
         observed_at = _oldest_sample_time(query_endpoint, selector, time_window, now, params_extra)
         env = build_observed(entity_id, value, "victoriametrics", observed_at, now)
+    env.provenance.append(
+        ProvenanceRecord("victoriametrics", series, env.observed_at, retrieved))
     if len(result) > 1:
         # Which series is "the" value is ambiguous (the right worst case depends on
         # the intent operator), so fail closed: the evaluator treats conflicts as
