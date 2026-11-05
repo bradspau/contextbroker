@@ -1,8 +1,10 @@
 """Upstream health for GET /health (OPS-01): is each store answering, in fixed strings only.
 
-The result holds four keys with fixed values. It never carries a URL, hostname, port, version or
-response text, because the route is public. Results are cached for a short window so that a flood
-of unauthenticated requests makes at most three upstream probes per window.
+The result holds five keys with fixed values: "status" ("ok" or "degraded") and "fuseki",
+"victoriametrics", "tmf921" and "state", each "answering" or "not answering". "state" is the durable
+state store (D-04). The body never carries a URL, hostname, port, version, path or response text,
+because the route is public. Results are cached for a short window so that a flood of unauthenticated
+requests makes at most three upstream probes and one state ping per window.
 """
 import logging
 import threading
@@ -14,6 +16,7 @@ import requests
 
 from broker_engine import sparql_resolver, tsdb_joiner
 from broker_engine.faults import log_fault
+from broker_state.process import get_store
 from intent_management import tmf921_client
 
 log = logging.getLogger(__name__)
@@ -54,17 +57,29 @@ def _probe(name: str, url: str, auth) -> str:
     return NOT_ANSWERING
 
 
+def _probe_state() -> str:
+    """Whether the state store answers a ping; the class of a fault is logged, never its text."""
+    try:
+        get_store().ping()
+    except Exception as exc:  # noqa: BLE001 - any fault means "not answering"
+        log_fault(log, exc, "health probe failed: state")
+        return NOT_ANSWERING
+    return ANSWERING
+
+
 def _run_probes() -> dict:
     targets = _targets()
     with ThreadPoolExecutor(max_workers=len(targets)) as pool:
         results = list(pool.map(lambda t: _probe(*t), targets))
-    body = {"status": "ok" if all(r == ANSWERING for r in results) else "degraded"}
+    state = _probe_state()
+    body = {"status": "ok" if all(r == ANSWERING for r in [*results, state]) else "degraded"}
     body.update({name: result for (name, _, _), result in zip(targets, results)})
+    body["state"] = state
     return body
 
 
 def probe_upstreams() -> dict:
-    """The four-key health body, probing the three upstreams in parallel at most once per window."""
+    """The health body, probing the upstreams in parallel and the state store at most once per window."""
     global _cached
     with _lock:
         now = time.monotonic()

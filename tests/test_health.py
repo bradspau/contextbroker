@@ -1,4 +1,4 @@
-"""OPS-01: GET /health reports Fuseki, VictoriaMetrics and TMF921 with fixed strings, no credentials."""
+"""OPS-01: GET /health reports Fuseki, VictoriaMetrics, TMF921 and the state store with fixed strings, no credentials."""
 import logging
 import time
 from unittest.mock import MagicMock, patch
@@ -9,7 +9,8 @@ from fastapi.testclient import TestClient
 
 from broker_engine import health, main
 
-OK_BODY = {"status": "ok", "fuseki": "answering", "victoriametrics": "answering", "tmf921": "answering"}
+OK_BODY = {"status": "ok", "fuseki": "answering", "victoriametrics": "answering", "tmf921": "answering",
+           "state": "answering"}
 CANARY = "CANARY http://10.9.9.9:3030"
 client = TestClient(main.app)
 
@@ -51,7 +52,7 @@ def _dispatch(overrides=None, calls=None):
     return get
 
 
-def test_all_answering_is_200_with_exactly_four_keys():
+def test_all_answering_is_200_with_exactly_five_keys():
     with patch("broker_engine.health.requests.get", side_effect=_dispatch()):
         r = client.get("/health")
     assert r.status_code == 200

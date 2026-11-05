@@ -5,6 +5,7 @@ with 401 without one. The in-process MCP server and agent harness call broker fu
 and present none (D-08); a served MCP server must authenticate."""
 
 import logging
+from contextlib import asynccontextmanager
 from typing import Literal
 
 import requests
@@ -19,6 +20,7 @@ from broker_engine.health import probe_upstreams
 from broker_engine import context_request, operations
 from broker_engine.pruner import prune  # noqa: F401
 from broker_engine.validation import ClientInputError, max_as_of_seconds
+from broker_state.process import load_settings, open_process_store, reset_store
 from broker_state.store import STATE_UNAVAILABLE, StateUnavailable
 from broker_engine.tsdb_joiner import join_observed_metric
 from data_contracts.context_contract import ContextRequest, ContextResponse
@@ -97,7 +99,22 @@ def build_mcp_server():
     return server
 
 
-app = FastAPI(title="Context Broker")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Open the state store before serving and close it on shutdown (D-04).
+
+    A malformed state variable raises ValueError (it names the variable, never the value) and an
+    unusable file raises StateUnavailable; either stops the start-up, so the API never serves without
+    its state and never falls back to memory. The open is one blocking call before any request."""
+    load_settings()
+    open_process_store()
+    try:
+        yield
+    finally:
+        reset_store()
+
+
+app = FastAPI(title="Context Broker", lifespan=_lifespan)
 app.middleware("http")(require_token)
 
 
