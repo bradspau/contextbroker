@@ -334,3 +334,75 @@ def test_a_failed_write_rolls_back_and_logs_no_eviction(path, caplog):
     assert store.evictions()["outcomes"] == 0
     assert "eviction" not in caplog.text
     store.close()
+
+
+# -- retention (Task 3) ---------------------------------------------------
+
+HOUR = timedelta(hours=1)
+
+
+def test_retention_read_side_cut_off_without_a_sweep(path):
+    store = StateStore(path, situation_retention_s=7 * 86400)
+    expires = T + timedelta(minutes=5)
+    store.record_situation(SID, "{}", expires_at=expires, recorded_at=T)
+    edge = expires + timedelta(days=7)
+    assert store.get_situation(SID, now=edge - timedelta(microseconds=1)) is not None
+    assert store.get_situation(SID, now=edge) is None
+    assert store.situation_count() == 1  # still physically present, never swept
+    store.close()
+
+
+def test_retention_sweep_inside_a_write_removes_only_old_situations(path, caplog):
+    mono = [0.0]
+    store = StateStore(path, situation_retention_s=3600, monotonic=lambda: mono[0])
+    store.record_situation("old", "{}", expires_at=T - 2 * HOUR, recorded_at=T - 3 * HOUR)
+    store.record_situation("edge", "{}", expires_at=T - HOUR, recorded_at=T - 3 * HOUR)
+    store.record_situation("young", "{}", expires_at=T - timedelta(minutes=30),
+                           recorded_at=T - 3 * HOUR)
+    store.record_outcome("i1", "success")
+    store.advance_mark("i1", U, T - 5 * HOUR, 1.0)
+    assert store.situation_count() == 3
+    mono[0] = 100.0
+    with caplog.at_level(logging.WARNING):
+        store.record_situation("new", "{}", expires_at=T + HOUR, recorded_at=T)
+    assert store.get_situation("old", now=T - 3 * HOUR) is None
+    assert store.situation_count() == 2  # old and edge removed; young and new stay
+    assert store.last_outcome("i1") == "success"
+    assert store.mark_count() == 1
+    lines = [r.getMessage() for r in caplog.records if "retention" in r.getMessage()]
+    assert lines == ["state retention: table=situations removed=2"]
+    store.close()
+
+
+def test_retention_sweep_logs_nothing_when_nothing_is_removed(path, caplog):
+    store = StateStore(path, situation_retention_s=3600)
+    with caplog.at_level(logging.WARNING):
+        store.record_situation(SID, "{}", expires_at=T + HOUR, recorded_at=T)
+    assert "retention" not in caplog.text
+    store.close()
+
+
+def test_retention_sweep_is_paced_by_the_monotonic_clock(path):
+    mono = [0.0]
+    store = StateStore(path, situation_retention_s=3600, monotonic=lambda: mono[0])
+    store.record_situation("a", "{}", expires_at=T + HOUR, recorded_at=T)  # first write sweeps
+    store.record_situation("old", "{}", expires_at=T - 2 * HOUR, recorded_at=T - 3 * HOUR)
+    mono[0] = 59.9
+    store.record_situation("b", "{}", expires_at=T + HOUR, recorded_at=T)
+    assert store.situation_count() == 3  # no sweep yet: "old" is still there
+    assert store.get_situation("old", now=T) is None  # but hidden from reads
+    mono[0] = 60.0
+    store.record_situation("c", "{}", expires_at=T + HOUR, recorded_at=T)
+    assert store.situation_count() == 3  # old removed; a, b, c stay
+    store.close()
+
+
+def test_retention_reads_never_sweep_or_write(path):
+    mono = [0.0]
+    store = StateStore(path, situation_retention_s=3600, monotonic=lambda: mono[0])
+    store.record_situation("old", "{}", expires_at=T - 2 * HOUR, recorded_at=T - 3 * HOUR)
+    mono[0] = 1000.0
+    for _ in range(3):
+        assert store.get_situation("old", now=T) is None
+    assert store.situation_count() == 1
+    store.close()

@@ -1,5 +1,12 @@
 """The broker's durable memory in one SQLite file (D-01).
 
+Situation retention (D-09, D-10): a situation is reported expired from its expiry
+on (the caller computes that at read time) and is hidden by get_situation once
+its expiry plus the retention period (default 7 d) has passed. It is physically
+removed by a sweep that runs inside a situation write, at most once a minute,
+never from a read and never in a background thread; it touches the situations
+table only, never outcomes or marks (D-14).
+
 Schema version 1 holds the last outcome per intent, the per-(intent, metric)
 high-water marks and the situation records. Every write is one explicit
 BEGIN IMMEDIATE transaction under one RLock, so the store stays consistent if a
@@ -229,6 +236,7 @@ class StateStore:
                          recorded_at: datetime) -> None:
         expires_us = _to_us(expires_at)
         recorded_us = _to_us(recorded_at)
+        swept_at = None
         with self._txn() as conn:
             exists = conn.execute("SELECT 1 FROM situations WHERE situation_id = ?",
                                   (situation_id,)).fetchone() is not None
@@ -242,17 +250,28 @@ class StateStore:
                 "last_recorded_at_us = excluded.last_recorded_at_us, "
                 "repeat_count = repeat_count + 1, written_seq = excluded.written_seq",
                 (situation_id, expires_us, recorded_us, recorded_us, body))
+            tick = self._monotonic()
+            if self._last_sweep is None or tick - self._last_sweep >= SWEEP_INTERVAL_S:
+                removed = conn.execute(
+                    "DELETE FROM situations WHERE expires_at_us + ? <= ?",
+                    (self._retention_s * 1000000, recorded_us)).rowcount
+                swept_at = tick
+                if removed > 0:
+                    self._after.append(
+                        ("state retention: table=situations removed=%d", (removed,)))
+        if swept_at is not None:  # taken only after COMMIT
+            self._last_sweep = swept_at
 
     @_guarded
     def get_situation(self, situation_id: str, *, now: datetime) -> SituationRow | None:
-        _to_us(now)
+        now_us = _to_us(now)
         with self._lock:
             row = self._conn.execute(
                 "SELECT situation_id, body, expires_at_us, first_recorded_at_us, "
                 "last_recorded_at_us, repeat_count FROM situations WHERE situation_id = ?",
                 (situation_id,)).fetchone()
-        if row is None:
-            return None
+        if row is None or row[2] + self._retention_s * 1000000 <= now_us:
+            return None  # read-side cut-off: the stated policy holds without a sweep
         return SituationRow(row[0], row[1], _from_us(row[2]), _from_us(row[3]),
                             _from_us(row[4]), row[5])
 

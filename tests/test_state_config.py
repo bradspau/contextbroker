@@ -73,3 +73,31 @@ def test_get_store_passes_the_caps(monkeypatch):
     monkeypatch.setenv("BROKER_SITUATION_CAP", "5")
     reset_store()
     assert get_store()._caps == {"outcomes": 3, "marks": 4, "situations": 5}
+
+
+# -- situation retention (Task 3) ----------------------------------------------
+
+RETENTION_MSG = ("BROKER_SITUATION_RETENTION must be digits then h or d, "
+                 "from 1h to 90d, for example 7d")
+
+
+def test_retention_default_and_limits():
+    assert load_settings({}).situation_retention_s == 604800
+    assert load_settings({"BROKER_SITUATION_RETENTION": ""}).situation_retention_s == 604800
+    assert load_settings({"BROKER_SITUATION_RETENTION": "1h"}).situation_retention_s == 3600
+    assert load_settings({"BROKER_SITUATION_RETENTION": "90d"}).situation_retention_s == 90 * 86400
+
+
+@pytest.mark.parametrize("bad", ["0h", "59m", "91d", "7", "7w", "d", "7 d", "07x", "canary99d",
+                                 "89h\n", "2161h"])
+def test_bad_retention_is_refused_with_the_fixed_message(bad):
+    with pytest.raises(ValueError) as info:
+        load_settings({"BROKER_SITUATION_RETENTION": bad})
+    assert str(info.value) == RETENTION_MSG
+    assert "canary99d" not in str(info.value)
+
+
+def test_get_store_passes_the_retention(monkeypatch):
+    monkeypatch.setenv("BROKER_SITUATION_RETENTION", "2h")
+    reset_store()
+    assert get_store()._retention_s == 7200
