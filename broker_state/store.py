@@ -8,7 +8,10 @@ never from a read and never in a background thread; it touches the situations
 table only, never outcomes or marks (D-14).
 
 Schema version 1 holds the last outcome per intent, the per-(intent, metric)
-high-water marks and the situation records. Every write is one explicit
+high-water marks and the situation records, plus the counters. Phase 5 adds the
+events and event_devices tables at the same version (D-34): user_version changes
+only when an existing table changes shape or meaning; new tables are added with
+IF NOT EXISTS, so the Phase 4 image still opens the file. Every write is one explicit
 BEGIN IMMEDIATE transaction under one RLock, so the store stays consistent if a
 second process opens the same file (D-02). A failure of SQLite or the operating
 system leaving this module is StateUnavailable with a fixed text; nothing is
@@ -20,6 +23,7 @@ import functools
 import logging
 import math
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -40,6 +44,13 @@ DEFAULT_SITUATION_CAP = 100000
 DEFAULT_SITUATION_RETENTION_S = 604800  # 7 d
 SWEEP_INTERVAL_S = 60
 EVICTION_TABLES = ("outcomes", "marks", "situations")
+DEFAULT_EVENT_CAP = 100000
+DEFAULT_EVENT_RETENTION_S = 604800  # 7 d
+EVENT_BATCH_MAX = 500
+QUARANTINE_REASONS = ("no priority", "not text", "too long", "unparsable header")
+EVENT_FORMATS = ("rfc5424", "rfc3164")
+EVENT_MAPPINGS = ("mapped", "ambiguous", "unmapped")
+EVENT_LIMIT_MAX = 10000
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _US = timedelta(microseconds=1)
@@ -66,6 +77,29 @@ _SCHEMA = (
     "CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL)",
 )
 
+# Added at schema version 1 (D-34). Events are never updated; they leave only by the
+# cap or the retention sweep. event_devices holds one row per device the event may
+# belong to: one for mapped, one per candidate for ambiguous, none for unmapped.
+_EVENT_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS events ("
+    "event_id TEXT PRIMARY KEY, written_seq INTEGER NOT NULL, "
+    "ingest_time_us INTEGER NOT NULL, event_time_us INTEGER, "
+    "placed_at_us INTEGER NOT NULL, "
+    "severity INTEGER NOT NULL CHECK (severity BETWEEN 0 AND 7), "
+    "facility INTEGER NOT NULL CHECK (facility BETWEEN 0 AND 23), "
+    "format TEXT NOT NULL CHECK (format IN ('rfc5424','rfc3164')), "
+    "source_host TEXT NOT NULL, "
+    "mapping TEXT NOT NULL CHECK (mapping IN ('mapped','ambiguous','unmapped')), "
+    "device TEXT, kind TEXT, raw TEXT NOT NULL, "
+    "CHECK ((mapping = 'mapped') = (device IS NOT NULL)))",
+    "CREATE INDEX IF NOT EXISTS events_written_seq ON events (written_seq)",
+    "CREATE INDEX IF NOT EXISTS events_ingest_time ON events (ingest_time_us)",
+    "CREATE INDEX IF NOT EXISTS events_placed_at ON events (placed_at_us)",
+    "CREATE TABLE IF NOT EXISTS event_devices ("
+    "event_id TEXT NOT NULL, device TEXT NOT NULL, PRIMARY KEY (event_id, device))",
+    "CREATE INDEX IF NOT EXISTS event_devices_device ON event_devices (device, event_id)",
+)
+
 
 _OUTCOMES = ("success", "failure", "inconclusive")
 
@@ -85,6 +119,16 @@ _EVICT_SQL = {
 }
 _COUNTER_NAME = {"outcomes": "evicted_outcomes", "marks": "evicted_marks",
                  "situations": "evicted_situations"}
+_QUARANTINE_COUNTER = {"no priority": "quarantine_no_priority",
+                       "not text": "quarantine_not_text",
+                       "too long": "quarantine_too_long",
+                       "unparsable header": "quarantine_unparsable_header"}
+
+_EVENT_ID = re.compile(r"^evt-[0-9a-f]{32}\Z")
+_DEVICE = re.compile(r"^[A-Za-z0-9_\-/]{1,128}\Z")
+_KIND = re.compile(r"^[a-z_]{1,32}\Z")
+_UPSERT_COUNTER = ("INSERT INTO counters (name, value) VALUES (?, ?) "
+                   "ON CONFLICT(name) DO UPDATE SET value = value + excluded.value")
 
 
 class StateUnavailable(Exception):
@@ -103,6 +147,118 @@ class SituationRow:
     first_recorded_at: datetime
     last_recorded_at: datetime
     repeat_count: int
+
+
+@dataclass(frozen=True)
+class NewEvent:
+    """One event as ingest hands it to the store. add_events validates it."""
+    event_id: str
+    ingest_time: datetime
+    event_time: datetime | None
+    severity: int
+    facility: int
+    format: str
+    source_host: str
+    mapping: str
+    device: str | None
+    candidates: tuple
+    kind: str | None
+    raw: str
+
+
+@dataclass(frozen=True)
+class EventRow:
+    """An event as a read returns it. The raw line never leaves through a window read."""
+    event_id: str
+    ingest_time: datetime
+    event_time: datetime | None
+    severity: int
+    facility: int
+    format: str
+    source_host: str
+    mapping: str
+    device: str | None
+    candidates: tuple
+    kind: str | None
+
+
+@dataclass(frozen=True)
+class EventBatch:
+    """What one add_events call did. unmapped and ambiguous count newly stored rows."""
+    stored: int
+    duplicates: int
+    unmapped: int
+    ambiguous: int
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _check_device(value) -> None:
+    if not isinstance(value, str) or not _DEVICE.match(value):
+        raise ValueError("device must be 1 to 128 letters, digits, _, - or /")
+
+
+def _check_event(e) -> None:
+    """Every refusal here is a programming error in the caller, raised before any SQL."""
+    if not isinstance(e, NewEvent):
+        raise ValueError("event must be a NewEvent")
+    if not isinstance(e.event_id, str) or not _EVENT_ID.match(e.event_id):
+        raise ValueError("event_id must be evt- and 32 lower-case hex digits")
+    _to_us(e.ingest_time)
+    if e.event_time is not None:
+        _to_us(e.event_time)
+    if not _is_int(e.severity) or not 0 <= e.severity <= 7:
+        raise ValueError("severity must be a whole number from 0 to 7")
+    if not _is_int(e.facility) or not 0 <= e.facility <= 23:
+        raise ValueError("facility must be a whole number from 0 to 23")
+    if e.format not in EVENT_FORMATS:
+        raise ValueError("format must be rfc5424 or rfc3164")
+    if e.mapping not in EVENT_MAPPINGS:
+        raise ValueError("mapping must be mapped, ambiguous or unmapped")
+    host = e.source_host
+    if (not isinstance(host, str) or not 1 <= len(host) <= 255
+            or any(not 33 <= ord(c) <= 126 for c in host)):
+        raise ValueError("source_host must be 1 to 255 printable characters without spaces")
+    cands = e.candidates
+    if not isinstance(cands, tuple):
+        raise ValueError("candidates must be a tuple")
+    for c in cands:
+        _check_device(c)
+    if e.device is not None:
+        _check_device(e.device)
+    if e.mapping == "mapped":
+        if e.device is None or cands != (e.device,):
+            raise ValueError("a mapped event has a device and exactly that candidate")
+    elif e.device is not None:
+        raise ValueError("only a mapped event has a device")
+    elif e.mapping == "ambiguous":
+        if len(cands) < 2 or list(cands) != sorted(set(cands)):
+            raise ValueError("an ambiguous event has two or more sorted distinct candidates")
+    elif cands:
+        raise ValueError("an unmapped event has no candidates")
+    if e.kind is not None and (not isinstance(e.kind, str) or not _KIND.match(e.kind)):
+        raise ValueError("kind must be 1 to 32 lower-case letters or underscores")
+    if not isinstance(e.raw, str) or not e.raw:
+        raise ValueError("raw must be a non-empty string")
+    try:
+        e.raw.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("raw must be encodable as UTF-8") from None
+
+
+def _check_quarantine(quarantined) -> dict:
+    if quarantined is None:
+        return {}
+    if not isinstance(quarantined, dict):
+        raise ValueError("quarantined must be a mapping of reason to count")
+    for reason, n in quarantined.items():
+        if reason not in QUARANTINE_REASONS:
+            raise ValueError("unknown quarantine reason")
+        if not _is_int(n) or n < 0:
+            raise ValueError("a quarantine count must be a non-negative whole number")
+    return quarantined
 
 
 def _to_us(dt: datetime) -> int:
@@ -132,10 +288,13 @@ class StateStore:
                  mark_cap: int = DEFAULT_MARK_CAP,
                  situation_cap: int = DEFAULT_SITUATION_CAP,
                  situation_retention_s: int = DEFAULT_SITUATION_RETENTION_S,
+                 event_cap: int = DEFAULT_EVENT_CAP,
+                 event_retention_s: int = DEFAULT_EVENT_RETENTION_S,
                  clock=None, monotonic=time.monotonic):
         self._caps = {"outcomes": outcome_cap, "marks": mark_cap,
-                      "situations": situation_cap}
+                      "situations": situation_cap, "events": event_cap}
         self._retention_s = situation_retention_s
+        self._event_retention_s = event_retention_s
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic
         self._last_sweep: float | None = None
@@ -152,6 +311,10 @@ class StateStore:
                     pass
             log_fault(log, exc, STATE_UNAVAILABLE)
             raise StateUnavailable() from None
+
+    @property
+    def event_retention_s(self) -> int:
+        return self._event_retention_s
 
     def _open(self, path) -> None:
         in_memory = str(path) == _MEMORY
@@ -177,9 +340,20 @@ class StateStore:
             with self._txn():
                 # Re-read inside the write lock: another process may have created it.
                 if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
-                    for stmt in _SCHEMA:
+                    for stmt in _SCHEMA + _EVENT_SCHEMA:
                         conn.execute(stmt)
                     conn.execute("PRAGMA user_version=1")  # SCHEMA_VERSION
+        elif not self._has_event_tables():
+            # A Phase 4 file: add the event tables, version unchanged (D-34).
+            with self._txn():
+                if not self._has_event_tables():  # re-read inside the write lock
+                    for stmt in _EVENT_SCHEMA:
+                        conn.execute(stmt)
+
+    def _has_event_tables(self) -> bool:
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' "
+            "AND name IN ('events', 'event_devices')").fetchone()[0] == 2
 
     @contextmanager
     def _txn(self):
@@ -364,6 +538,115 @@ class StateStore:
     def mark_count(self) -> int:
         with self._lock:
             return self._conn.execute(_COUNT_SQL["marks"]).fetchone()[0]
+
+    # -- events --------------------------------------------------------
+
+    @_guarded
+    def add_events(self, events, *, quarantined=None) -> EventBatch:
+        """Store a batch of events and count its duplicates, unmapped events and
+        quarantined lines, all in one transaction (D-05, D-21).
+
+        A line already stored (same event_id) is not stored again and adds one to
+        the duplicates counter. Events are never updated. Anything a caller got wrong
+        is a ValueError raised before any SQL."""
+        events = list(events)
+        if len(events) > EVENT_BATCH_MAX:
+            raise ValueError("a batch holds at most %d events" % EVENT_BATCH_MAX)
+        for e in events:
+            _check_event(e)
+        quarantined = _check_quarantine(quarantined)
+        stored = duplicates = unmapped = ambiguous = 0
+        with self._txn() as conn:
+            seq = conn.execute("SELECT COALESCE(MAX(written_seq), 0) FROM events").fetchone()[0]
+            for e in events:
+                ingest_us = _to_us(e.ingest_time)
+                event_us = None if e.event_time is None else _to_us(e.event_time)
+                placed_us = ingest_us if event_us is None else event_us
+                cur = conn.execute(
+                    "INSERT INTO events (event_id, written_seq, ingest_time_us, "
+                    "event_time_us, placed_at_us, severity, facility, format, source_host, "
+                    "mapping, device, kind, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(event_id) DO NOTHING",
+                    (e.event_id, seq + 1, ingest_us, event_us, placed_us, e.severity,
+                     e.facility, e.format, e.source_host, e.mapping, e.device, e.kind, e.raw))
+                if cur.rowcount == 0:
+                    duplicates += 1
+                    continue
+                seq += 1
+                stored += 1
+                for candidate in e.candidates:
+                    conn.execute("INSERT INTO event_devices (event_id, device) VALUES (?, ?)",
+                                 (e.event_id, candidate))
+                if e.mapping == "unmapped":
+                    unmapped += 1
+                elif e.mapping == "ambiguous":
+                    ambiguous += 1
+            counts = [("events_duplicates", duplicates), ("events_unmapped", unmapped)]
+            counts += [(_QUARANTINE_COUNTER[reason], quarantined.get(reason, 0))
+                       for reason in QUARANTINE_REASONS]
+            for name, n in counts:
+                if n > 0:
+                    conn.execute(_UPSERT_COUNTER, (name, n))
+        return EventBatch(stored=stored, duplicates=duplicates, unmapped=unmapped,
+                          ambiguous=ambiguous)
+
+    @_guarded
+    def events_in_window(self, device: str, *, start: datetime, end: datetime,
+                         known_at: datetime | None, now: datetime,
+                         limit: int) -> list[EventRow]:
+        """Events that name `device`, placed (event time, else ingest time) in
+        [start, end], ingested at or before known_at, and not past retention at `now`.
+        Newest placed first, then event_id. An unmapped event is never returned."""
+        _check_device(device)
+        start_us, end_us, now_us = _to_us(start), _to_us(end), _to_us(now)
+        known_us = None if known_at is None else _to_us(known_at)
+        if start_us > end_us:
+            raise ValueError("start must not be after end")
+        if not _is_int(limit) or not 1 <= limit <= EVENT_LIMIT_MAX:
+            raise ValueError("limit must be a whole number from 1 to %d" % EVENT_LIMIT_MAX)
+        out: list[EventRow] = []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT e.event_id, e.ingest_time_us, e.event_time_us, e.severity, "
+                "e.facility, e.format, e.source_host, e.mapping, e.device, e.kind "
+                "FROM events e JOIN event_devices d ON d.event_id = e.event_id "
+                "WHERE d.device = ? AND e.placed_at_us >= ? AND e.placed_at_us <= ? "
+                "AND (? IS NULL OR e.ingest_time_us <= ?) "
+                "AND e.ingest_time_us + ? > ? "
+                "ORDER BY e.placed_at_us DESC, e.event_id ASC LIMIT ?",
+                (device, start_us, end_us, known_us, known_us,
+                 self._event_retention_s * 1000000, now_us, limit)).fetchall()
+            for r in rows:
+                cands = tuple(c[0] for c in self._conn.execute(
+                    "SELECT device FROM event_devices WHERE event_id = ? ORDER BY device",
+                    (r[0],)).fetchall())
+                out.append(EventRow(
+                    event_id=r[0], ingest_time=_from_us(r[1]),
+                    event_time=None if r[2] is None else _from_us(r[2]),
+                    severity=r[3], facility=r[4], format=r[5], source_host=r[6],
+                    mapping=r[7], device=r[8], candidates=cands, kind=r[9]))
+        return out
+
+    @_guarded
+    def event_raw(self, event_id: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute("SELECT raw FROM events WHERE event_id = ?",
+                                     (event_id,)).fetchone()
+        return row[0] if row else None
+
+    @_guarded
+    def event_count(self) -> int:
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+
+    @_guarded
+    def event_counters(self) -> dict:
+        with self._lock:
+            rows = dict(self._conn.execute("SELECT name, value FROM counters").fetchall())
+        return {"duplicates": rows.get("events_duplicates", 0),
+                "unmapped": rows.get("events_unmapped", 0),
+                "quarantined": {r: rows.get(_QUARANTINE_COUNTER[r], 0)
+                                for r in QUARANTINE_REASONS}}
 
     # -- eviction counters ---------------------------------------------
 

@@ -72,7 +72,8 @@ def test_get_store_passes_the_caps(monkeypatch):
     monkeypatch.setenv("BROKER_MARK_CAP", "4")
     monkeypatch.setenv("BROKER_SITUATION_CAP", "5")
     reset_store()
-    assert get_store()._caps == {"outcomes": 3, "marks": 4, "situations": 5}
+    assert get_store()._caps == {"outcomes": 3, "marks": 4, "situations": 5,
+                                  "events": 100000}
 
 
 # -- situation retention (Task 3) ----------------------------------------------
