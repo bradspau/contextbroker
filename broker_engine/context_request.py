@@ -10,22 +10,41 @@ intent named without ``context:assess``, an offset beyond retention, a freshness
 limit) happens before the first Fuseki, VictoriaMetrics or TMF921 call (D-10). Nothing here logs the
 request body, the requester or a claim value.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+import requests
 
 from broker_engine import context_graph
 from broker_engine.auth import SCOPE_ASSESS, Caller
-from broker_engine.context_eligibility import overall, topology_eligibility
+from broker_engine.binding_resolver import fetch_fluents, select_binding
+from broker_engine.context_eligibility import (
+    INVALID_BINDING,
+    NO_BINDING,
+    binding_problem,
+    goals_eligibility,
+    observations_eligibility,
+    overall,
+    overlapping,
+    topology_eligibility,
+)
 from broker_engine.sparql_resolver import FUSEKI_QUERY_ENDPOINT
+from broker_engine.temporal import temporal_observation
+from broker_engine.tsdb_joiner import join_observed_metric
 from broker_engine.validation import ClientInputError
 from data_contracts.context_contract import (
     ContextRequest,
     ContextResponse,
+    EnvelopeOut,
+    FluentValue,
+    Provenance,
     Situation,
     authorize,
     expiry,
     resolve_times,
     situation_id,
 )
+from data_contracts.metric_map import load_metric_map
+from outcome_assurance.tmf921_report import _short_name
 
 # The telemetry lookback is twice the default freshness limit, so a sample that is too old is read and
 # reported stale (ineligible) instead of vanishing from the window and reading as missing (a gap).
@@ -33,7 +52,6 @@ OBSERVATION_LOOKBACK = "10m"
 
 AUTHORITY_REQUIRED = "authority claims required"
 INSUFFICIENT_SCOPE = "insufficient scope"
-CLASS_NOT_SERVED = "context class not served"
 
 
 class Refused(Exception):
@@ -61,6 +79,17 @@ def _iso(moment: datetime | None) -> str | None:
     return None if moment is None else moment.astimezone(timezone.utc).isoformat()
 
 
+def _fluent_value(metric, kind, fluent, device_interface, valid_at, retrieved_at) -> FluentValue:
+    """One goal or placement fluent as a response value. A placement's value is its node id."""
+    value = fluent.value if kind == "goal" else "/".join(device_interface)
+    return FluentValue(
+        context_class="goals", kind=kind, subject=_short_name(metric), value=value,
+        in_force=fluent.covers(valid_at), valid_from=_iso(fluent.start), valid_to=_iso(fluent.end),
+        recorded_at=_iso(fluent.recorded), superseded_at=_iso(fluent.superseded),
+        provenance=Provenance(source_system="fuseki", reference=fluent.iri,
+                              observed_at=_iso(fluent.recorded), retrieved_at=_iso(retrieved_at)))
+
+
 def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None, join=None,
            query_endpoint: str = FUSEKI_QUERY_ENDPOINT, client=None,
            metric_map=None) -> ContextResponse:
@@ -79,8 +108,7 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
 
     now = (now if now is not None else _utcnow()).astimezone(timezone.utc)
     times = resolve_times(body, now)
-    if "goals" in body.classes or "observations" in body.classes:
-        raise ClientInputError(CLASS_NOT_SERVED)
+    covers = authority.covers_entity
 
     classes = sorted(body.classes)
     relationship_types = None if body.relationship_types is None else sorted(body.relationship_types)
@@ -91,13 +119,95 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
         relationship_types=relationship_types)
 
     eligibility = {}
-    fluent_values = []
+    fluent_values: list[FluentValue] = []
+    priority: set[str] = set()
+    envelopes: list[EnvelopeOut] = []
+    observation_times: list[datetime] = []
+    wants_observations = "observations" in body.classes
+
+    if "goals" in body.classes:
+        # One Fuseki read of the intent's fluents. The same snapshot judges the goals class and picks
+        # the binding the telemetry is read for.
+        problem = None
+        fluents, interfaces = {}, {}
+        mapping = metric_map
+        if mapping is None:
+            try:
+                mapping = load_metric_map()
+            except ValueError:
+                problem = INVALID_BINDING
+        if problem is None:
+            try:
+                fluents, interfaces = fetch_fluents(body.intent_id, query_endpoint)
+            except requests.RequestException:
+                raise
+            except ValueError:
+                problem = INVALID_BINDING
+            else:
+                if not fluents:
+                    problem = NO_BINDING
+        observation_problem = problem
+        if problem is not None:
+            eligibility["goals"] = binding_problem(problem)
+        else:
+            eligibility["goals"] = goals_eligibility(
+                fluents, interfaces, mapping, valid_at=times.valid_at, known_at=times.known_at,
+                limit_s=times.limit_s, allowed=covers)
+            window_start = times.valid_at - timedelta(seconds=times.limit_s)
+            for metric, kind in sorted(fluents):
+                for fluent in overlapping(fluents[(metric, kind)], window_start, times.valid_at,
+                                          times.known_at):
+                    where = None
+                    if kind == "placement":
+                        where = interfaces.get(fluent.value)
+                        if where is None or not covers(where[0]):
+                            continue  # a placement outside the caller's entities is not delivered
+                        priority.update({where[0], "/".join(where)})
+                    fluent_values.append(_fluent_value(
+                        metric, kind, fluent, where, times.valid_at, now))
+            try:
+                binding = select_binding(body.intent_id, fluents, interfaces,
+                                         valid_at=times.valid_at, known_at=times.known_at)
+            except ValueError:
+                observation_problem = INVALID_BINDING
+
+        if wants_observations:
+            if observation_problem is not None:
+                eligibility["observations"] = binding_problem(observation_problem)
+            else:
+                seen = {}
+                reader = recording(join if join is not None else join_observed_metric, seen)
+                observed, nodes = {}, {}
+                # A placement the caller's entities do not cover is never read (D-26), and a metric the
+                # map does not know has no series name to read.
+                for uri in sorted(binding.bounds):
+                    device, interface = binding.sources[uri]
+                    mapped = mapping.get(uri)
+                    if mapped is None or not covers(device):
+                        continue
+                    try:
+                        observed[uri] = temporal_observation(
+                            reader, device, interface, {"metric": mapped.broker_metric},
+                            OBSERVATION_LOOKBACK, "at", body.as_of, now)
+                    except ClientInputError:
+                        continue  # left unobserved: a gap
+                    nodes[uri] = f"{device}/{interface}"
+                eligibility["observations"] = observations_eligibility(
+                    sorted({metric for metric, _kind in fluents}), observed,
+                    valid_at=times.valid_at, limit_s=times.limit_s)
+                for uri, envelope in observed.items():
+                    envelopes.append(EnvelopeOut(metric=_short_name(uri), node=nodes[uri],
+                                                 **envelope.to_dict()))
+                    if envelope.observed_at is not None:
+                        observation_times.append(envelope.observed_at)
+                envelopes.sort(key=lambda e: e.metric)
+
     graph = None
     if "topology" in body.classes:
         read = context_graph.build_graph(
             body.scope.device, body.scope.interface, max_depth=body.max_depth,
             relationship_types=body.relationship_types, valid_at=times.valid_at,
-            known_at=times.known_at, retrieved_at=now, allowed=authority.covers_entity,
+            known_at=times.known_at, retrieved_at=now, allowed=covers, priority=frozenset(priority),
             query_endpoint=query_endpoint)
         graph = read.graph
         fluent_values.extend(read.fluent_values)
@@ -106,7 +216,7 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
             colliding_ids=read.colliding_ids, malformed=read.malformed)
 
     expires_at, basis = expiry(
-        retrieved_at=now, observation_times=[],
+        retrieved_at=now, observation_times=observation_times,
         configured_evidence=bool((graph is not None and graph.nodes) or fluent_values),
         limit_s=times.limit_s, historical=times.historical)
     fluent_values.sort(key=lambda v: (v.context_class, v.kind, v.subject, v.valid_from or ""))
@@ -116,5 +226,7 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
             intent_id=body.intent_id, classes=classes, max_depth=body.max_depth,
             relationship_types=relationship_types, valid_at=_iso(times.valid_at),
             known_at=_iso(times.known_at), retrieved_at=_iso(now), historical=times.historical),
-        eligibility=overall(eligibility), expires_at=_iso(expires_at), expiry_basis=basis,
-        fluent_values=fluent_values, envelopes=[], graph=graph, verdict=None)
+        eligibility=overall({name: eligibility[name] for name in ("topology", "goals", "observations")
+                             if name in eligibility}),
+        expires_at=_iso(expires_at), expiry_basis=basis, fluent_values=fluent_values,
+        envelopes=envelopes, graph=graph, verdict=None)
