@@ -18,6 +18,9 @@ from unittest.mock import Mock
 import rdflib
 from rdflib import BNode, URIRef
 
+from data_contracts import fluents as _f
+from outcome_assurance.tmf921_report import _short_name
+
 NS = "http://example.org/network-ontology#"
 LAT = "http://broadband-forum.org/Intent#LatencyMetric"
 JIT = "http://broadband-forum.org/Intent#JitterMetric"
@@ -27,6 +30,13 @@ IFACES_TTL = f"""
 :if-olt1-pon0 a :Interface ; :onDevice "olt1" ; :interfaceName "pon0" .
 :if-olt1-pon1 a :Interface ; :onDevice "olt1" ; :interfaceName "pon1" .
 """
+
+IF0 = NS + "if-olt1-pon0"
+IF1 = NS + "if-olt1-pon1"
+
+# Where GraphFuseki.post receives the scenario writers' updates and the resolver's queries.
+UPDATE_URL = "http://fuseki.test/ds/update"
+QUERY_URL = "http://fuseki.test/ds/query"
 
 T0 = datetime(2026, 11, 1, 10, 0, 0, tzinfo=timezone.utc)
 T1 = datetime(2026, 11, 3, 10, 0, 0, tzinfo=timezone.utc)
@@ -79,3 +89,44 @@ class GraphFuseki:
         """The text of every update posted so far."""
         return [(kw["data"].decode("utf-8") if isinstance(kw["data"], bytes) else kw["data"])
                 for url, kw in self.posts if url.endswith("/update")]
+
+
+# ---- scenario writers: the real builders and the one guarded update ----------------------
+
+
+def bind(fx, intent_id="i1", metric=LAT, goal=100.0, place=IF0, at=T0) -> str:
+    """Write a first binding (goal and placement both starting and recorded at `at`).
+
+    Returns the binding node IRI, which names the fluents (so two metrics get two nodes).
+    """
+    binding = f"{NS}binding-{intent_id}-{_short_name(metric)}"
+    g = rdflib.Graph()
+    _f.add_binding(g, binding, intent_id, metric)
+    _f.add_goal(g, binding, goal, at, at)
+    _f.add_placement(g, binding, place, at, at)
+    fx.post(UPDATE_URL, data=_f.guarded_insert(g, []).encode("utf-8"))
+    return binding
+
+
+def replace_goal(fx, binding_iri, goal, at, old_recorded) -> str:
+    """The goal changed at `at`: close the goal recorded at `old_recorded`, open the new one.
+
+    Returns the closed goal's IRI.
+    """
+    old = _f.fluent_iri(binding_iri, "goal", old_recorded)
+    g = rdflib.Graph()
+    _f.add_goal(g, binding_iri, goal, at, at)
+    _f.close(g, old, at)
+    fx.post(UPDATE_URL, data=_f.guarded_insert(g, [old]).encode("utf-8"))
+    return old
+
+
+def correct_placement(fx, binding_iri, place, at, start, old_recorded) -> str:
+    """The earlier placement record was wrong: supersede it at `at` and reissue with the same
+    start. Returns the superseded placement's IRI."""
+    old = _f.fluent_iri(binding_iri, "place", old_recorded)
+    g = rdflib.Graph()
+    _f.add_placement(g, binding_iri, place, start, at)
+    _f.supersede(g, old, at)
+    fx.post(UPDATE_URL, data=_f.guarded_insert(g, [old]).encode("utf-8"))
+    return old

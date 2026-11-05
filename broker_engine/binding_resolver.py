@@ -139,26 +139,21 @@ def _aware(value: datetime | None, label: str) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
-def resolve_binding(
+def select_binding(
     intent_id: str,
-    query_endpoint: str = FUSEKI_QUERY_ENDPOINT,
+    fluents: dict,
+    interfaces: dict,
     *,
-    valid_at: datetime | None = None,
-    known_at: datetime | None = None,
-) -> IntentBinding | None:
-    """The binding in force at `valid_at` (default now) as known at `known_at`.
+    valid_at: datetime,
+    known_at: datetime | None,
+) -> IntentBinding:
+    """The selection half of resolve_binding, run on a snapshot from fetch_fluents.
 
-    known_at None means the latest record: fluents that have not been superseded. A
-    metric with no goal or no placement in force is not an error: it is listed in
-    `gaps` (sorted by metric URI, then "goal" before "placement") and left out of
-    `sources` and `bounds`, so the caller can name it and refuse partial coverage.
+    A caller that needs both the fluent list (eligibility) and the binding (the verdict)
+    reads Fuseki once and passes the same snapshot to both. Pure: no I/O, no clock.
+    `valid_at` and `known_at` must already be aware datetimes (known_at None means latest).
+    Two distinct fluents in force at once raise ValueError("duplicate binding for metric").
     """
-    valid_at = _aware(valid_at, "valid_at") or datetime.now(timezone.utc)
-    known_at = _aware(known_at, "known_at")
-    fluents, interfaces = fetch_fluents(intent_id, query_endpoint)
-    if not fluents:
-        return None
-
     sources: dict[str, tuple[str, str]] = {}
     bounds: dict[str, float] = {}
     goal_intervals: dict[str, tuple[datetime, datetime | None]] = {}
@@ -179,3 +174,25 @@ def resolve_binding(
         placement_intervals[metric] = (place.start, place.end)
     return IntentBinding(intent_id, sources, bounds, goal_intervals, placement_intervals,
                          tuple(gaps))
+
+
+def resolve_binding(
+    intent_id: str,
+    query_endpoint: str = FUSEKI_QUERY_ENDPOINT,
+    *,
+    valid_at: datetime | None = None,
+    known_at: datetime | None = None,
+) -> IntentBinding | None:
+    """The binding in force at `valid_at` (default now) as known at `known_at`.
+
+    known_at None means the latest record: fluents that have not been superseded. A
+    metric with no goal or no placement in force is not an error: it is listed in
+    `gaps` (sorted by metric URI, then "goal" before "placement") and left out of
+    `sources` and `bounds`, so the caller can name it and refuse partial coverage.
+    """
+    valid_at = _aware(valid_at, "valid_at") or datetime.now(timezone.utc)
+    known_at = _aware(known_at, "known_at")
+    fluents, interfaces = fetch_fluents(intent_id, query_endpoint)
+    if not fluents:
+        return None
+    return select_binding(intent_id, fluents, interfaces, valid_at=valid_at, known_at=known_at)
