@@ -405,7 +405,10 @@ def chain_fixture(sfx):
     """Three devices a-b-c: a/ge0 - b/ge1 (closed at T1) and b/ge2 - c/ge3 (open from T0).
 
     Returns the Turtle of the interfaces and the graph of the two link fluents; the same pair
-    loads into the real engine and into the in-memory stand-in."""
+    loads into the real engine and into the in-memory stand-in. The link names carry "chain" so
+    they never collide with the links of test_link_fluents_answer_neighbours_by_valid_time: a
+    fluent IRI is derived from the link IRI and the recorded time, and two tests naming the same
+    fluent in one store would give it four interfaces (found live in plan 03-09)."""
     a, b, c = (f"{n}{sfx}" for n in ("ga", "gb", "gc"))
     turtle = f"""@prefix : <{NS}> .
     :if-{a} a :Interface ; :onDevice "{a}" ; :interfaceName "ge0" .
@@ -414,8 +417,8 @@ def chain_fixture(sfx):
     :if-{c} a :Interface ; :onDevice "{c}" ; :interfaceName "ge3" .
     """
     g = rdflib.Graph()
-    f.add_link_fluent(g, f"{NS}link-ab-{sfx}", f"{NS}if-{a}", f"{NS}if-{b}-1", T0, T0, T1)
-    f.add_link_fluent(g, f"{NS}link-bc-{sfx}", f"{NS}if-{b}-2", f"{NS}if-{c}", T0, T0)
+    f.add_link_fluent(g, f"{NS}link-chain-ab-{sfx}", f"{NS}if-{a}", f"{NS}if-{b}-1", T0, T0, T1)
+    f.add_link_fluent(g, f"{NS}link-chain-bc-{sfx}", f"{NS}if-{b}-2", f"{NS}if-{c}", T0, T0)
     return (a, b, c), turtle, g
 
 
