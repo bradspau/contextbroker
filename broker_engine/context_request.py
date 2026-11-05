@@ -1,0 +1,120 @@
+"""The I/O shell of the context request (CTX-01 to CTX-08).
+
+It composes the pure modules (the request contract, eligibility, the Context Graph, the binding
+selection) over the sources: one Fuseki read for the intent's fluents, the Context Graph reads, and one
+VictoriaMetrics read per placed metric. It resolves, joins and delivers context and never decides or
+acts: it pushes nothing to the TMF921 server, writes no high-water mark and records no outcome.
+
+Every refusal (no authority claim, a request outside the caller's entities, purposes or classes, an
+intent named without ``context:assess``, an offset beyond retention, a freshness above the default
+limit) happens before the first Fuseki, VictoriaMetrics or TMF921 call (D-10). Nothing here logs the
+request body, the requester or a claim value.
+"""
+from datetime import datetime, timezone
+
+from broker_engine import context_graph
+from broker_engine.auth import SCOPE_ASSESS, Caller
+from broker_engine.context_eligibility import overall, topology_eligibility
+from broker_engine.sparql_resolver import FUSEKI_QUERY_ENDPOINT
+from broker_engine.validation import ClientInputError
+from data_contracts.context_contract import (
+    ContextRequest,
+    ContextResponse,
+    Situation,
+    authorize,
+    expiry,
+    resolve_times,
+    situation_id,
+)
+
+# The telemetry lookback is twice the default freshness limit, so a sample that is too old is read and
+# reported stale (ineligible) instead of vanishing from the window and reading as missing (a gap).
+OBSERVATION_LOOKBACK = "10m"
+
+AUTHORITY_REQUIRED = "authority claims required"
+INSUFFICIENT_SCOPE = "insufficient scope"
+CLASS_NOT_SERVED = "context class not served"
+
+
+class Refused(Exception):
+    """A request the caller may not make. The message is always one of the fixed details."""
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def recording(join, seen):
+    """Wrap a joiner so each distinct read happens once and its envelope is kept in `seen`.
+
+    The key is (device, interface, metric, window, aggregate, as_of); a repeated call returns the
+    envelope already read, so eligibility and a later verdict share one telemetry read."""
+    def wrapped(device, interface, metric, window, **kw):
+        key = (device, interface, metric, window, kw.get("aggregate"), kw.get("as_of"))
+        if key not in seen:
+            seen[key] = join(device, interface, metric, window, **kw)
+        return seen[key]
+    return wrapped
+
+
+def _iso(moment: datetime | None) -> str | None:
+    return None if moment is None else moment.astimezone(timezone.utc).isoformat()
+
+
+def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None, join=None,
+           query_endpoint: str = FUSEKI_QUERY_ENDPOINT, client=None,
+           metric_map=None) -> ContextResponse:
+    """Answer one context request for an authenticated caller.
+
+    `now` is read once and every time in the answer derives from it. `join`, `client` and
+    `metric_map` default to the real joiner, TMF921 client and metric map."""
+    authority = caller.authority
+    if authority is None:
+        raise Refused(AUTHORITY_REQUIRED)
+    detail = authorize(body, authority)
+    if detail is not None:
+        raise Refused(detail)
+    if body.intent_id is not None and SCOPE_ASSESS not in caller.scopes:
+        raise Refused(INSUFFICIENT_SCOPE)
+
+    now = (now if now is not None else _utcnow()).astimezone(timezone.utc)
+    times = resolve_times(body, now)
+    if "goals" in body.classes or "observations" in body.classes:
+        raise ClientInputError(CLASS_NOT_SERVED)
+
+    classes = sorted(body.classes)
+    relationship_types = None if body.relationship_types is None else sorted(body.relationship_types)
+    identity = situation_id(
+        requester=caller.requester, purpose=body.purpose, device=body.scope.device,
+        interface=body.scope.interface, intent_id=body.intent_id, valid_at=times.valid_at,
+        known_at=times.known_at, classes=classes, max_depth=body.max_depth,
+        relationship_types=relationship_types)
+
+    eligibility = {}
+    fluent_values = []
+    graph = None
+    if "topology" in body.classes:
+        read = context_graph.build_graph(
+            body.scope.device, body.scope.interface, max_depth=body.max_depth,
+            relationship_types=body.relationship_types, valid_at=times.valid_at,
+            known_at=times.known_at, retrieved_at=now, allowed=authority.covers_entity,
+            query_endpoint=query_endpoint)
+        graph = read.graph
+        fluent_values.extend(read.fluent_values)
+        eligibility["topology"] = topology_eligibility(
+            read.scope_identity, conflicting_links=read.conflicting_links,
+            colliding_ids=read.colliding_ids, malformed=read.malformed)
+
+    expires_at, basis = expiry(
+        retrieved_at=now, observation_times=[],
+        configured_evidence=bool((graph is not None and graph.nodes) or fluent_values),
+        limit_s=times.limit_s, historical=times.historical)
+    fluent_values.sort(key=lambda v: (v.context_class, v.kind, v.subject, v.valid_from or ""))
+    return ContextResponse(
+        situation=Situation(
+            id=identity, requester=caller.requester, purpose=body.purpose, scope=body.scope,
+            intent_id=body.intent_id, classes=classes, max_depth=body.max_depth,
+            relationship_types=relationship_types, valid_at=_iso(times.valid_at),
+            known_at=_iso(times.known_at), retrieved_at=_iso(now), historical=times.historical),
+        eligibility=overall(eligibility), expires_at=_iso(expires_at), expiry_basis=basis,
+        fluent_values=fluent_values, envelopes=[], graph=graph, verdict=None)

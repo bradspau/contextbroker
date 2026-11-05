@@ -59,6 +59,11 @@ from data_contracts.envelope import build_observed
 from tests.auth_helpers import EC_PUBLIC_PEM, OTHER_EC_PUBLIC_PEM, RSA_PUBLIC_PEM
 
 ASSESS_BODY = {"intent_id": "I1", "time_window": "5m"}
+REQUEST_BODY = {"purpose": "diagnosis", "scope": {"device": "r1"}, "classes": ["topology"],
+                "max_depth": 1, "relationship_types": ["has_interface"]}
+# Each POST route has its own body: one body for every path would be refused by the other route's model.
+POST_BODIES = {"/context/assess": ASSESS_BODY, "/context/request": REQUEST_BODY}
+AUTHORITY = {"entities": ["*"], "purposes": ["diagnosis"], "classes": ["topology"]}
 GET_ROUTES = {
     "/context/metric": METRIC,
     "/context/metric-history": {**METRIC, "metric_type": "input_drops"},
@@ -79,7 +84,7 @@ def _context_routes():
 
 def _call(method, path, headers=None, c=client):
     if method == "POST":
-        return c.post(path, json=ASSESS_BODY, headers=headers)
+        return c.post(path, json=POST_BODIES[path], headers=headers)
     return c.get(path, params=GET_ROUTES[path], headers=headers)
 
 
@@ -110,6 +115,23 @@ def _alg_none():
     return f"{_b64({'alg': 'none', 'typ': 'JWT'})}.{_b64(_claims())}."
 
 
+def _minimal_response():
+    """The smallest valid ContextResponse: the route validates what its handler returns."""
+    from data_contracts.context_contract import (
+        ClassEligibility, ContextResponse, Eligibility, Scope, Situation)
+    stamp = "2026-11-06T12:00:00+00:00"
+    return ContextResponse(
+        situation=Situation(
+            id="sit-0", requester="test-caller", purpose="diagnosis", scope=Scope(device="r1"),
+            intent_id=None, classes=["topology"], max_depth=1, relationship_types=["has_interface"],
+            valid_at=stamp, known_at=None, retrieved_at=stamp, historical=False),
+        eligibility=Eligibility(
+            result="gap", classes={"topology": ClassEligibility(result="gap", reasons=["x"])},
+            reasons=["x"]),
+        expires_at=stamp, expiry_basis="no_evidence", fluent_values=[], envelopes=[], graph=None,
+        verdict=None)
+
+
 def _patched_handlers():
     """Stub every handler so a request that passes authentication returns 200 with no upstream."""
     env = build_observed("r1:e0", 1.0, "vm", None, None)
@@ -119,6 +141,7 @@ def _patched_handlers():
         patch("broker_engine.main.operations.interfaces_with_nonzero", return_value={"ok": 1}),
         patch("broker_engine.main.operations.interface_neighbours", return_value={"ok": 1}),
         patch("broker_engine.main.assess", return_value={"verdict": "success"}),
+        patch("broker_engine.main.context_request.handle", return_value=_minimal_response()),
     )
 
 
@@ -147,9 +170,9 @@ def _assert_denied(r):
 
 # --- route inventory: no route is reachable without a token ---
 
-def test_route_inventory_covers_the_five_context_routes():
+def test_route_inventory_covers_the_six_context_routes():
     assert sorted(_context_routes()) == sorted(
-        [("GET", p) for p in GET_ROUTES] + [("POST", "/context/assess")])
+        [("GET", p) for p in GET_ROUTES] + [("POST", p) for p in POST_BODIES])
 
 
 @pytest.mark.parametrize("method,path", _context_routes())
@@ -328,6 +351,30 @@ def test_assess_only_token_cannot_read(path, handlers):
 
 def test_assess_token_can_assess(handlers):
     assert _call("POST", "/context/assess", auth_headers("context:assess")).status_code == 200
+
+
+def _with_authority(*scopes):
+    return {"Authorization": "Bearer " + make_token(scopes, authority=AUTHORITY)}
+
+
+def test_read_token_with_authority_reaches_the_context_request_handler(handlers):
+    r = _call("POST", "/context/request", _with_authority("context:read"))
+    assert r.status_code == 200
+    assert r.json()["situation"]["requester"] == "test-caller"
+
+
+def test_read_token_without_authority_is_403_with_no_upstream_call(handlers, no_upstream):
+    r = _call("POST", "/context/request", auth_headers("context:read"))
+    assert r.status_code == 403 and r.json() == {"detail": "authority claims required"}
+    for mocked in no_upstream:
+        mocked.assert_not_called()
+
+
+def test_assess_only_token_with_authority_cannot_request_context(handlers, no_upstream):
+    r = _call("POST", "/context/request", _with_authority("context:assess"))
+    assert r.status_code == 403 and r.json() == SCOPE_DENIED
+    for mocked in no_upstream:
+        mocked.assert_not_called()
 
 
 def test_read_only_token_cannot_assess_and_pushes_nothing(handlers, no_upstream):

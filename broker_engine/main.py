@@ -13,13 +13,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from broker_engine.assess import assess_intent
-from broker_engine.auth import SCOPE_ASSESS, SCOPE_READ, need, require_token
+from broker_engine.auth import SCOPE_ASSESS, SCOPE_READ, need, need_authority_claims, require_token
 from broker_engine.faults import log_fault
 from broker_engine.health import probe_upstreams
-from broker_engine import operations
+from broker_engine import context_request, operations
 from broker_engine.pruner import prune  # noqa: F401
 from broker_engine.validation import ClientInputError, max_as_of_seconds
 from broker_engine.tsdb_joiner import join_observed_metric
+from data_contracts.context_contract import ContextRequest, ContextResponse
 from outcome_assurance.evaluate import evaluate_intent  # noqa: F401
 
 log = logging.getLogger(__name__)
@@ -120,6 +121,12 @@ async def _upstream_error(request: Request, exc: requests.RequestException):
     return JSONResponse(status_code=502, content={"detail": "upstream data store unavailable"})
 
 
+@app.exception_handler(context_request.Refused)
+async def _refused(request: Request, exc: context_request.Refused):
+    # The message is always one of the fixed details of the contract, never caller or server text.
+    return JSONResponse(status_code=403, content={"detail": str(exc)})
+
+
 @app.get("/health", dependencies=[_allow_only()])
 def get_health() -> JSONResponse:
     """Public: whether each upstream answers, as fixed strings. Outside /context/, so no token."""
@@ -149,6 +156,24 @@ def post_assess(body: AssessRequest, request: Request) -> dict:
         raise HTTPException(422, "Undeclared query parameter(s)")
     return assess(body.intent_id, body.time_window, source=body.source,
                   as_of=body.as_of, mode=body.mode, known_at=body.known_at)
+
+
+@app.post("/context/request", response_model=ContextResponse,
+          dependencies=[need(SCOPE_READ), need_authority_claims()])
+def post_context_request(body: ContextRequest, request: Request) -> ContextResponse:
+    """Ask for context: why (purpose), about what (a device, optionally an interface), when (now, or
+    as_of and known_at offsets) and which classes (topology, goals, observations).
+
+    The token needs the context:read scope and the authority claims (entities, purposes, classes). The
+    requester is the token subject, never a field of the body. Naming an intent_id also needs
+    context:assess. The answer carries a situation identity, an eligibility result per requested class,
+    an expiry with its basis, fluent values and envelopes with provenance records, and the Context
+    Graph with the limits that cut it. Eligibility describes the fitness of the evidence and grants no
+    execution authority. A verdict is present only for an intent with the goals and observations
+    classes; it is kept apart from eligibility and the two can disagree."""
+    if request.query_params:
+        raise HTTPException(422, "Undeclared query parameter(s)")
+    return context_request.handle(body, request.state.caller)
 
 
 @app.get("/context/metric-history",
