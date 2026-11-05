@@ -14,7 +14,8 @@ import requests
 from broker_state.process import get_store, reset_store
 from broker_state.store import STATE_UNAVAILABLE, StateStore, StateUnavailable
 from test_context_request import (  # noqa: F401  (fixtures and helpers)
-    NOW, TOPOLOGY, WIDE, assure, client, live_goal, olt, rig, sample, token)
+    ASSURANCE, NOW, SCOPES, TOPOLOGY, WIDE, assure, client, live_goal, olt, rig, sample, token)
+from data_contracts.context_contract import Authority, ContextRequest, authorize, authorize_scope
 from data_contracts.situation_record import SITUATION_ID_PATTERN
 from tests.fluent_helpers import IF0, LAT, T0, bind
 
@@ -137,6 +138,58 @@ def test_the_id_pattern_takes_only_the_id_shape():
     assert SITUATION_ID_PATTERN.match(UNKNOWN)
     assert not SITUATION_ID_PATTERN.match(UNKNOWN + "\n")
     assert not SITUATION_ID_PATTERN.match(UNKNOWN.upper())
+
+
+# ---- the fetch applies the request's authority rules to the stored scope ----
+
+def narrowed(**over):
+    return token({**WIDE, **over})
+
+
+def test_a_fetch_outside_the_current_authority_is_refused_with_the_requests_strings(rig):
+    sid = recorded(rig)["situation"]["id"]
+    cases = [
+        ({"entities": ["Router-B"]}, "outside authority scope: entity"),
+        ({"purposes": ["reporting"]}, "outside authority scope: purpose"),
+        ({"classes": ["goals"]}, "outside authority scope: class"),
+        ({"entities": ["Router-B"], "purposes": ["reporting"], "classes": ["goals"]},
+         "outside authority scope: entity"),
+    ]
+    for over, detail in cases:
+        r = fetch(sid, headers=narrowed(**over))
+        assert (r.status_code, r.json()) == (403, {"detail": detail}), over
+
+
+def test_another_requester_with_narrowed_authority_gets_404_not_403(rig):
+    sid = recorded(rig)["situation"]["id"]
+    r = fetch(sid, headers=token({**WIDE, "entities": ["Router-B"]}, sub="someone-else"))
+    assert (r.status_code, r.json()) == (404, NOT_FOUND)
+
+
+def test_an_intent_situation_needs_the_assess_scope_to_be_fetched(olt):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt)
+    live_goal(olt)
+    sid = assure().json()["situation"]["id"]
+    r = fetch(sid, headers=token(ASSURANCE, scopes=("context:read",)))
+    assert (r.status_code, r.json()) == (403, {"detail": "insufficient scope"})
+    r = fetch(sid, headers=token(ASSURANCE, scopes=SCOPES))
+    assert r.status_code == 200
+    assert r.json()["verdict"] in ("success", "failure", "inconclusive", None)
+
+
+def test_authorize_is_authorize_scope_over_the_request(rig):
+    entities = [frozenset({"*"}), frozenset({"Router-A"}), frozenset({"Router-B"})]
+    purposes = [frozenset({"diagnosis"}), frozenset({"assurance"})]
+    classes = [frozenset({"topology"}), frozenset({"goals"}), frozenset({"topology", "goals"})]
+    request = ContextRequest.model_validate(TOPOLOGY)
+    for e in entities:
+        for p in purposes:
+            for c in classes:
+                authority = Authority(entities=e, purposes=p, classes=c)
+                assert authorize(request, authority) == authorize_scope(
+                    device=request.scope.device, purpose=request.purpose, classes=request.classes,
+                    authority=authority)
 
 
 # ---- nothing is recorded for a refused or failed request ----

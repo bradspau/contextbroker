@@ -130,18 +130,25 @@ class ContextRequest(BaseModel):
         return self
 
 
+def authorize_scope(*, device: str, purpose: str, classes, authority: Authority) -> str | None:
+    """None when this device, purpose and these classes are inside the caller's authority, else one
+    fixed detail (D-09). The request and the fetch of a stored situation both come through here, so the
+    three strings and their order (entity, then purpose, then class) live in one place."""
+    if not authority.covers_entity(device):
+        return REFUSED_ENTITY
+    if purpose not in authority.purposes:
+        return REFUSED_PURPOSE
+    if any(name not in authority.classes for name in classes):
+        return REFUSED_CLASS
+    return None
+
+
 def authorize(request: ContextRequest, authority: Authority) -> str | None:
     """None when the request is inside the caller's authority, else one fixed detail (D-09).
 
-    Entity is reported first, then purpose, then class. Pure: no I/O, so "before any upstream call"
-    (D-10) is a matter of where the handler calls it."""
-    if not authority.covers_entity(request.scope.device):
-        return REFUSED_ENTITY
-    if request.purpose not in authority.purposes:
-        return REFUSED_PURPOSE
-    if any(name not in authority.classes for name in request.classes):
-        return REFUSED_CLASS
-    return None
+    Pure: no I/O, so "before any upstream call" (D-10) is a matter of where the handler calls it."""
+    return authorize_scope(device=request.scope.device, purpose=request.purpose,
+                           classes=request.classes, authority=authority)
 
 
 # ---- the situation identity ----

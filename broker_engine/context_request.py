@@ -39,6 +39,7 @@ from data_contracts.context_contract import (
     Provenance,
     Situation,
     authorize,
+    authorize_scope,
     expiry,
     resolve_times,
     situation_id,
@@ -274,7 +275,9 @@ def fetch_situation(situation_id: str, caller: Caller, *, now: datetime | None =
     """A recorded situation for its original requester, or None (the route answers 404).
 
     A malformed id, an unknown id, an id past its retention and an id someone else recorded are all
-    None, so none of them can be told from another. It reads only the state store and writes nothing."""
+    None, so none of them can be told from another. The requester's own authority then has to cover the
+    stored scope (the request's three fixed strings, in the request's order), and a situation that names
+    an intent needs context:assess, as the request did. It reads only the state store and writes nothing."""
     if SITUATION_ID_PATTERN.match(situation_id) is None:
         return None
     now = (now if now is not None else _utcnow()).astimezone(timezone.utc)
@@ -283,7 +286,16 @@ def fetch_situation(situation_id: str, caller: Caller, *, now: datetime | None =
         return None
     stored = StoredSituation.model_validate_json(row.body)
     if stored.situation.requester != caller.requester:
-        return None
+        return None  # before the authority checks, so a refusal never confirms that an id exists
+    if caller.authority is None:
+        raise Refused(AUTHORITY_REQUIRED)
+    detail = authorize_scope(
+        device=stored.situation.scope.device, purpose=stored.situation.purpose,
+        classes=stored.situation.classes, authority=caller.authority)
+    if detail is not None:
+        raise Refused(detail)
+    if stored.situation.intent_id is not None and SCOPE_ASSESS not in caller.scopes:
+        raise Refused(INSUFFICIENT_SCOPE)
     return SituationRecord(
         **stored.model_dump(), expired=now >= row.expires_at, first_recorded_at=_iso(row.first_recorded_at),
         last_recorded_at=_iso(row.last_recorded_at), repeat_count=row.repeat_count)
