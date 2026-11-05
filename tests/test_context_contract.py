@@ -3,6 +3,7 @@ the response models (CTX-01, CTX-02, CTX-03, CTX-05, and the structures for CTX-
 
 No test here touches the network, a clock or FastAPI: the contract module is pure (D-06).
 """
+import hashlib
 import subprocess
 import sys
 import typing
@@ -24,6 +25,7 @@ TOPOLOGY_BODY = {"purpose": "diagnosis", "scope": {"device": "Router-A"}, "class
                  "max_depth": 2, "relationship_types": ["connected_to", "has_interface"]}
 GOALS_BODY = {"purpose": "assurance", "scope": {"device": "olt1", "interface": "pon0"},
               "intent_id": "hsi-demo-1", "classes": ["goals", "observations"]}
+EVENTS_BODY = {"purpose": "diagnosis", "scope": {"device": "Router-A"}, "classes": ["events"]}
 
 
 def _body(base, **changes):
@@ -119,6 +121,14 @@ REFUSED_BODIES = {
     "goals without an intent": _body(GOALS_BODY, intent_id=_DROP),
     "intent without goals": _body(TOPOLOGY_BODY, intent_id="hsi-demo-1"),
     "observations without goals": _body(GOALS_BODY, classes=["observations"]),
+    "window without events": _body(TOPOLOGY_BODY, window_seconds=60),
+    "window with goals only": _body(GOALS_BODY, window_seconds=60),
+    "window zero": _body(EVENTS_BODY, window_seconds=0),
+    "window negative": _body(EVENTS_BODY, window_seconds=-1),
+    "window above the model maximum": _body(EVENTS_BODY, window_seconds=604801),
+    "window float": _body(EVENTS_BODY, window_seconds=1.5),
+    "window text": _body(EVENTS_BODY, window_seconds="60"),
+    "window bool": _body(EVENTS_BODY, window_seconds=True),
 }
 
 
@@ -277,6 +287,34 @@ def test_a_naive_datetime_is_refused():
         _id(known_at=datetime(2026, 11, 5, 12, 0, 7))
 
 
+EVENT_IDENTITY = dict(requester="alice", purpose="diagnosis", device="Router-A", interface=None,
+                      intent_id=None, valid_at=T0, known_at=None, classes=["events"], max_depth=None,
+                      relationship_types=None, window_seconds=900)
+
+
+def test_the_identity_of_an_events_request_matches_its_pinned_known_answer():
+    # PINNED (D-33): the key "window" exists only for an events request. The literal is the sha256 of
+    # this hand-written canonical JSON, not a call of situation_id.
+    text = ('{"classes":["events"],"intent":null,"known":null,"max_depth":null,"purpose":"diagnosis",'
+            '"relationship_types":null,"requester":"alice","scope":["Router-A",null],"v":1,'
+            '"valid":"2026-11-05T12:00:07Z","window":900}')
+    assert "sit-" + hashlib.sha256(text.encode("ascii")).hexdigest()[:32] == (
+        "sit-cbb90b643cb87083175cc9640008817a")
+    assert situation_id(**EVENT_IDENTITY) == "sit-cbb90b643cb87083175cc9640008817a"
+
+
+def test_two_windows_are_two_situations_and_no_window_adds_no_key():
+    assert situation_id(**EVENT_IDENTITY) != situation_id(**{**EVENT_IDENTITY, "window_seconds": 60})
+    # An absent window leaves every earlier id as it was (the pinned known answer above covers the bytes).
+    assert situation_id(**{**IDENTITY, "window_seconds": None}) == _id()
+    assert situation_id(**{**IDENTITY, "window_seconds": 900}) != _id()
+
+
+def test_the_window_maximum_equals_the_store_maximum():
+    from broker_state import process
+    assert cc.WINDOW_SECONDS_MAX == process.MAX_EVENT_WINDOW_S == 604800
+
+
 def test_the_version_is_one():
     assert cc.SITUATION_VERSION == 1
 
@@ -402,8 +440,20 @@ def _expiry(**changes):
 
 
 def test_the_expiry_basis_strings_are_pinned():
-    assert (cc.EXPIRY_HISTORICAL, cc.EXPIRY_OBSERVATION, cc.EXPIRY_CONFIGURED, cc.EXPIRY_NO_EVIDENCE) == (
-        "historical_request", "oldest_observation", "configured_state", "no_evidence")
+    assert (cc.EXPIRY_HISTORICAL, cc.EXPIRY_OBSERVATION, cc.EXPIRY_CONFIGURED, cc.EXPIRY_NO_EVIDENCE,
+            cc.EXPIRY_EVENT_WINDOW) == (
+        "historical_request", "oldest_observation", "configured_state", "no_evidence", "event_window")
+    assert set(cc._EXPIRY_BASES) == {
+        "historical_request", "oldest_observation", "event_window", "configured_state", "no_evidence"}
+
+
+def test_event_evidence_expires_a_limit_after_retrieval_and_ranks_between_observations_and_configured():
+    assert _expiry(event_evidence=True, limit_s=120) == (R + timedelta(seconds=120), "event_window")
+    assert _expiry(event_evidence=True, configured_evidence=True) == (R + timedelta(seconds=300), "event_window")
+    assert _expiry(event_evidence=True, historical=True) == (R, "historical_request")
+    result = _expiry(event_evidence=True, observation_times=[R - timedelta(seconds=10)])
+    assert result == (R + timedelta(seconds=290), "oldest_observation")
+    assert _expiry(event_evidence=False) == (R, "no_evidence")
 
 
 def test_a_historical_request_expires_at_retrieval_whatever_else_is_passed():
@@ -536,7 +586,7 @@ def test_the_response_json_carries_the_expected_top_level_keys():
                            "envelopes", "graph", "events", "verdict"}
     assert set(dumped["situation"]) == {"id", "requester", "purpose", "scope", "intent_id", "classes",
                                         "max_depth", "relationship_types", "valid_at", "known_at",
-                                        "retrieved_at", "historical"}
+                                        "retrieved_at", "historical", "window_seconds"}
     assert set(dumped["graph"]) == {"nodes", "edges", "limits"}
     assert set(dumped["graph"]["limits"]) == {"requested_depth", "max_depth", "node_cap",
                                               "relationship_types", "cut_by"}
@@ -603,3 +653,36 @@ def test_the_module_still_loads_no_web_framework_after_the_response_models():
             "hasattr(c, 'ContextResponse'))")
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=str(REPO))
     assert result.stdout.strip() == "False True", result.stderr
+
+
+# ---- the events result and the window ----
+
+def test_a_situation_stored_before_the_window_field_still_validates():
+    body = _full_response().situation.model_dump()
+    body.pop("window_seconds")
+    assert cc.Situation.model_validate(body).window_seconds is None
+
+
+def test_an_events_result_round_trips_and_forbids_extra_keys():
+    event = cc.EventOut(
+        event_id="evt-" + "a" * 32, mapping="mapped", device="Router-A", source_host="Router-A",
+        candidates=[], candidates_withheld=0, format="rfc5424", facility=3, severity=4,
+        event_time=None, ingest_time="2026-11-05T12:00:00+00:00", kind=None, flags=["time_unknown"],
+        provenance=cc.Provenance(source_system="syslog", reference="evt-" + "a" * 32, observed_at=None,
+                                 retrieved_at="2026-11-05T12:00:00+00:00"))
+    result = cc.EventsResult(
+        window=cc.EventWindow(start="2026-11-05T11:45:00+00:00", end="2026-11-05T12:00:00+00:00", seconds=900),
+        cap=100, truncated=False, events=[event])
+    assert cc.EventsResult.model_validate_json(result.model_dump_json()) == result
+    with pytest.raises(ValidationError):
+        cc.EventOut.model_validate({**event.model_dump(), "message": "x"})
+    with pytest.raises(ValidationError):
+        cc.EventOut.model_validate({**event.model_dump(), "flags": ["odd"]})
+    assert cc.EVENT_FLAGS == ("ambiguous", "future_dated", "time_unknown")
+    assert cc.EVENT_RESULT_CAP == 100 and cc.EVENT_SOURCE == "syslog"
+
+
+def test_an_events_body_with_a_window_parses():
+    request = ContextRequest.model_validate({**EVENTS_BODY, "window_seconds": 60})
+    assert request.window_seconds == 60
+    assert ContextRequest.model_validate(EVENTS_BODY).window_seconds is None

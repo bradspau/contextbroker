@@ -50,6 +50,11 @@ EXPIRY_HISTORICAL = "historical_request"
 EXPIRY_OBSERVATION = "oldest_observation"
 EXPIRY_CONFIGURED = "configured_state"
 EXPIRY_NO_EVIDENCE = "no_evidence"
+EXPIRY_EVENT_WINDOW = "event_window"
+
+# The longest event window a request can name; equal to broker_state.process.MAX_EVENT_WINDOW_S (a test
+# pins them equal). The deployed maximum is BROKER_EVENT_WINDOW_MAX, checked by the handler (D-13).
+WINDOW_SECONDS_MAX = 604800
 
 # Bumped if the situation identity construction ever changes (D-11, D-27).
 SITUATION_VERSION = 1
@@ -111,6 +116,7 @@ class ContextRequest(BaseModel):
     relationship_types: list[_RelationshipType] | None = Field(
         default=None, min_length=1, max_length=len(RELATIONSHIP_TYPES))
     freshness: str | None = Field(default=None, max_length=_MAX_OFFSET_LENGTH, pattern=_OFFSET_PATTERN)
+    window_seconds: int | None = Field(default=None, ge=1, le=WINDOW_SECONDS_MAX)
 
     @model_validator(mode="after")
     def _coherent(self):
@@ -133,6 +139,9 @@ class ContextRequest(BaseModel):
             raise ValueError("intent_id needs the goals class")
         if "observations" in self.classes and not goals:
             raise ValueError("observations needs the goals class")
+        # The window is how far back to look for events (D-13).
+        if self.window_seconds is not None and "events" not in self.classes:
+            raise ValueError("window_seconds needs the events class")
         return self
 
 
@@ -170,13 +179,18 @@ def _second(value: datetime | None) -> str | None:
 
 def situation_id(*, requester: str, purpose: str, device: str, interface: str | None,
                  intent_id: str | None, valid_at: datetime, known_at: datetime | None,
-                 classes, max_depth: int | None, relationship_types) -> str:
+                 classes, max_depth: int | None, relationship_types,
+                 window_seconds: int | None = None) -> str:
     """A stable identity for the question: the same inputs give the same id (CTX-03, D-11, D-12, D-27).
 
     A sha256 over canonical JSON (a list for the scope, never a joined string, so a device/interface
     split cannot collide), truncated to 128 bits. Both instants are floored to the second; a known_at
     of None is "latest". The inputs carry SITUATION_VERSION: Phase 4 stores these ids, so a change to
-    the inputs is a version bump and never a silent edit."""
+    the inputs is a version bump and never a silent edit.
+
+    `window_seconds` is the resolved event window of an events request. The key "window" is added to the
+    canonical body only when it is set, so a request without one hashes exactly the body it always did
+    and every earlier id (including the pinned known answer) is unchanged byte for byte (D-33)."""
     body = {
         "v": SITUATION_VERSION,
         "requester": requester,
@@ -189,6 +203,8 @@ def situation_id(*, requester: str, purpose: str, device: str, interface: str | 
         "max_depth": max_depth,
         "relationship_types": None if relationship_types is None else sorted(relationship_types),
     }
+    if window_seconds is not None:
+        body["window"] = window_seconds
     raw = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
     return "sit-" + hashlib.sha256(raw).hexdigest()[:32]
 
@@ -223,12 +239,14 @@ def resolve_times(request: ContextRequest, now: datetime) -> ResolvedTimes:
 
 
 def expiry(*, retrieved_at: datetime, observation_times, configured_evidence: bool, limit_s: int,
-           historical: bool) -> tuple[datetime, str]:
+           historical: bool, event_evidence: bool = False) -> tuple[datetime, str]:
     """When the answer stops being reusable as current context, and why (CTX-05).
 
     - historical: the retrieval time, basis "historical_request". A past answer is not reusable (D-14).
     - a current request with observations: the oldest observation time plus the limit, basis
       "oldest_observation" (D-13). Never clamped: an expiry already in the past is honest.
+    - a current request with at least one event returned (and no observation): the retrieval time plus
+      the limit, basis "event_window". Events have no age of their own to count from.
     - a current request with configured evidence only (topology or fluents): the retrieval time plus
       the limit, basis "configured_state". A configured fact's recordedAt is not its age (D-30).
     - nothing found: the retrieval time, basis "no_evidence"."""
@@ -237,6 +255,8 @@ def expiry(*, retrieved_at: datetime, observation_times, configured_evidence: bo
     observation_times = list(observation_times)
     if observation_times:
         return min(observation_times) + timedelta(seconds=limit_s), EXPIRY_OBSERVATION
+    if event_evidence:
+        return retrieved_at + timedelta(seconds=limit_s), EXPIRY_EVENT_WINDOW
     if configured_evidence:
         return retrieved_at + timedelta(seconds=limit_s), EXPIRY_CONFIGURED
     return retrieved_at, EXPIRY_NO_EVIDENCE
@@ -250,7 +270,8 @@ def expiry(*, retrieved_at: datetime, observation_times, configured_evidence: bo
 # are built by the broker, so they are extra="forbid" but not strict. Every string that reaches a
 # caller is a pinned metric name, a graph IRI local name or a fixed reason, never server text.
 
-_EXPIRY_BASES = (EXPIRY_HISTORICAL, EXPIRY_OBSERVATION, EXPIRY_CONFIGURED, EXPIRY_NO_EVIDENCE)
+_EXPIRY_BASES = (EXPIRY_HISTORICAL, EXPIRY_OBSERVATION, EXPIRY_EVENT_WINDOW, EXPIRY_CONFIGURED,
+                 EXPIRY_NO_EVIDENCE)
 _FLUENT_KINDS = ("goal", "placement", "link")
 _NODE_TYPES = ("device", "interface")
 
@@ -420,6 +441,8 @@ class Situation(_Out):
     known_at: str | None
     retrieved_at: str
     historical: bool
+    window_seconds: int | None = Field(
+        default=None, description="The event window in seconds; present only for an events request.")
 
 
 class ContextResponse(_Out):

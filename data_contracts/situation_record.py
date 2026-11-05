@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict
 
 from data_contracts.context_contract import (
     EXPIRY_CONFIGURED,
+    EXPIRY_EVENT_WINDOW,
     EXPIRY_HISTORICAL,
     EXPIRY_NO_EVIDENCE,
     EXPIRY_OBSERVATION,
@@ -48,7 +49,8 @@ class StoredSituation(_Record):
     situation: Situation
     eligibility: Eligibility
     expires_at: str
-    expiry_basis: Literal[EXPIRY_HISTORICAL, EXPIRY_OBSERVATION, EXPIRY_CONFIGURED, EXPIRY_NO_EVIDENCE]
+    expiry_basis: Literal[EXPIRY_HISTORICAL, EXPIRY_OBSERVATION, EXPIRY_EVENT_WINDOW, EXPIRY_CONFIGURED,
+                          EXPIRY_NO_EVIDENCE]
     evidence: Evidence
     verdict: Literal[_VERDICTS] | None
 

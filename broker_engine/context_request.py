@@ -73,6 +73,7 @@ OBSERVATION_LOOKBACK = "10m"
 AUTHORITY_REQUIRED = "authority claims required"
 INSUFFICIENT_SCOPE = "insufficient scope"
 SITUATION_NOT_FOUND = "situation not found"
+WINDOW_ABOVE_MAX = "window_seconds above the event window maximum"
 
 
 # A sending host is returned only when it is a plain token like a device name (research Pitfall 8).
@@ -158,6 +159,14 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
     now = (now if now is not None else _utcnow()).astimezone(timezone.utc)
     times = resolve_times(body, now)
     covers = authority.covers_entity
+    # The event window is resolved here, before any upstream call: the default applies when none is
+    # named, and a window above BROKER_EVENT_WINDOW_MAX is a fixed 400 (D-13).
+    window_s = None
+    if "events" in body.classes:
+        default_s, max_s = event_window_limits()
+        window_s = default_s if body.window_seconds is None else body.window_seconds
+        if window_s > max_s:
+            raise ClientInputError(WINDOW_ABOVE_MAX)
 
     classes = sorted(body.classes)
     relationship_types = None if body.relationship_types is None else sorted(body.relationship_types)
@@ -165,7 +174,7 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
         requester=caller.requester, purpose=body.purpose, device=body.scope.device,
         interface=body.scope.interface, intent_id=body.intent_id, valid_at=times.valid_at,
         known_at=times.known_at, classes=classes, max_depth=body.max_depth,
-        relationship_types=relationship_types)
+        relationship_types=relationship_types, window_seconds=window_s)
 
     eligibility = {}
     fluent_values: list[FluentValue] = []
@@ -291,7 +300,6 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
     if "events" in body.classes:
         # The state file only: no Fuseki, VictoriaMetrics or TMF921 call. The window ends at the
         # resolved instant; one row past the cap tells whether the cap cut the result.
-        window_s = event_window_limits()[0]
         start = times.valid_at - timedelta(seconds=window_s)
         rows = get_store().events_in_window(
             body.scope.device, start=start, end=times.valid_at, known_at=times.known_at, now=now,
@@ -303,19 +311,21 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
             cap=EVENT_RESULT_CAP, truncated=truncated, events=returned)
         eligibility["events"] = events_eligibility(
             count=len(returned), ambiguous=sum(e.mapping == "ambiguous" for e in returned),
-            beyond_retention=False)
+            beyond_retention=start < now - timedelta(seconds=get_store().event_retention_s))
 
     expires_at, basis = expiry(
         retrieved_at=now, observation_times=observation_times,
         configured_evidence=bool((graph is not None and graph.nodes) or fluent_values),
-        limit_s=times.limit_s, historical=times.historical)
+        limit_s=times.limit_s, historical=times.historical,
+        event_evidence=events is not None and bool(events.events))
     fluent_values.sort(key=lambda v: (v.context_class, v.kind, v.subject, v.valid_from or ""))
     response = ContextResponse(
         situation=Situation(
             id=identity, requester=caller.requester, purpose=body.purpose, scope=body.scope,
             intent_id=body.intent_id, classes=classes, max_depth=body.max_depth,
             relationship_types=relationship_types, valid_at=_iso(times.valid_at),
-            known_at=_iso(times.known_at), retrieved_at=_iso(now), historical=times.historical),
+            known_at=_iso(times.known_at), retrieved_at=_iso(now), historical=times.historical,
+            window_seconds=window_s),
         eligibility=overall({name: eligibility[name] for name in CONTEXT_CLASSES if name in eligibility}),
         expires_at=_iso(expires_at), expiry_basis=basis, fluent_values=fluent_values,
         envelopes=envelopes, graph=graph, events=events, verdict=verdict)

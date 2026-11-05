@@ -150,7 +150,7 @@ def test_topology_request_returns_situation_graph_eligibility_and_expiry(rig):
         "id": expected_id, "requester": "test-caller", "purpose": "diagnosis",
         "scope": {"device": "Router-A", "interface": None}, "intent_id": None, "classes": ["topology"],
         "max_depth": 3, "relationship_types": sorted(BOTH), "valid_at": NOW.isoformat(),
-        "known_at": None, "retrieved_at": NOW.isoformat(), "historical": False}
+        "known_at": None, "retrieved_at": NOW.isoformat(), "historical": False, "window_seconds": None}
     assert out["eligibility"] == {
         "result": "eligible", "classes": {"topology": {"result": "eligible", "reasons": []}},
         "reasons": []}
@@ -879,6 +879,15 @@ def ambiguous(n, candidates=("Router-A", "router-a"), **kw):
                  source_host="rtr", **kw)
 
 
+@pytest.fixture(autouse=True)
+def _store_clock(monkeypatch):
+    """The state file's retention sweep reads the store clock; fix it at NOW like the handler's, so the
+    NOW-dated events here never age against the real date."""
+    from broker_state import process
+    real = process.StateStore
+    monkeypatch.setattr(process, "StateStore", lambda *a, **kw: real(*a, clock=lambda: NOW, **kw))
+
+
 def put(*events):
     get_store().add_events(list(events))
 
@@ -1001,3 +1010,130 @@ def test_a_source_host_outside_the_token_pattern_is_returned_as_null(rig):
     put(event(1, source_host="a;b"))
     [e] = post(EVENTS, headers=events_headers()).json()["events"]["events"]
     assert e["source_host"] is None
+
+
+# ---- the events window, the past, retention and the cap ----
+
+def test_window_seconds_narrows_the_window_and_is_shown_in_the_situation(rig):
+    put(event(1, at=NOW - 30 * S, ingest=NOW - 29 * S), event(2, at=NOW - 120 * S, ingest=NOW - 119 * S))
+    out = post({**EVENTS, "window_seconds": 60}, headers=events_headers()).json()
+    assert [e["event_id"][-1] for e in out["events"]["events"]] == ["1"]
+    assert out["events"]["window"] == {
+        "start": (NOW - 60 * S).isoformat(), "end": NOW.isoformat(), "seconds": 60}
+    assert out["situation"]["window_seconds"] == 60
+    assert post(EVENTS, headers=events_headers()).json()["situation"]["window_seconds"] == 900
+    assert post(TOPOLOGY).json()["situation"]["window_seconds"] is None
+
+
+def test_the_events_situation_id_is_built_with_the_resolved_window(rig):
+    out = post({**EVENTS, "window_seconds": 60}, headers=events_headers()).json()
+    expected = situation_id(
+        requester="test-caller", purpose="diagnosis", device="Router-A", interface=None, intent_id=None,
+        valid_at=NOW, known_at=None, classes=["events"], max_depth=None, relationship_types=None,
+        window_seconds=60)
+    assert out["situation"]["id"] == expected
+    default = post(EVENTS, headers=events_headers()).json()["situation"]["id"]
+    assert default == post({**EVENTS, "window_seconds": 900}, headers=events_headers()).json()["situation"]["id"]
+    assert default != expected
+
+
+def test_a_window_above_the_maximum_is_a_fixed_400_before_any_read(rig, monkeypatch):
+    from broker_state.store import StateStore
+    monkeypatch.setenv("BROKER_EVENT_WINDOW_MAX", "1h")
+    spy = Mock(side_effect=AssertionError("the store was read"))
+    monkeypatch.setattr(StateStore, "events_in_window", spy)
+    r = post({**EVENTS, "window_seconds": 3601}, headers=events_headers())
+    assert r.status_code == 400 and r.json() == {"detail": "window_seconds above the event window maximum"}
+    spy.assert_not_called()
+    rig.untouched()
+
+
+def test_a_window_equal_to_the_maximum_is_answered(rig, monkeypatch):
+    monkeypatch.setenv("BROKER_EVENT_WINDOW_MAX", "1h")
+    r = post({**EVENTS, "window_seconds": 3600}, headers=events_headers())
+    assert r.status_code == 200 and r.json()["events"]["window"]["seconds"] == 3600
+
+
+@pytest.mark.parametrize("value", [0, -1, 604801, 1.5, "60", True])
+def test_a_malformed_window_is_422_and_reaches_nothing(value, rig):
+    r = post({**EVENTS, "window_seconds": value}, headers=events_headers())
+    assert r.status_code == 422
+    rig.untouched()
+
+
+def test_window_seconds_without_the_events_class_is_422(rig):
+    r = post({**TOPOLOGY, "window_seconds": 60}, headers=events_headers())
+    assert r.status_code == 422 and "window_seconds needs the events class" in r.text
+    rig.untouched()
+
+
+def test_a_window_needs_the_events_class_in_the_token_too(rig):
+    r = post({**EVENTS, "window_seconds": 60}, headers=token({**WIDE, "classes": ["topology"]}))
+    assert r.status_code == 403 and r.json() == {"detail": "outside authority scope: class"}
+
+
+def test_as_of_ends_the_window_in_the_past_and_the_answer_is_historical(rig):
+    put(event(1, at=NOW - 2 * 3600 * S - 60 * S, ingest=NOW - 2 * 3600 * S - 59 * S),
+        event(2, at=NOW - 60 * S, ingest=NOW - 59 * S))
+    out = post({**EVENTS, "as_of": "2h"}, headers=events_headers()).json()
+    assert out["events"]["window"]["end"] == (NOW - 2 * 3600 * S).isoformat()
+    assert [e["event_id"][-1] for e in out["events"]["events"]] == ["1"]
+    assert out["situation"]["historical"] is True and out["expiry_basis"] == "historical_request"
+    assert out["expires_at"] == NOW.isoformat()
+
+
+def test_known_at_excludes_events_ingested_after_it(rig):
+    put(event(1, at=NOW - 5 * 60 * S, ingest=NOW - 5 * 60 * S),
+        event(2, at=NOW - 15 * 60 * S, ingest=NOW - 15 * 60 * S))
+    out = post({**EVENTS, "known_at": "10m", "window_seconds": 3600}, headers=events_headers()).json()
+    assert [e["event_id"][-1] for e in out["events"]["events"]] == ["2"]
+    assert out["expiry_basis"] == "historical_request"
+
+
+@pytest.mark.parametrize("with_events", [False, True])
+def test_a_window_reaching_beyond_the_event_retention_is_a_gap(with_events, rig, monkeypatch):
+    monkeypatch.setenv("BROKER_EVENT_RETENTION", "1d")
+    monkeypatch.setenv("BROKER_EVENT_WINDOW_MAX", "1d")
+    from broker_state.process import reset_store
+    reset_store()
+    if with_events:
+        put(event(1, at=NOW - 2 * 86400 * S - 5 * S, ingest=NOW - 2 * 86400 * S))
+        put(event(2, at=NOW - 3600 * S, ingest=NOW - 3600 * S))
+    out = post({**EVENTS, "as_of": "2d"}, headers=events_headers()).json()
+    reasons = out["eligibility"]["classes"]["events"]["reasons"]
+    assert "window reaches beyond event retention" in reasons
+    assert out["eligibility"]["classes"]["events"]["result"] == "gap"
+
+
+def test_a_window_inside_the_retention_has_no_retention_reason(rig):
+    out = post(EVENTS, headers=events_headers()).json()
+    assert "window reaches beyond event retention" not in out["eligibility"]["classes"]["events"]["reasons"]
+
+
+def test_more_than_the_cap_is_truncated_to_the_newest_and_eligibility_is_unaffected(rig):
+    put(*[event(n, at=NOW - n * S, ingest=NOW - n * S + S // 2) for n in range(1, 102)])
+    out = post(EVENTS, headers=events_headers()).json()
+    ids = [e["event_id"] for e in out["events"]["events"]]
+    assert len(ids) == 100 and out["events"]["truncated"] is True and out["events"]["cap"] == 100
+    assert ids[0] == "evt-" + f"{1:032x}" and ids[-1] == "evt-" + f"{100:032x}"
+    assert out["eligibility"]["classes"]["events"] == {"result": "eligible", "reasons": []}
+
+
+def test_exactly_the_cap_is_not_truncated(rig):
+    put(*[event(n, at=NOW - n * S, ingest=NOW - n * S + S // 2) for n in range(1, 101)])
+    out = post(EVENTS, headers=events_headers()).json()
+    assert len(out["events"]["events"]) == 100 and out["events"]["truncated"] is False
+
+
+def test_a_current_events_answer_with_an_event_expires_a_limit_after_retrieval(rig):
+    put(event(1))
+    out = post(EVENTS, headers=events_headers()).json()
+    assert out["expires_at"] == (NOW + timedelta(seconds=300)).isoformat()
+    assert out["expiry_basis"] == "event_window"
+    assert post({**EVENTS, "freshness": "1m"}, headers=events_headers()).json()["expires_at"] == (
+        NOW + timedelta(seconds=60)).isoformat()
+
+
+def test_a_current_events_answer_with_no_event_has_no_evidence_expiry(rig):
+    out = post(EVENTS, headers=events_headers()).json()
+    assert out["expires_at"] == NOW.isoformat() and out["expiry_basis"] == "no_evidence"
