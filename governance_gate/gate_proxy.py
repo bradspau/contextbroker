@@ -23,12 +23,11 @@ class Gate:
         self._records = records
 
     def evaluate(self, proposal, now: datetime) -> Decision:
-        self._seen = {"template": None, "holder": None}
+        seen = {"template": None, "holder": None}
         try:
-            reasons = self._decide(proposal, now)
+            reasons, seen = self._decide(proposal, now)
         except Exception as exc:  # fail closed: never raise out of evaluate
             reasons = [f"gate error: {type(exc).__name__}"]
-        seen = self._seen
         allowed = not reasons
         record_id = ""
         try:
@@ -76,12 +75,14 @@ class Gate:
             })
         return out
 
-    def _decide(self, proposal, now) -> list[str]:
+    def _decide(self, proposal, now) -> tuple[list[str], dict]:
+        """The reasons and what was looked up, both returned so no state is shared
+        between concurrent evaluations."""
         if type(proposal) is not ActionProposal or not is_aware(now):
-            return check(proposal, None, None, now)
+            return check(proposal, None, None, now), {"template": None, "holder": None}
         template = holder = None
         if type(proposal.template_id) is str and type(proposal.scope) is str:
             template = self._catalogue.get(proposal.template_id)
             holder = self._reservations.holder(proposal.scope, now)
-            self._seen = {"template": template, "holder": holder}
-        return check(proposal, template, holder, now, self._max_age_s)
+        seen = {"template": template, "holder": holder}
+        return check(proposal, template, holder, now, self._max_age_s), seen
