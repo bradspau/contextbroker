@@ -1,7 +1,7 @@
 # Context Broker
 
 ## Commands
-- `venv/bin/python -m pytest -q` - full suite (1211 pass, 23 skipped); live TMF921 tests need `TMF921_LIVE=1`, the real-engine parity tests need `FUSEKI_PARITY_URL`
+- `venv/bin/python -m pytest -q` - full suite (1642 pass, 26 skipped); live TMF921 tests need `TMF921_LIVE=1`, the real-engine parity tests need `FUSEKI_PARITY_URL`
 - `python -m ingestion.bind_intent <intent_id> --place <Metric>=<device>/<interface> ...` - write a `:ServiceBinding` as goal and placement fluents in one SPARQL update; on an existing binding pass `--replace` (the goal changed: close the old goal, open the new) or `--correct` (the earlier record was wrong: keep it, mark it superseded), never both; `--replace --valid-from YYYY-MM-DDTHH:MM:SSZ` says when the goal really changed. Nothing is deleted, and `--replace` on an intent whose goal changed re-pins the changed goal (the original stays as a closed goal)
 - `scripts/create_demo_intent.sh <ttl>` - create and activate a TMF921 demo intent (intents are never evaluated until ACTIVE)
 - `docker start fuseki victoriametrics tmf921-server` - start the demo stack; `docker compose up -d contextbroker-api` then `docker network connect contextbroker-arch_default contextbroker-api` (lost on recreate, bead contextbroker-i2q). Never `docker compose down -v` (deletes Fuseki data)
@@ -10,6 +10,7 @@
 ## Auth and secrets
 - Fuseki enforces basic auth on every endpoint, including `/$/ping`. `FUSEKI_ADMIN_PASSWORD` (letters and digits only) is required in `.env` by compose, and in the shell environment for `ingestion.load_ontologies`, `ingestion.bind_intent` and `seed_graph.py`. Never print or commit it.
 - Every `/context/*` route needs a bearer JWT (RS256/ES256, `iss`/`aud` pinned, lifetime at most 3600 s): 401 if missing or invalid, 403 `{"detail": "insufficient scope"}` without `context:read` or `context:assess`. Mint with `scripts/mint_token.py` from a key kept outside the repo; the API gets only the public key (mode 644).
+- `POST /context/request` also needs the signed `authority` claim (`entities`, `purposes`, `classes`), minted with `scripts/mint_token.py --entity/--purpose/--class` (all three or none): 403 `authority claims required` without it, 403 `outside authority scope: entity|purpose|class` when the request is outside it, all before any upstream call. Naming an `intent_id` also needs `context:assess` (403 `insufficient scope`). An empty, overlong or non-printable `sub` is 401 on every `/context/*` route.
 - `GET /health` is unauthenticated and reports each upstream with fixed strings (200, or 503). The API container reports unhealthy without the tmf921 profile.
 - The graph intent path is gone (`source` is `tmf921` only; no `/context/intent/{id}`; no `:OperationalIntent`).
 
@@ -24,6 +25,7 @@
 - The broker resolves, joins and delivers context; it never decides or acts. Verdicts are `success|failure|inconclusive`; stale, missing, conflicted, changed-goal or non-finite evidence is never `success`.
 - Two separate Jena instances: Fuseki (network graph, port 3030, persistent TDB2) and the TMF921 server's embedded Jena. Fuseki and lodlive-proxy stay bound to 127.0.0.1.
 - Reasons are fixed strings built only from pinned metric names and finite numbers; never echo server text.
+- Context eligibility (`eligible|ineligible|gap`, per requested class) is separate from the verdict: it never feeds it, the two can disagree, and it grants no execution authority. A context request never pushes, writes a high-water mark or records an outcome.
 
 ## Wording
 - Say "goal" (one metric with its limit), not "bound"; avoid "drift". The stored `:pinnedBound` and internal `intent_bounds` names stay as they are.
@@ -36,7 +38,7 @@
 - `docs/superpowers/plans/` - dated implementation plans
 
 ## Design notes (tracked)
-- `design/` - tracked analysis docs (e.g. `layer3-gap-analysis.md`); `docs/` is untracked, so anything meant for git goes here
+- `design/` - tracked analysis docs (e.g. `layer3-gap-analysis.md`, `context-contract.md` for the Phase 3 request and response contract); `docs/` is untracked, so anything meant for git goes here
 
 ## Gotchas
 - TMF921 server evaluates latency, jitter and packet loss with strict `<`; bandwidth with `>=` (`data_contracts/metric_map.json`).
@@ -45,6 +47,8 @@
 - ABox files load only with the `# written by ingestion.bind_intent` first line or by the static allow-list (`topology-demo.ttl`). `ontologies/abox/topology-demo.ttl` is tracked through a `.gitignore` negation and is for fresh stores only; a store from before Phase 2 needs `ontologies/migrations/002-bitemporal-fluents.ru` (one-way, run only after the operator's go-ahead; runbook in `design/bitemporal-fluents.md`).
 - `tests/test_fuseki_parity.py` needs `FUSEKI_PARITY_URL` (a throwaway dataset on 127.0.0.1 or localhost) and refuses port 3030 and `network-dataset`; never point it at the persistent store.
 - Fuseki needs host port 3030; another project's container (BBF_921_java) may hold it.
+- Every envelope's `provenance` is a list of four-field records (source system, reference, observation time, retrieval time); an empty one is `[]`, never `{}`.
+- Situation ids (`sit-` plus 32 hex) are pinned by a known-answer test because Phase 4 stores them; changing their inputs, or the node id rules (`Router-A`, `Router-A/GigabitEthernet0/0/0`), needs a `SITUATION_VERSION` bump.
 - `tests/test_bind_intent.py` assumes the query endpoint URL ends in `/query`.
 
 
