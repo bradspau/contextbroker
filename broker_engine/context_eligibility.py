@@ -20,9 +20,10 @@ is kept apart from the verdict: this module never reads or produces a verdict, a
 from the verdict path (D-19). The two can disagree on a current request, by design: the verdict
 compares the live TMF921 goal with the pinned one, eligibility reads the stored fluents only.
 """
+import math
 from datetime import datetime, timedelta
 
-from data_contracts.context_contract import ClassEligibility
+from data_contracts.context_contract import ClassEligibility, Eligibility
 from data_contracts.fluents import Fluent, select_in_force
 from outcome_assurance.tmf921_report import _short_name
 
@@ -44,6 +45,15 @@ NO_PLACEMENT = "no placement in force"
 DUPLICATE_GOAL = "duplicate goal in force"
 DUPLICATE_PLACEMENT = "duplicate placement in force"
 GOAL_CHANGED = "goal changed within window"
+PLACEMENT_CHANGED = "placement changed within window"
+OUTSIDE_AUTHORITY = "placement outside authority scope"
+UNMAPPED = "unmapped metric"
+NO_OBSERVATION = "no observation"
+CONFLICTING_OBSERVATION = "conflicting observation"
+STALE_OBSERVATION = "stale observation"
+FUTURE_OBSERVATION = "future-dated observation"
+
+SCOPE_IDENTITIES = ("resolved", "missing", "ambiguous")
 
 
 def _reason(prefix: str, metric: str) -> str:
@@ -80,9 +90,12 @@ def goals_eligibility(fluents, interfaces, metric_map, *, valid_at: datetime,
     """Judge the goal and placement fluents of an intent for the evidence window
     [valid_at - limit_s, valid_at].
 
-    The goals class fails closed: a goal that changed inside the window, or two distinct goals
-    or placements in force at once, make it ineligible (D-16, D-17). A missing goal or placement
-    is a gap. No TMF921 read is needed, so a past request reads the graph only.
+    The goals class fails closed: a goal or placement that changed inside the window, two
+    distinct goals or placements in force at once, a metric the metric map does not know, and a
+    placement on a device the caller's authority does not cover all make it ineligible (D-16,
+    D-17, D-26); the last means no telemetry will be read for that placement. A missing goal or
+    placement is a gap. No TMF921 read is needed, so a past request reads the graph only.
+    `metric_map` is keyed by metric URI; `allowed(device)` is the caller's entity check.
     """
     if not fluents:
         return classify([NO_BINDING], [])
@@ -90,6 +103,8 @@ def goals_eligibility(fluents, interfaces, metric_map, *, valid_at: datetime,
     problems: list[str] = []
     lo = valid_at - timedelta(seconds=limit_s)
     for metric in sorted({m for m, _kind in fluents}):
+        if metric not in metric_map:
+            problems.append(_reason(UNMAPPED, metric))
         try:
             goal = select_in_force(fluents[(metric, "goal")], valid_at, known_at)
         except ValueError:
@@ -106,4 +121,95 @@ def goals_eligibility(fluents, interfaces, metric_map, *, valid_at: datetime,
         else:
             if place is None:
                 gaps.append(_reason(NO_PLACEMENT, metric))
+            else:
+                device = interfaces.get(place.value, (None, None))[0]
+                if device is None or not allowed(device):
+                    problems.append(_reason(OUTSIDE_AUTHORITY, metric))
+            if len(overlapping(fluents[(metric, "placement")], lo, valid_at, known_at)) > 1:
+                problems.append(_reason(PLACEMENT_CHANGED, metric))
     return classify(gaps, problems)
+
+
+def topology_eligibility(scope_identity: str, *, conflicting_links: bool = False,
+                         colliding_ids: bool = False, malformed: bool = False) -> ClassEligibility:
+    """Judge the topology read. `scope_identity` is "resolved", "missing" or "ambiguous".
+
+    The topology class fails closed on an ambiguous scope entity, two link records on one link,
+    node ids that collide, and a malformed record (D-17). A scope entity absent from the graph is
+    a gap. A resolved scope with no link valid then is still eligible.
+    """
+    if scope_identity not in SCOPE_IDENTITIES:
+        raise ValueError("unknown scope identity")
+    gaps = [SCOPE_MISSING] if scope_identity == "missing" else []
+    problems = [SCOPE_AMBIGUOUS] if scope_identity == "ambiguous" else []
+    if conflicting_links:
+        problems.append(LINK_CONFLICT)
+    if colliding_ids:
+        problems.append(NODE_AMBIGUOUS)
+    if malformed:
+        problems.append(TOPOLOGY_INVALID)
+    return classify(gaps, problems)
+
+
+def binding_problem(reason: str) -> ClassEligibility:
+    """The goals class when the binding could not be read: a gap when the intent has none,
+    ineligible when the stored binding is invalid (a multiplicity fails closed, D-17)."""
+    if reason == NO_BINDING:
+        return classify([NO_BINDING], [])
+    if reason == INVALID_BINDING:
+        return classify([], [INVALID_BINDING])
+    raise ValueError("unknown binding reason")
+
+
+def _finite_value(envelope) -> bool:
+    value = envelope.value
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return isinstance(value, (int, str))
+
+
+def observations_eligibility(metrics, observed, *, valid_at: datetime,
+                             limit_s: int) -> ClassEligibility:
+    """Judge one envelope per expected metric URI against the valid time `valid_at`.
+
+    The observations class fails closed. Absent evidence is a gap: the metric is not in
+    `observed`, or its envelope is missing, has no value, or holds a non-finite number (D-29;
+    the joiner already reports NaN as missing and is not changed). Present but unfit evidence is
+    ineligible: more than one series (conflicts), the stale flag, a sample older than `limit_s`
+    (the joiner judges against 300 s only, so a tightened limit is applied here), or one stamped
+    more than FUTURE_TOLERANCE_S after `valid_at`. A conflict's own text is never echoed.
+    """
+    gaps: list[str] = []
+    problems: list[str] = []
+    for metric in metrics:
+        envelope = observed.get(metric)
+        if (envelope is None or envelope.quality.missing or not _finite_value(envelope)):
+            gaps.append(_reason(NO_OBSERVATION, metric))
+            continue
+        if envelope.quality.conflicts:
+            problems.append(_reason(CONFLICTING_OBSERVATION, metric))
+        at = envelope.observed_at
+        if at is None:
+            # A sample with no time cannot be shown fresh.
+            problems.append(_reason(STALE_OBSERVATION, metric))
+            continue
+        age_s = (valid_at - at).total_seconds()
+        if envelope.quality.stale or age_s > limit_s:
+            problems.append(_reason(STALE_OBSERVATION, metric))
+        if -age_s > FUTURE_TOLERANCE_S:
+            problems.append(_reason(FUTURE_OBSERVATION, metric))
+    return classify(gaps, problems)
+
+
+def overall(classes: dict) -> Eligibility:
+    """Ineligible if any requested class is, else gap if any is, else eligible.
+
+    Reasons are the sorted union; each class keeps its own. Only classes present in `classes`
+    count (D-18).
+    """
+    results = {c.result for c in classes.values()}
+    result = "ineligible" if "ineligible" in results else "gap" if "gap" in results else "eligible"
+    reasons = sorted({r for c in classes.values() for r in c.reasons})
+    return Eligibility(result=result, classes=dict(classes), reasons=reasons)
