@@ -566,3 +566,90 @@ def test_read_device_names_refuses_a_non_json_reply_and_lets_a_network_error_thr
                side_effect=requests.ConnectionError("down")):
         with pytest.raises(requests.ConnectionError):
             cg.read_device_names(QUERY_URL)
+
+
+# ---- device_links_in_force: the configured side of an event reconciliation (D-17, D-26, D-30) ----
+
+def links_of(fx, device="Router-A", *, allowed=lambda d: True, valid_at=VALID, known_at=None):
+    with patch("broker_engine.context_graph.requests.post", fx.post):
+        return cg.device_links_in_force(device, valid_at=valid_at, known_at=known_at,
+                                        retrieved_at=RETRIEVED, allowed=allowed,
+                                        query_endpoint=QUERY_URL)
+
+
+def test_a_link_in_force_on_the_device_is_held_as_an_events_class_link_value():
+    fx = demo()
+    got = links_of(fx)
+    assert (got.status, got.authority_cut) == ("held", False)
+    [value] = got.fluent_values
+    assert value.context_class == "events" and value.kind == "link" and value.subject == LINK
+    assert value.value == [A_IF, B_IF] and value.in_force is True
+    assert value.provenance.source_system == "fuseki" and value.provenance.reference.endswith(FLUENT)
+    assert value.provenance.retrieved_at == RETRIEVED.isoformat()
+    assert len(queries(fx)) == 2  # one interface read and one link read, both SELECT
+
+
+def test_a_device_with_no_link_fluent_is_not_held():
+    got = links_of(topo([("a", "g0")]), "a")
+    assert (got.status, got.fluent_values, got.authority_cut) == ("not_held", [], False)
+
+
+def test_a_device_with_no_interface_sends_no_link_query():
+    fx = topo([("a", "g0")])
+    got = links_of(fx, "zz")
+    assert got.status == "not_held" and len(queries(fx)) == 1
+
+
+def test_a_link_before_it_was_valid_or_known_is_not_held():
+    assert links_of(demo(), valid_at=BEFORE).status == "not_held"
+    assert links_of(demo(), known_at=BEFORE).status == "not_held"
+
+
+def test_a_link_whose_other_end_is_outside_the_callers_entities_is_dropped_and_cuts_authority():
+    got = links_of(demo(), allowed=lambda d: d == "Router-A")
+    assert (got.status, got.fluent_values, got.authority_cut) == ("not_held", [], True)
+
+
+def test_one_covered_link_is_kept_when_another_is_cut():
+    fx = topo([("a", "g0"), ("a", "g1"), ("b", "g0"), ("c", "g0")],
+              [("link-ab", ("a", "g0"), ("b", "g0"), T0, T0), ("link-ac", ("a", "g1"), ("c", "g0"), T0, T0)])
+    got = links_of(fx, "a", allowed=lambda d: d in ("a", "b"))
+    assert got.status == "held" and got.authority_cut is True
+    assert [v.subject for v in got.fluent_values] == ["link-ab"]
+
+
+def test_two_fluents_in_force_on_one_link_are_invalid_with_no_values():
+    fx = topo(CHAIN, [("link-ab", ("a", "g0"), ("b", "g1"), T0, T0)])
+    f.add_link_fluent(fx.graph, NS + "link-ab", iri("a", "g0"), iri("b", "g1"), T0, T1, kind="fluent-reissue")
+    got = links_of(fx, "a", valid_at=NOW)
+    assert (got.status, got.fluent_values) == ("invalid", [])
+
+
+def test_a_malformed_record_is_invalid_and_never_echoed():
+    bad = 'bad "dev x'
+    fx = topo([("a", "g0")], extra=f':if-bad a :Interface ; :onDevice """{bad}""" ; :interfaceName "g9" .\n')
+    f.add_link_fluent(fx.graph, NS + "link-bad", iri("a", "g0"), NS + "if-bad", T0, T0)
+    got = links_of(fx, "a", valid_at=NOW)
+    assert (got.status, got.fluent_values) == ("invalid", [])
+
+
+def test_a_fuseki_failure_propagates_unchanged():
+    import requests
+    with patch("broker_engine.context_graph.requests.post", side_effect=requests.ConnectionError("down")):
+        with pytest.raises(requests.ConnectionError):
+            cg.device_links_in_force("Router-A", valid_at=VALID, known_at=None, retrieved_at=RETRIEVED,
+                                     allowed=lambda d: True, query_endpoint=QUERY_URL)
+
+
+def test_an_unsafe_device_name_reaches_no_query():
+    fx = demo()
+    with pytest.raises(ValueError):
+        links_of(fx, 'x"} DROP')
+    assert queries(fx) == []
+
+
+def test_reading_the_links_writes_nothing():
+    fx = demo()
+    before = len(fx.graph)
+    links_of(fx)
+    assert fx.updates() == [] and len(fx.graph) == before

@@ -918,7 +918,10 @@ def test_events_request_returns_the_stored_events_newest_first_with_flags(rig):
     assert older["provenance"]["observed_at"] == (NOW - 60 * S).isoformat()
     assert out["eligibility"]["classes"] == {"events": {"result": "eligible", "reasons": []}}
     assert out["eligibility"]["result"] == "eligible"
-    assert out["graph"] is None and out["fluent_values"] == [] and out["envelopes"] == []
+    # Only the recognised event is reconciled; its configured link comes back as an events-class value.
+    assert out["graph"] is None and out["envelopes"] == []
+    assert [v["class"] for v in out["fluent_values"]] == ["events"]
+    assert [e["event_id"] for e in out["events"]["envelopes"]] == ["evt-" + f"{1:032x}"]
     assert RAW_CANARY not in r.text and "<28>" not in r.text
     assert "message" not in str(out["events"]["events"][0].keys())
 
@@ -989,8 +992,8 @@ def test_a_token_without_the_events_class_is_refused_before_anything_is_read(rig
     assert post(TOPOLOGY, headers=token({**WIDE, "classes": ["topology"]})).status_code == 200
 
 
-def test_an_events_only_request_reads_only_the_state_file(rig):
-    put(event(1))
+def test_an_events_request_with_no_recognised_event_reads_only_the_state_file(rig):
+    put(event(1, kind=None))
     r = post(EVENTS, headers=events_headers())
     assert r.status_code == 200
     rig.untouched()
@@ -1193,3 +1196,78 @@ def test_the_openapi_document_lists_events_and_describes_its_result_without_name
     text = str(spec)
     for secret in ("Router-A", "olt1", "eyJ", "BEGIN", "test-caller", "testpassword0"):
         assert secret not in text
+
+
+# ---- reconciliation: a recognised event against the configured link (EVT-04, D-16 to D-19, D-30) ----
+
+CONFLICT_TEXT = "event link_down contradicts configured link_in_force"
+DEMO_LINK = "link-router-a-router-b"
+
+
+def ask_events(entities=("*",), body=None):
+    return post(body or EVENTS, headers=events_headers(entities))
+
+
+def test_a_link_down_event_against_a_link_in_force_is_a_conflict_naming_both_sides(rig):
+    put(event(1))
+    triples = len(rig.fx.graph)
+    r = ask_events()
+    assert r.status_code == 200, r.text
+    out = r.json()
+    evt = "evt-" + f"{1:032x}"
+    [envelope] = out["events"]["envelopes"]
+    assert envelope == {
+        "event_id": evt, "node": "Router-A", "entity_id": "Router-A", "state": "observed",
+        "value": "link_down", "source": "syslog", "observed_at": (NOW - 60 * S).isoformat(),
+        "quality": {"stale": False, "missing": False, "conflicts": [CONFLICT_TEXT]},
+        "provenance": [{"source_system": "syslog", "reference": evt,
+                        "observed_at": (NOW - 60 * S).isoformat(), "retrieved_at": NOW.isoformat()}]}
+    assert out["events"]["configured"] == {
+        "device": "Router-A", "status": "held", "value": "link_in_force", "fluents": [DEMO_LINK],
+        "authority_cut": False}
+    assert out["events"]["conflicts"] == [{
+        "event_id": evt, "device": "Router-A", "event": "link_down", "configured": "link_in_force",
+        "text": CONFLICT_TEXT}]
+    [link] = out["fluent_values"]
+    assert link["class"] == "events" and link["kind"] == "link" and link["subject"] == DEMO_LINK
+    assert link["value"] == [A_IF, B_IF] and link["in_force"] is True
+    assert link["provenance"]["source_system"] == "fuseki"
+    assert link["provenance"]["reference"].endswith("link-router-a-router-b-fluent-demo")
+    # The configured side is only read: no update, the same graph, no other upstream.
+    assert rig.fx.updates() == [] and len(rig.fx.graph) == triples
+    assert all(query.lstrip().upper().startswith(("PREFIX", "SELECT")) for query in rig.queries())
+    rig.get.assert_not_called()
+    rig.get_intent.assert_not_called()
+    assert RAW_CANARY not in r.text
+
+
+def test_a_conflict_changes_neither_the_events_eligibility_nor_the_expiry(rig):
+    put(event(1))
+    with_link = ask_events().json()
+    rig.fx.graph.remove((None, rdflib.RDF.type, rdflib.URIRef(NS + "LinkFluent")))
+    without_link = ask_events().json()
+    assert with_link["events"]["conflicts"] and without_link["events"]["conflicts"] == []
+    assert with_link["eligibility"] == without_link["eligibility"]
+    assert with_link["eligibility"]["classes"]["events"] == {"result": "eligible", "reasons": []}
+    assert with_link["expires_at"] == without_link["expires_at"]
+    assert with_link["expiry_basis"] == without_link["expiry_basis"] == "event_window"
+
+
+def test_a_link_beyond_the_callers_entities_is_not_shown_does_not_count_and_cuts_authority(rig):
+    put(event(1))
+    r = ask_events(("Router-A",))
+    out = r.json()
+    assert out["events"]["configured"] == {
+        "device": "Router-A", "status": "not_held", "value": None, "fluents": [], "authority_cut": True}
+    assert out["events"]["conflicts"] == []
+    [envelope] = out["events"]["envelopes"]
+    assert envelope["quality"]["conflicts"] == []
+    assert out["fluent_values"] == []
+    assert "Router-B" not in r.text and "router-b" not in r.text
+
+
+def test_the_configured_link_is_read_at_the_requests_valid_time(rig):
+    put(event(1, at=NOW - 2 * 86400 * S - 60 * S, ingest=NOW - 2 * 86400 * S - 59 * S))
+    # The demo link was valid from 2026-11-05, so two days back it was not in force.
+    out = ask_events(body={**EVENTS, "as_of": "2d"}).json()
+    assert out["events"]["configured"]["status"] == "not_held" and out["events"]["conflicts"] == []

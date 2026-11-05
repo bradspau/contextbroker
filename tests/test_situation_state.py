@@ -281,9 +281,11 @@ def test_an_events_situation_references_its_events_and_holds_none_of_them(rig):
     assert out["evidence"]["graph_nodes"] == []
     sent = [e["provenance"] for e in answer["events"]["events"]]
     assert len(sent) == 2
-    assert all(p["source_system"] == "syslog" for p in out["evidence"]["provenance"])
-    assert sorted(out["evidence"]["provenance"], key=lambda p: p["reference"]) == sorted(
-        sent, key=lambda p: p["reference"])
+    # The recognised link_down event was reconciled, so the link fluent it was compared with is
+    # referenced too (a Fuseki record); the events themselves are referenced by id, none held.
+    syslog = [p for p in out["evidence"]["provenance"] if p["source_system"] == "syslog"]
+    assert [p["source_system"] for p in out["evidence"]["provenance"] if p not in syslog] == ["fuseki"]
+    assert sorted(syslog, key=lambda p: p["reference"]) == sorted(sent, key=lambda p: p["reference"])
     assert out["evidence"]["provenance"] == sorted(
         out["evidence"]["provenance"], key=lambda p: (p["source_system"], p["reference"]))
     assert (store.event_count(), store.outcome_count(), store.mark_count()) == (2, 0, 0)

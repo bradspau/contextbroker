@@ -273,6 +273,23 @@ def select_links(rows, valid_at: datetime, known_at: datetime | None) -> LinkSel
     return LinkSelection(tuple(links), conflicting)
 
 
+def _link_value(link: SelectedLink, first, second, retrieved_at, context_class) -> FluentValue:
+    """A link fluent as a response value: the link local name, the two node ids, the fluent's valid
+    and recorded times and a Fuseki provenance record naming the fluent IRI."""
+    fluent = link.fluent
+
+    def stamp(moment):
+        return moment.isoformat() if moment else None
+
+    return FluentValue(
+        context_class=context_class, kind="link", subject=local_name(link.link),
+        value=[first, second], in_force=True, valid_from=stamp(fluent.start),
+        valid_to=stamp(fluent.end), recorded_at=stamp(fluent.recorded),
+        superseded_at=stamp(fluent.superseded),
+        provenance=Provenance(source_system="fuseki", reference=fluent.iri,
+                              observed_at=stamp(fluent.recorded), retrieved_at=stamp(retrieved_at)))
+
+
 # ---- the traversal -----------------------------------------------------------------------
 
 
@@ -431,19 +448,7 @@ class _Traversal:
             self.values[key] = self._fluent_value(link, first.id, second.id)
 
     def _fluent_value(self, link: SelectedLink, first, second) -> FluentValue:
-        fluent = link.fluent
-
-        def stamp(moment):
-            return moment.isoformat() if moment else None
-
-        return FluentValue(
-            context_class="topology", kind="link", subject=local_name(link.link),
-            value=[first, second], in_force=True, valid_from=stamp(fluent.start),
-            valid_to=stamp(fluent.end), recorded_at=stamp(fluent.recorded),
-            superseded_at=stamp(fluent.superseded),
-            provenance=Provenance(source_system="fuseki", reference=fluent.iri,
-                                  observed_at=stamp(fluent.recorded),
-                                  retrieved_at=stamp(self.retrieved_at)))
+        return _link_value(link, first, second, self.retrieved_at, "topology")
 
     # the walk ---------------------------------------------------------------------------
 
@@ -523,3 +528,52 @@ def build_graph(device, interface, *, max_depth, relationship_types, valid_at, k
     except MalformedTopology:
         return walk.result(malformed=True)
     return walk.result()
+
+
+# ---- the configured side of an event reconciliation --------------------------------------
+
+
+@dataclass(frozen=True)
+class DeviceLinks:
+    """The link fluents in force that have an end on one device.
+
+    ``status`` is ``held`` (at least one link kept), ``not_held`` (none in force, or every one cut by
+    authority) or ``invalid`` (conflicting or malformed link records; no values). ``authority_cut``
+    says a link was dropped because its other end lies outside the caller's entities."""
+
+    status: str
+    fluent_values: list[FluentValue]
+    authority_cut: bool
+
+
+def device_links_in_force(device, *, valid_at: datetime, known_at: datetime | None,
+                          retrieved_at: datetime, allowed,
+                          query_endpoint=FUSEKI_QUERY_ENDPOINT) -> DeviceLinks:
+    """The link fluents in force at ``valid_at`` as known at ``known_at`` with an end on ``device``.
+
+    One interface query and, when the device has interfaces, one link query. A link whose other end's
+    device is not covered by ``allowed`` is dropped and only sets ``authority_cut``: it is neither
+    shown nor counted (D-26). An end on the device itself is always covered. A malformed read back
+    or a conflicting selection is ``invalid``; a Fuseki failure propagates as ``requests``'s error.
+    It reads and never writes."""
+    _check_token(device, "device")
+    for moment in (valid_at, known_at):
+        if moment is not None and (not isinstance(moment, datetime) or moment.utcoffset() is None):
+            raise ValueError("timestamp needs a zone")
+    try:
+        interfaces = read_device_interfaces([device], query_endpoint)
+        selection = select_links(read_links([iri for iri, _d, _n in interfaces], query_endpoint),
+                                 valid_at, known_at)
+    except MalformedTopology:
+        return DeviceLinks("invalid", [], False)
+    if selection.conflicting:
+        return DeviceLinks("invalid", [], False)
+    values, cut = [], False
+    for link in selection.links:
+        if all(end.device == device or allowed(end.device) for end in link.ends):
+            first, second = link.ends
+            values.append(_link_value(link, first.node_id, second.node_id, retrieved_at, "events"))
+        else:
+            cut = True
+    values.sort(key=lambda v: (v.subject, v.provenance.reference))
+    return DeviceLinks("held" if values else "not_held", values, cut)

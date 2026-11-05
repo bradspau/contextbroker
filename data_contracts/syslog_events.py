@@ -29,6 +29,9 @@ EVENT_FORMATS = ("rfc5424", "rfc3164")
 EVENT_MAPPINGS = ("mapped", "ambiguous", "unmapped")
 EVENT_KINDS = ("link_down", "link_up")
 
+# The source system name on every event envelope and provenance record.
+EVENT_SOURCE = "syslog"
+
 EVENT_ID_PATTERN = re.compile(r"^evt-[0-9a-f]{32}\Z")
 
 

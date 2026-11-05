@@ -1,7 +1,10 @@
 """The I/O shell of the context request (CTX-01 to CTX-08).
 
-The events class reads the state file only, is judged on its own and never returns device-authored
-text (no raw line, no message): only structured fields, a recognised kind and quality flags.
+The events class reads the state file, is judged on its own and never returns device-authored text
+(no raw line, no message): only structured fields, a recognised kind and quality flags. When a
+recognised event on a mapped device is returned it also reads the device's link fluents in Fuseki
+(SELECT only) and publishes a contradiction as a conflict naming both sides; the configured side is
+never written and the conflict never reaches the eligibility or the verdict.
 
 It composes the pure modules (the request contract, eligibility, the Context Graph, the binding
 selection) over the sources: one Fuseki read for the intent's fluents, the Context Graph reads, one
@@ -43,8 +46,11 @@ from data_contracts.context_contract import (
     EVENT_RESULT_CAP,
     EVENT_SOURCE,
     ContextRequest,
+    ConfiguredOut,
+    ConflictOut,
     ContextResponse,
     EnvelopeOut,
+    EventEnvelopeOut,
     EventOut,
     EventsResult,
     EventWindow,
@@ -59,6 +65,7 @@ from data_contracts.context_contract import (
 )
 from broker_state.process import event_window_limits, get_store
 from data_contracts.metric_map import load_metric_map
+from data_contracts.syslog_events import EVENT_KINDS
 from data_contracts.situation_record import (
     SITUATION_ID_PATTERN,
     SituationRecord,
@@ -67,6 +74,12 @@ from data_contracts.situation_record import (
 )
 from intent_management.tmf921_source import assess_tmf921_as_of
 from outcome_assurance.tmf921_report import _short_name
+from state_reconciliation.event_reconciler import (
+    CONFIGURED_LINK_IN_FORCE,
+    ConfiguredSide,
+    EventFact,
+    reconcile,
+)
 
 # The telemetry lookback is twice the default freshness limit, so a sample that is too old is read and
 # reported stale (ineligible) instead of vanishing from the window and reading as missing (a gap).
@@ -308,9 +321,38 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
             limit=EVENT_RESULT_CAP + 1)
         truncated = len(rows) > EVENT_RESULT_CAP
         returned = [_event_out(row, now, covers) for row in rows[:EVENT_RESULT_CAP]]
+        # Reconciliation (D-16 to D-19): only a recognised kind on a mapped event is compared, and the
+        # configured side is read (SELECT only) only when there is at least one. An ambiguous or
+        # unrecognised event gets no envelope and causes no read.
+        recognised = [row for row in rows[:EVENT_RESULT_CAP]
+                      if row.mapping == "mapped" and row.device is not None and row.kind in EVENT_KINDS]
+        envelope_out, conflicts_out, configured_out = [], [], None
+        if recognised:
+            links = context_graph.device_links_in_force(
+                body.scope.device, valid_at=times.valid_at, known_at=times.known_at, retrieved_at=now,
+                allowed=covers, query_endpoint=query_endpoint)
+            fluent_values.extend(links.fluent_values)
+            held = links.status == "held"
+            configured_out = ConfiguredOut(
+                device=body.scope.device, status=links.status,
+                value=CONFIGURED_LINK_IN_FORCE if held else None,
+                fluents=sorted({v.subject for v in links.fluent_values}),
+                authority_cut=links.authority_cut)
+            for row in recognised:
+                result = reconcile(
+                    EventFact(row.event_id, row.device, row.kind, row.event_time),
+                    ConfiguredSide(body.scope.device, CONFIGURED_LINK_IN_FORCE if held else None),
+                    now=now, max_age_s=times.limit_s)
+                envelope_out.append(EventEnvelopeOut(event_id=row.event_id, node=row.device,
+                                                     **result.envelope.to_dict()))
+                conflicts_out.extend(
+                    ConflictOut(event_id=row.event_id, device=row.device, event=row.kind,
+                                configured=CONFIGURED_LINK_IN_FORCE, text=text)
+                    for text in result.conflicts)
         events = EventsResult(
             window=EventWindow(start=_iso(start), end=_iso(times.valid_at), seconds=window_s),
-            cap=EVENT_RESULT_CAP, truncated=truncated, events=returned)
+            cap=EVENT_RESULT_CAP, truncated=truncated, events=returned, envelopes=envelope_out,
+            configured=configured_out, conflicts=conflicts_out)
         eligibility["events"] = events_eligibility(
             count=len(returned), ambiguous=sum(e.mapping == "ambiguous" for e in returned),
             beyond_retention=start < now - timedelta(seconds=get_store().event_retention_s))

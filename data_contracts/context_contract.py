@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from broker_engine.validation import freshness_seconds, window_seconds
 from data_contracts.envelope import DEFAULT_MAX_AGE_S
-from data_contracts.syslog_events import EVENT_FORMATS, EVENT_KINDS
+from data_contracts.syslog_events import EVENT_FORMATS, EVENT_KINDS, EVENT_SOURCE
 
 PURPOSES = ("assurance", "diagnosis", "reporting")
 CONTEXT_CLASSES = ("topology", "goals", "observations", "events")
@@ -33,7 +33,6 @@ CUT_REASONS = ("authority", "depth", "node_cap", "relationship_types")
 # request holds at most EVENT_RESULT_CAP events; the cap cutting it is shown as `truncated`.
 EVENT_RESULT_CAP = 100
 EVENT_FLAGS = ("ambiguous", "future_dated", "time_unknown")
-EVENT_SOURCE = "syslog"
 # Eligibility outcomes (D-15).
 RESULTS = ("eligible", "ineligible", "gap")
 
@@ -417,6 +416,50 @@ class EventOut(_Out):
     provenance: Provenance
 
 
+CONFIGURED_STATUSES = ("held", "not_held", "invalid")
+
+
+class EventEnvelopeOut(_Out):
+    """The observed envelope of one recognised event on a mapped device. Its value is the recognised
+    kind and nothing a device wrote; `quality.conflicts` holds the fixed conflict text, if any."""
+
+    event_id: str
+    node: str = Field(description="The device node id the event belongs to.")
+    entity_id: str
+    state: str
+    value: str
+    source: str
+    observed_at: str | None
+    quality: QualityOut
+    provenance: list[Provenance]
+
+
+class ConfiguredOut(_Out):
+    """The configured side read for a device: whether a link with an end on it is in force at the
+    request's valid and knowledge time. The comparison is device-level, not per interface."""
+
+    device: str
+    status: Literal[CONFIGURED_STATUSES] = Field(
+        description="held: a link is in force; not_held: none is, or none the caller may see; invalid: "
+                    "the link records conflict or are malformed, so nothing is claimed.")
+    value: Literal["link_in_force"] | None = Field(description="Set only when the status is held.")
+    fluents: list[str] = Field(description="The local names of the links in force; their fluents are in "
+                                           "fluent_values with the class events.")
+    authority_cut: bool = Field(description="True when a link was left out because its other end lies "
+                                            "outside the caller's entities.")
+
+
+class ConflictOut(_Out):
+    """A recognised event that contradicts the configured side. Both sides are named and neither is
+    ranked: the configured value is unchanged and no state is inferred."""
+
+    event_id: str
+    device: str
+    event: Literal[EVENT_KINDS]
+    configured: Literal["link_in_force"]
+    text: str = Field(description="A fixed sentence built from the event kind and the configured value.")
+
+
 class EventsResult(_Out):
     """The events class: the events of the device in the window, newest first, at most `cap` of them."""
 
@@ -424,6 +467,11 @@ class EventsResult(_Out):
     cap: int
     truncated: bool = Field(description="True when the cap cut the result.")
     events: list[EventOut]
+    envelopes: list[EventEnvelopeOut] = Field(
+        default_factory=list, description="One observed envelope per recognised event on a mapped device.")
+    configured: ConfiguredOut | None = Field(
+        default=None, description="Null when no recognised mapped event needed a configured read.")
+    conflicts: list[ConflictOut] = Field(default_factory=list)
 
 
 class Situation(_Out):
