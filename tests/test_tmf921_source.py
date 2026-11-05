@@ -873,3 +873,89 @@ def test_a_binding_without_gaps_is_assessed_by_the_temporal_path_as_before():
                                   bindings=BIND)
     assert out["verdict"] == "success"
     assert c.gets == 1 and c.posts == []
+
+
+# ---------- a state store failure on the TMF921 path (D-04, D-R4) ----------
+def _raise_state_unavailable(*a, **k):
+    from broker_state.store import StateUnavailable
+    raise StateUnavailable()
+
+
+def test_state_store_failure_reading_marks_posts_nothing(monkeypatch, caplog):
+    from broker_state.store import StateUnavailable
+    monkeypatch.setattr(src.TMF921_STORE, "marks", _raise_state_unavailable)
+    c = FakeClient(post=[[rep("n", "2026-10-27T12:00:01Z")]])
+    with caplog.at_level("WARNING"), pytest.raises(StateUnavailable):
+        run(c)
+    assert c.posts == [] and c.lists == 0
+    assert "intent server unavailable" not in caplog.text
+
+
+def test_state_store_failure_reading_the_last_outcome_leaves_before_any_call(monkeypatch):
+    from broker_state.store import StateUnavailable
+    monkeypatch.setattr(src.TMF921_STORE, "last_outcome", _raise_state_unavailable)
+    c = FakeClient()
+    with pytest.raises(StateUnavailable):
+        run(c)
+    assert c.gets == 0
+    join = make_join()
+    with pytest.raises(StateUnavailable):
+        src.assess_tmf921_as_of(IID, "5m", as_of="10m", mode=None, client=FakeClient(),
+                                join=join, now=NOW, metric_map=MMAP, bindings=BIND)
+    assert join.seen == []
+
+
+def test_state_store_failure_after_push_logs_the_pushed_names(monkeypatch, caplog):
+    from broker_state.store import StateUnavailable
+    effects = iter([True, StateUnavailable()])
+
+    def advance(*a, **k):
+        e = next(effects)
+        if isinstance(e, Exception):
+            raise e
+        return e
+    monkeypatch.setattr(src.TMF921_STORE, "advance_mark", advance)
+    updated = []
+    monkeypatch.setattr(src.TMF921_STORE, "fulfilment_update",
+                        lambda *a, **k: updated.append(a))
+    c = FakeClient(intent_doc=intent((URI, 100), (URI2, 10)))
+    with caplog.at_level("WARNING"), pytest.raises(StateUnavailable):
+        run(c, bindings=BIND2)
+    assert len(c.posts) == 2
+    assert ("state store unavailable after push: pushed LatencyMetric, JitterMetric: "
+            "StateUnavailable") in caplog.text
+    assert updated == []
+    assert "intent server unavailable" not in caplog.text
+
+
+def test_state_store_failure_inside_the_push_block_is_recorded_once(monkeypatch, caplog):
+    from broker_state.store import StateUnavailable
+    calls = []
+
+    def update(*a, **k):
+        calls.append(a)
+        raise StateUnavailable()
+    monkeypatch.setattr(src.TMF921_STORE, "fulfilment_update", update)
+    c = FakeClient(post=[[rep("a", "2026-10-27T12:00:01Z"), rep("b", "2026-10-27T12:00:01Z")]])
+    with caplog.at_level("WARNING"), pytest.raises(StateUnavailable):
+        run(c)
+    assert len(calls) == 1
+    assert "intent server unavailable" not in caplog.text
+
+
+def test_intent_locks_are_released_with_their_last_user():
+    import gc
+    import weakref
+    assert isinstance(src._INTENT_LOCKS, weakref.WeakValueDictionary)
+    for n in range(50):
+        iid = f"intent-{n}"
+        b = {iid: IntentBinding(iid, {URI: ("olt1", "pon0/1")}, {URI: 100.0})}
+        run(FakeClient(), bindings=b, iid=iid)
+    gc.collect()
+    assert len(src._INTENT_LOCKS) == 0
+
+
+def test_a_held_intent_lock_is_shared_with_the_next_caller():
+    first = src._intent_lock("x")
+    assert src._intent_lock("x") is first
+    assert len(src._INTENT_LOCKS) == 1

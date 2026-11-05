@@ -19,6 +19,7 @@ import math
 import re
 import threading
 import time
+import weakref
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -35,6 +36,7 @@ from broker_engine.validation import (
     ClientInputError,
     window_seconds,
 )
+from broker_state.store import StateUnavailable
 from data_contracts.envelope import DEFAULT_MAX_AGE_S, build_observed
 from data_contracts.intent_bindings import IntentBinding
 from data_contracts.metric_map import load_metric_map
@@ -54,7 +56,9 @@ FUTURE_SKEW = timedelta(seconds=5)
 # Last outcome the broker reported per TMF921 intent (durable, in the state store).
 TMF921_STORE = IntentStore()
 _STATE_LOCK = threading.Lock()
-_INTENT_LOCKS: dict[str, threading.Lock] = {}
+# Weak: a lock lives only while some assess holds it, so the table does not grow
+# with every intent id ever assessed.
+_INTENT_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
 _TS = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)")
 
 DEFAULT_MAX_ENTITIES = 50
@@ -324,8 +328,16 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
                              + "; failed " + _short_name(u)],
                             envs=all_envs)
             # Only after the post succeeded: a failed post leaves no mark.
-            if not TMF921_STORE.advance_mark(intent_id, u, envs[u].observed_at, envs[u].value):
-                log.warning("high-water mark not advanced: %s", _short_name(u))
+            try:
+                if not TMF921_STORE.advance_mark(intent_id, u, envs[u].observed_at,
+                                                 envs[u].value):
+                    log.warning("high-water mark not advanced: %s", _short_name(u))
+            except StateUnavailable as exc:
+                # The post cannot be undone and is not retried: leave the pinned
+                # names of what was pushed for the operator (D-R4).
+                log_fault(log, exc, "state store unavailable after push: pushed "
+                          + ", ".join([*pushed, _short_name(u)]))
+                raise
             pushed.append(_short_name(u))
         report = None
         waited = 0.0
@@ -344,6 +356,10 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
                 break
             sleep(poll_interval_s)
             waited += poll_interval_s
+    except StateUnavailable:
+        # A store failure (a mark write, or done() recording an outcome) is not an
+        # intent server fault and must not be recorded a second time (D-04).
+        raise
     except Exception as exc:  # Tmf921Error and anything unexpected: fail closed
         log_fault(log, exc, "intent server unavailable")
         return done(Outcome.INCONCLUSIVE, ["intent server unavailable"], envs=all_envs)
