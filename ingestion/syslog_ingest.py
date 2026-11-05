@@ -120,3 +120,98 @@ def ingest_lines(lines, *, store, devices, clock=None, batch_size=BATCH_SIZE,
             flush()
     flush()
     return IngestSummary(quarantined=quarantined_total, **totals)
+
+
+def _strip_eol(piece: bytes) -> bytes:
+    piece = piece[:-1] if piece.endswith(b"\n") else piece
+    return piece[:-1] if piece.endswith(b"\r") else piece
+
+
+def read_lines(stream, max_bytes=MAX_LINE_BYTES):
+    """Yield the lines of a binary ``stream`` as bytes, holding at most one capped line.
+
+    Only bounded ``readline(max_bytes + 1)`` calls are made, never ``read()``. One trailing
+    CR LF (or LF) is removed and empty lines are skipped. A line longer than ``max_bytes`` is
+    yielded as its first ``max_bytes + 1`` bytes (enough for the parser to call it too long) and
+    the rest of it is read away in bounded pieces, so the next line is still read."""
+    while True:
+        piece = stream.readline(max_bytes + 1)
+        if not piece:
+            return
+        if len(piece) > max_bytes and not piece.endswith(b"\n"):
+            yield piece
+            while True:  # skip the rest of the long line
+                rest = stream.readline(max_bytes + 1)
+                if not rest or rest.endswith(b"\n"):
+                    break
+            continue
+        line = _strip_eol(piece)
+        if line:
+            yield line
+
+
+def _refuse(text: str) -> int:
+    print(f"Refused: {text}", file=sys.stderr)
+    return 1
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--file", default=None, metavar="PATH",
+                    help="read syslog lines from this file (default: standard input)")
+    ap.add_argument("--query-endpoint", default=FUSEKI_QUERY_ENDPOINT,
+                    help="Fuseki query endpoint (default FUSEKI_QUERY_ENDPOINT)")
+    args = ap.parse_args(argv)
+    nothing = ". Nothing was stored."
+    try:
+        fuseki_credentials()  # before any network call
+    except MissingCredential as exc:
+        return _refuse(f"{exc}{nothing}")
+    try:
+        load_settings()
+    except ValueError as exc:  # the text names a variable, never a value
+        return _refuse(f"{exc}{nothing}")
+    try:
+        devices = read_device_names(args.query_endpoint)
+    except requests.RequestException:
+        return _refuse(f"the network graph could not be reached{nothing}")
+    except MalformedTopology:
+        return _refuse(f"the network graph answered with an unusable device list{nothing}")
+    if not devices:
+        print("Warning: the network graph lists no device, so every event is unmapped.",
+              file=sys.stderr)
+    stored = [0]
+
+    def count(batch):
+        stored[0] += batch.stored
+
+    def stopped(what: str) -> int:
+        if stored[0]:
+            return _refuse(f"{what} after {stored[0]} events were stored.")
+        return _refuse(f"{what}{nothing}")
+
+    stream = None
+    try:
+        try:
+            stream = open(args.file, "rb") if args.file is not None else sys.stdin.buffer
+        except OSError:
+            return _refuse(f"the input file could not be read{nothing}")
+        try:
+            store = get_store()
+            summary = ingest_lines(read_lines(stream), store=store, devices=devices,
+                                   batch_size=BATCH_SIZE, on_batch=count)
+        except StateUnavailable:
+            return stopped("state store unavailable")
+        except OSError:
+            return stopped("the input file could not be read")
+    finally:
+        if stream is not None and args.file is not None:
+            stream.close()
+        reset_store()
+    print(summary_line(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
