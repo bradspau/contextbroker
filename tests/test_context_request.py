@@ -368,6 +368,7 @@ def reasons(out, name):
 def test_goals_and_observations_join_with_provenance_and_one_read_of_each_source(olt):
     bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
     sample(olt)
+    live_goal(olt)
     seen_at = (NOW - timedelta(seconds=30)).isoformat()
     r = assure()
     out = r.json()
@@ -397,11 +398,11 @@ def test_goals_and_observations_join_with_provenance_and_one_read_of_each_source
         assert value["provenance"]["reference"].startswith(NS)
     assert out["expires_at"] == (NOW - timedelta(seconds=30) + timedelta(seconds=300)).isoformat()
     assert out["expiry_basis"] == "oldest_observation"
-    assert out["graph"] is None and out["verdict"] is None
+    assert out["graph"] is None and out["verdict"]["verdict"] == "success"
     assert len([q for q in olt.queries() if "ServiceBinding" in q]) == 1
     assert olt.vm.queries and all('device="olt1"' in q for q in olt.vm.queries)
     assert len(olt.vm.queries) == 2  # the value and its sample time: one read of the metric
-    olt.get_intent.assert_not_called()
+    assert olt.get_intent.call_count == 1  # the verdict's one GET
 
 
 def test_a_read_token_naming_an_intent_is_refused_before_any_upstream_call(olt):
@@ -566,3 +567,138 @@ def test_a_request_never_pushes_marks_or_records(olt):
     olt.fulfilment.assert_not_called()
     assert tmf921_source._MARKS == {}
     assert len(olt.fx.updates()) == 1  # the binding written by the test, nothing after it
+
+
+# ---- the verdict: the read-only TMF921 assess, built on the same reads as the eligibility ----
+
+def _ttl(uri, val):
+    return ('@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n'
+            f'[] <http://x/p> ( <{uri}> [ rdf:value {val} ] ) .')
+
+
+def tmf921_intent(*pairs):
+    """An ACTIVE TMF921 intent document carrying these (metric URI, goal) pairs."""
+    return {"lifecycleStatus": "ACTIVE",
+            "expression": {"expressionValue": "\n".join(_ttl(u, v) for u, v in pairs)}}
+
+
+def live_goal(rig, goal=100):
+    """The TMF921 server answers a GET of the intent with this goal."""
+    rig.get_intent.return_value = tmf921_intent((LAT, goal))
+
+
+VERDICT_KEYS = {"verdict", "per_interface", "reasons", "dropped_count", "intent_status", "last_outcome",
+                "source", "mode", "as_of", "evaluated_at", "requirement"}
+
+
+def test_verdict_success_is_the_read_only_assess_on_the_same_reads_as_the_eligibility(olt):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt)
+    live_goal(olt)
+    out = assure().json()
+    verdict = out["verdict"]
+    assert verdict["verdict"] == "success"
+    assert set(verdict) == VERDICT_KEYS  # the duplicating "context" and "goals" keys are dropped
+    assert verdict["source"] == "tmf921" and verdict["mode"] == "at" and verdict["dropped_count"] == 0
+    assert out["eligibility"]["result"] == "eligible"
+    assert olt.get_intent.call_count == 1  # a current request makes at most one TMF921 GET
+    assert len(olt.vm.queries) == 2  # the verdict reused the eligibility's read of the one metric
+    assert len([q for q in olt.queries() if "ServiceBinding" in q]) == 1  # one fluent snapshot
+    olt.push.assert_not_called()
+    olt.fulfilment.assert_not_called()
+    assert tmf921_source._MARKS == {}
+
+
+def test_verdict_of_a_past_request_makes_no_tmf921_call(olt):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    then = NOW - timedelta(minutes=1)
+    olt.vm.add("latency_ms", "olt1", "pon0", (50.0, (then - timedelta(seconds=30)).timestamp()))
+    out = assure({**ASK, "as_of": "1m"}).json()
+    assert out["verdict"]["verdict"] == "success"
+    assert out["verdict"]["as_of"] == "1m"
+    olt.get_intent.assert_not_called()
+    assert len(olt.vm.queries) == 2
+    assert len([q for q in olt.queries() if "ServiceBinding" in q]) == 1
+
+
+def test_verdict_failure_when_the_sample_breaches_the_goal(olt):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt, value=150.0)
+    live_goal(olt)
+    out = assure().json()
+    assert out["verdict"]["verdict"] == "failure"
+    assert reasons(out, "observations")["result"] == "eligible"  # the verdict is not the eligibility
+
+
+def test_verdict_is_inconclusive_for_a_stale_sample(olt):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt, age_s=400)
+    live_goal(olt)
+    out = assure().json()
+    assert out["verdict"]["verdict"] == "inconclusive"
+    assert reasons(out, "observations")["reasons"] == ["stale observation: LatencyMetric"]
+
+
+@pytest.mark.parametrize("value", [50.0, 150.0, float("nan")])
+def test_verdict_value_is_always_one_of_the_three(value, olt):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt, value=value)
+    live_goal(olt)
+    assert assure().json()["verdict"]["verdict"] in ("success", "failure", "inconclusive")
+
+
+def test_verdict_is_null_without_the_observations_class(olt):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt)
+    live_goal(olt)
+    out = assure({**ASK, "classes": ["goals"]}).json()
+    assert out["verdict"] is None
+    olt.get_intent.assert_not_called()
+
+
+def test_verdict_stays_when_topology_is_added(olt):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt)
+    live_goal(olt)
+    body = {**ASK, "classes": ["topology", "goals", "observations"], "max_depth": 1,
+            "relationship_types": ["has_interface", "connected_to"]}
+    out = assure(body).json()
+    assert out["verdict"]["verdict"] == "success"
+    assert out["graph"] is not None
+
+
+def test_verdict_is_null_and_no_tmf921_call_when_a_placement_is_outside_authority(olt):
+    olt.fx.graph.parse(data=f"""@prefix : <{NS}> .
+        :if-olt2-pon0 a :Interface ; :onDevice "olt2" ; :interfaceName "pon0" .""", format="turtle")
+    bind(olt.fx, "i1", LAT, 100.0, IF2, T0)
+    olt.vm.add("latency_ms", "olt2", "pon0", (7.0, (NOW - timedelta(seconds=5)).timestamp()))
+    live_goal(olt)
+    out = assure(authority={**ASSURANCE, "entities": ["olt1"]}).json()
+    assert out["verdict"] is None
+    olt.get_intent.assert_not_called()
+    assert olt.vm.queries == []
+
+
+def test_verdict_for_an_intent_with_no_binding_is_inconclusive_with_a_fixed_reason(olt):
+    out = assure({**ASK, "intent_id": "i9"}).json()
+    assert out["verdict"]["verdict"] == "inconclusive"
+    assert out["verdict"]["reasons"] == ["no binding for intent"]
+    olt.get_intent.assert_not_called()
+    olt.get.assert_not_called()
+    assert len([q for q in olt.queries() if "ServiceBinding" in q]) == 1
+
+
+def test_verdict_with_two_placements_in_force_is_inconclusive_invalid_binding(olt):
+    binding = bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    extra = rdflib.Graph()
+    f.add_placement(extra, binding, IF1, T1, T1)
+    olt.fx.graph += extra
+    sample(olt)
+    live_goal(olt)
+    out = assure().json()
+    assert out["verdict"]["verdict"] == "inconclusive"
+    assert out["verdict"]["reasons"] == ["invalid binding"]
+    # The one case in which the binding is read twice: the assess resolves and refuses on its own.
+    assert len([q for q in olt.queries() if "ServiceBinding" in q]) == 2
+    olt.get_intent.assert_not_called()
+    assert olt.vm.queries == []

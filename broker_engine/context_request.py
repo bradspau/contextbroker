@@ -44,6 +44,7 @@ from data_contracts.context_contract import (
     situation_id,
 )
 from data_contracts.metric_map import load_metric_map
+from intent_management.tmf921_source import assess_tmf921_as_of
 from outcome_assurance.tmf921_report import _short_name
 
 # The telemetry lookback is twice the default freshness limit, so a sample that is too old is read and
@@ -124,6 +125,7 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
     envelopes: list[EnvelopeOut] = []
     observation_times: list[datetime] = []
     wants_observations = "observations" in body.classes
+    verdict = None
 
     if "goals" in body.classes:
         # One Fuseki read of the intent's fluents. The same snapshot judges the goals class and picks
@@ -131,6 +133,13 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
         problem = None
         fluents, interfaces = {}, {}
         mapping = metric_map
+        # What the verdict is told about the binding: None lets the assess resolve it itself (and refuse
+        # with its own fixed reason), {} says the intent has none, and {intent_id: binding} is the
+        # binding picked from the one snapshot below.
+        verdict_bindings = None
+        binding = None
+        seen = {}
+        reader = recording(join if join is not None else join_observed_metric, seen)
         if mapping is None:
             try:
                 mapping = load_metric_map()
@@ -146,6 +155,7 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
             else:
                 if not fluents:
                     problem = NO_BINDING
+                    verdict_bindings = {}
         observation_problem = problem
         if problem is not None:
             eligibility["goals"] = binding_problem(problem)
@@ -168,6 +178,7 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
             try:
                 binding = select_binding(body.intent_id, fluents, interfaces,
                                          valid_at=times.valid_at, known_at=times.known_at)
+                verdict_bindings = {body.intent_id: binding}
             except ValueError:
                 observation_problem = INVALID_BINDING
 
@@ -175,8 +186,6 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
             if observation_problem is not None:
                 eligibility["observations"] = binding_problem(observation_problem)
             else:
-                seen = {}
-                reader = recording(join if join is not None else join_observed_metric, seen)
                 observed, nodes = {}, {}
                 # A placement the caller's entities do not cover is never read (D-26), and a metric the
                 # map does not know has no series name to read.
@@ -201,6 +210,21 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
                     if envelope.observed_at is not None:
                         observation_times.append(envelope.observed_at)
                 envelopes.sort(key=lambda e: e.metric)
+
+        # The verdict (D-28): the read-only TMF921 assess, judged on the same fluent snapshot (the binding
+        # picked above) and the same telemetry reads (the recording joiner) as the eligibility. It never
+        # sees the eligibility and the eligibility never sees it: the two can disagree by design (D-19).
+        # It is skipped when a placement lies outside the caller's entities, since judging it would read
+        # a device the caller may not see (D-26).
+        outside = binding is not None and any(
+            not covers(device) for device, _interface in binding.sources.values())
+        if wants_observations and not outside:
+            verdict = assess_tmf921_as_of(
+                body.intent_id, OBSERVATION_LOOKBACK, as_of=body.as_of, mode="at",
+                known_at=body.known_at, client=client, join=reader, now=now, metric_map=mapping,
+                bindings=verdict_bindings)
+            verdict.pop("context", None)  # duplicates the envelopes
+            verdict.pop("goals", None)  # duplicates the fluent values
 
     graph = None
     if "topology" in body.classes:
@@ -229,4 +253,4 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
         eligibility=overall({name: eligibility[name] for name in ("topology", "goals", "observations")
                              if name in eligibility}),
         expires_at=_iso(expires_at), expiry_basis=basis, fluent_values=fluent_values,
-        envelopes=envelopes, graph=graph, verdict=None)
+        envelopes=envelopes, graph=graph, verdict=verdict)
