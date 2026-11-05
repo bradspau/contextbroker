@@ -227,3 +227,158 @@ def expiry(*, retrieved_at: datetime, observation_times, configured_evidence: bo
     if configured_evidence:
         return retrieved_at + timedelta(seconds=limit_s), EXPIRY_CONFIGURED
     return retrieved_at, EXPIRY_NO_EVIDENCE
+
+
+# ---- the response ----
+#
+# Wire-neutral models (D-06, D-21): the response is defined once here and the HTTP layer only returns
+# it. Times are ISO 8601 text, as ContextEnvelope.to_dict renders them. The JSON is the purpose-built
+# nodes/edges form; JSON-LD and NGSI-LD views are Phase 7 and need no change to this content. Models
+# are built by the broker, so they are extra="forbid" but not strict. Every string that reaches a
+# caller is a pinned metric name, a graph IRI local name or a fixed reason, never server text.
+
+_EXPIRY_BASES = (EXPIRY_HISTORICAL, EXPIRY_OBSERVATION, EXPIRY_CONFIGURED, EXPIRY_NO_EVIDENCE)
+_FLUENT_KINDS = ("goal", "placement", "link")
+_NODE_TYPES = ("device", "interface")
+
+
+class _Out(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
+class Provenance(_Out):
+    """Where one piece of evidence came from; mirrors ProvenanceRecord.to_dict (CTX-06, D-20)."""
+
+    source_system: str
+    reference: str = Field(description="A pinned metric or series name, a fluent IRI or a component name "
+                                       "and version built by the broker, never text from an upstream answer.")
+    observed_at: str | None
+    retrieved_at: str | None
+
+
+class QualityOut(_Out):
+    """Mirrors the quality block of ContextEnvelope.to_dict."""
+
+    stale: bool
+    missing: bool
+    conflicts: list[str]
+
+
+class EnvelopeOut(_Out):
+    """One observation envelope: exactly the ContextEnvelope.to_dict fields, plus the pinned metric short
+    name and the Context Graph node it belongs to. Provenance is a list of records."""
+
+    metric: str = Field(description="The pinned metric short name.")
+    node: str = Field(description="The Context Graph node id, device/interface.")
+    entity_id: str
+    state: str
+    value: float | str | None
+    source: str
+    observed_at: str | None
+    quality: QualityOut
+    provenance: list[Provenance]
+
+
+class FluentValue(_Out):
+    """One goal, placement or link fluent with its valid and recorded interval (D-24)."""
+
+    context_class: Literal[CONTEXT_CLASSES] = Field(alias="class")
+    kind: Literal[_FLUENT_KINDS]
+    subject: str = Field(description="The metric short name for a goal or placement, the link IRI local "
+                                     "name for a link.")
+    value: float | str | list[str] | None = Field(
+        description="A float for a goal, a node id for a placement, a two-item list of node ids for a link.")
+    in_force: bool
+    valid_from: str | None
+    valid_to: str | None
+    recorded_at: str | None
+    superseded_at: str | None
+    provenance: Provenance
+
+
+class ClassEligibility(_Out):
+    """The eligibility of one requested context class, with its own fixed reasons (D-18)."""
+
+    result: Literal[RESULTS]
+    reasons: list[str]
+
+
+class Eligibility(_Out):
+    """A fitness label for the evidence: eligible, ineligible or gap, with fixed-string reasons per
+    requested class. It grants no execution authority (the action-readiness check is a separate
+    component) and is kept apart from the verdict: it never feeds it (D-19)."""
+
+    result: Literal[RESULTS]
+    classes: dict[Literal[CONTEXT_CLASSES], ClassEligibility]
+    reasons: list[str]
+
+
+class GraphNode(_Out):
+    """A device or interface. `id` is the device name, or device/interface (D-25)."""
+
+    id: str
+    type: Literal[_NODE_TYPES]
+    device: str
+    interface: str | None
+    graph_ref: str | None = Field(description="The interface IRI local name, or None for a device.")
+    depth: int = Field(ge=0, description="Hops from the scope node.")
+
+
+class GraphEdge(_Out):
+    """A relationship between two nodes. `link` and `fluent` are IRI local names on connected_to."""
+
+    from_: str = Field(alias="from")
+    to: str
+    type: Literal[RELATIONSHIP_TYPES]
+    link: str | None = None
+    fluent: str | None = None
+
+
+class GraphLimits(_Out):
+    """Which limits cut the traversal result: authority, depth, node_cap or relationship_types (D-23, D-26)."""
+
+    requested_depth: int
+    max_depth: int
+    node_cap: int
+    relationship_types: list[Literal[RELATIONSHIP_TYPES]]
+    cut_by: list[Literal[CUT_REASONS]]
+
+
+class ContextGraph(_Out):
+    """The entities and relationships in scope as nodes and edges, with the limits that applied (CTX-07)."""
+
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+    limits: GraphLimits
+
+
+class Situation(_Out):
+    """The identity and resolved inputs of the question (CTX-03). `requester` is the token's sub."""
+
+    id: str
+    requester: str
+    purpose: Literal[PURPOSES]
+    scope: Scope
+    intent_id: str | None
+    classes: list[Literal[CONTEXT_CLASSES]]
+    max_depth: int | None
+    relationship_types: list[Literal[RELATIONSHIP_TYPES]] | None
+    valid_at: str
+    known_at: str | None
+    retrieved_at: str
+    historical: bool
+
+
+class ContextResponse(_Out):
+    """The answer to one context request: situation, eligibility, expiry, evidence and graph (CTX-03 to CTX-07)."""
+
+    situation: Situation
+    eligibility: Eligibility
+    expires_at: str = Field(description="When the answer stops being reusable as current context.")
+    expiry_basis: Literal[_EXPIRY_BASES]
+    fluent_values: list[FluentValue]
+    envelopes: list[EnvelopeOut]
+    graph: ContextGraph | None = Field(description="Present only when the topology class was requested.")
+    verdict: dict | None = Field(
+        description="Present only when an intent is named with the goals and observations classes. It comes "
+                    "from the read-only TMF921 assess, never reads eligibility and can disagree with it.")

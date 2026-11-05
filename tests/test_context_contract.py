@@ -432,3 +432,174 @@ def test_configured_evidence_alone_expires_a_limit_after_retrieval():
 
 def test_no_evidence_expires_at_retrieval():
     assert _expiry() == (R, "no_evidence")
+
+
+# ---- the response models ----
+
+def _envelope(with_provenance=True):
+    from data_contracts.envelope import ProvenanceRecord, build_observed
+    observed = NOW - timedelta(seconds=20)
+    envelope = build_observed("olt1:pon0", 12.5, "victoriametrics", observed, NOW)
+    if with_provenance:
+        envelope.provenance.append(ProvenanceRecord("victoriametrics", "interface_metrics_latency", observed, NOW))
+    return envelope
+
+
+def test_the_envelope_model_mirrors_the_dataclass_keys():
+    wire = _envelope().to_dict()
+    assert set(cc.EnvelopeOut.model_fields) - {"metric", "node"} == set(wire)
+    assert set(cc.QualityOut.model_fields) == set(wire["quality"])
+    assert set(cc.Provenance.model_fields) == set(wire["provenance"][0])
+
+
+def test_an_envelope_with_a_provenance_record_validates():
+    wire = {**_envelope().to_dict(), "metric": "LatencyMetric", "node": "olt1/pon0"}
+    out = cc.EnvelopeOut.model_validate(wire)
+    assert out.metric == "LatencyMetric" and out.node == "olt1/pon0"
+    assert out.provenance[0].source_system == "victoriametrics"
+    assert out.model_dump() == wire
+
+
+def test_an_envelope_without_provenance_validates():
+    wire = {**_envelope(with_provenance=False).to_dict(), "metric": "LatencyMetric", "node": "olt1/pon0"}
+    assert cc.EnvelopeOut.model_validate(wire).provenance == []
+
+
+def _provenance():
+    return cc.Provenance(source_system="fuseki", reference="goal-fluent-1",
+                         observed_at=None, retrieved_at="2026-11-05T12:00:00+00:00")
+
+
+def _full_response(verdict=None):
+    envelope = cc.EnvelopeOut.model_validate(
+        {**_envelope().to_dict(), "metric": "LatencyMetric", "node": "olt1/pon0"})
+    fluent = cc.FluentValue(
+        context_class="goals", kind="goal", subject="LatencyMetric", value=25.0, in_force=True,
+        valid_from="2026-11-05T11:00:00+00:00", valid_to=None, recorded_at="2026-11-05T11:00:01+00:00",
+        superseded_at=None, provenance=_provenance())
+    nodes = [
+        cc.GraphNode(id="olt1", type="device", device="olt1", interface=None, graph_ref=None, depth=0),
+        cc.GraphNode(id="olt1/pon0", type="interface", device="olt1", interface="pon0",
+                     graph_ref="if-olt1-pon0", depth=1),
+    ]
+    edges = [cc.GraphEdge(from_="olt1", to="olt1/pon0", type="has_interface", link=None, fluent=None)]
+    limits = cc.GraphLimits(requested_depth=1, max_depth=3, node_cap=50,
+                            relationship_types=["has_interface"], cut_by=["depth"])
+    eligibility = cc.Eligibility(
+        result="gap", reasons=["no observation: LatencyMetric"],
+        classes={"goals": cc.ClassEligibility(result="eligible", reasons=[]),
+                 "observations": cc.ClassEligibility(result="gap", reasons=["no observation: LatencyMetric"])})
+    situation = cc.Situation(
+        id="sit-" + "0" * 32, requester="alice", purpose="assurance", scope=cc.Scope(device="olt1", interface="pon0"),
+        intent_id="hsi-demo-1", classes=["topology", "goals", "observations"], max_depth=1,
+        relationship_types=["has_interface"], valid_at="2026-11-05T12:00:00+00:00", known_at=None,
+        retrieved_at="2026-11-05T12:00:00+00:00", historical=False)
+    return cc.ContextResponse(
+        situation=situation, eligibility=eligibility, expires_at="2026-11-05T12:04:40+00:00",
+        expiry_basis="oldest_observation", fluent_values=[fluent], envelopes=[envelope],
+        graph=cc.ContextGraph(nodes=nodes, edges=edges, limits=limits), verdict=verdict)
+
+
+def test_edges_and_fluents_dump_their_aliases():
+    edge = cc.GraphEdge(from_="Router-A", to="Router-A/GigabitEthernet0/0/0", type="has_interface",
+                        link=None, fluent=None)
+    dumped = edge.model_dump(by_alias=True)
+    assert dumped["from"] == "Router-A" and "from_" not in dumped
+    assert _full_response().fluent_values[0].model_dump(by_alias=True)["class"] == "goals"
+
+
+def test_the_edge_accepts_its_wire_name():
+    edge = cc.GraphEdge.model_validate({"from": "a", "to": "b", "type": "connected_to",
+                                        "link": "link-1", "fluent": "lf-1"})
+    assert edge.from_ == "a" and edge.link == "link-1"
+
+
+def test_a_full_response_round_trips_unchanged():
+    response = _full_response()
+    text = response.model_dump_json(by_alias=True)
+    assert cc.ContextResponse.model_validate_json(text) == response
+    for key in ("@context", "@id", "@type"):
+        assert key not in text
+
+
+def test_a_response_with_a_verdict_and_no_graph_round_trips():
+    verdict = {"verdict": "inconclusive", "reasons": ["goal changed: LatencyMetric"]}
+    response = _full_response(verdict=verdict).model_copy(update={"graph": None})
+    text = response.model_dump_json(by_alias=True)
+    again = cc.ContextResponse.model_validate_json(text)
+    assert again == response and again.graph is None and again.verdict == verdict
+
+
+def test_the_response_json_carries_the_expected_top_level_keys():
+    dumped = _full_response().model_dump(by_alias=True)
+    assert set(dumped) == {"situation", "eligibility", "expires_at", "expiry_basis", "fluent_values",
+                           "envelopes", "graph", "verdict"}
+    assert set(dumped["situation"]) == {"id", "requester", "purpose", "scope", "intent_id", "classes",
+                                        "max_depth", "relationship_types", "valid_at", "known_at",
+                                        "retrieved_at", "historical"}
+    assert set(dumped["graph"]) == {"nodes", "edges", "limits"}
+    assert set(dumped["graph"]["limits"]) == {"requested_depth", "max_depth", "node_cap",
+                                              "relationship_types", "cut_by"}
+    assert set(dumped["fluent_values"][0]) == {"class", "kind", "subject", "value", "in_force", "valid_from",
+                                               "valid_to", "recorded_at", "superseded_at", "provenance"}
+    assert set(dumped["graph"]["edges"][0]) == {"from", "to", "type", "link", "fluent"}
+    assert set(dumped["graph"]["nodes"][0]) == {"id", "type", "device", "interface", "graph_ref", "depth"}
+
+
+def test_closed_sets_are_enforced_in_the_response_models():
+    with pytest.raises(ValidationError):
+        cc.GraphLimits(requested_depth=1, max_depth=3, node_cap=50, relationship_types=[], cut_by=["speed"])
+    with pytest.raises(ValidationError):
+        cc.ClassEligibility(result="maybe", reasons=[])
+    with pytest.raises(ValidationError):
+        cc.Eligibility(result="maybe", classes={}, reasons=[])
+    with pytest.raises(ValidationError):
+        cc.GraphNode(id="x", type="link", device="x", interface=None, graph_ref=None, depth=0)
+    with pytest.raises(ValidationError):
+        cc.GraphEdge(from_="a", to="b", type="peers", link=None, fluent=None)
+    with pytest.raises(ValidationError):
+        cc.FluentValue(context_class="goals", kind="bound", subject="x", value=1.0, in_force=True,
+                       valid_from=None, valid_to=None, recorded_at=None, superseded_at=None,
+                       provenance=_provenance())
+    with pytest.raises(ValidationError):
+        cc.ContextResponse.model_validate({**_full_response().model_dump(by_alias=True), "expiry_basis": "whenever"})
+
+
+def test_every_cut_reason_is_accepted():
+    limits = cc.GraphLimits(requested_depth=1, max_depth=3, node_cap=50, relationship_types=[],
+                            cut_by=list(cc.CUT_REASONS))
+    assert limits.cut_by == list(cc.CUT_REASONS)
+
+
+def test_unknown_response_fields_are_refused():
+    with pytest.raises(ValidationError):
+        cc.QualityOut(stale=False, missing=False, conflicts=[], extra=1)
+
+
+def test_eligibility_is_described_as_kept_apart_from_the_verdict():
+    description = cc.Eligibility.model_json_schema()["description"]
+    assert "no execution authority" in description
+    assert "verdict" in description
+    verdict = cc.ContextResponse.model_json_schema()["properties"]["verdict"]["description"]
+    assert "read-only TMF921 assess" in verdict
+    assert "never reads eligibility" in verdict
+    assert "can disagree" in verdict
+
+
+def test_the_response_schema_never_says_bound_or_gate():
+    text = _schema_text()
+    lowered = text.lower()
+    assert " bound" not in lowered and "drift" not in lowered and " gate" not in lowered
+
+
+def _schema_text():
+    import json
+    return json.dumps([cc.ContextResponse.model_json_schema(), cc.ContextRequest.model_json_schema()])
+
+
+def test_the_module_still_loads_no_web_framework_after_the_response_models():
+    code = ("import sys, data_contracts.context_contract as c; "
+            "print(any(m.split('.')[0] in ('fastapi', 'starlette') for m in sys.modules), "
+            "hasattr(c, 'ContextResponse'))")
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=str(REPO))
+    assert result.stdout.strip() == "False True", result.stderr
