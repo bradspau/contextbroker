@@ -17,6 +17,16 @@ second process opens the same file (D-02). A failure of SQLite or the operating
 system leaving this module is StateUnavailable with a fixed text; nothing is
 ever answered from memory instead (D-04).
 
+Events (D-03, D-06): never updated. At the cap (default 100000) the oldest events
+by write order are evicted together with their event_devices rows, counted in
+evicted_events and announced by one line, "state eviction: table=events evicted=N".
+A sweep inside an event write, at most once a minute on its own timer, removes
+events by ingest time once the retention (default 7 d) has passed, announced by
+"state retention: table=events removed=N" when it removed any. The sweep ages by
+ingest time only, since an event time comes from the device and cannot be trusted
+(a nil or future one would otherwise pin an event for ever). Reads hide events past
+retention without waiting for a sweep. Neither line carries a host, device or id.
+
 All SQL text is literal; every value is passed as a query parameter.
 """
 import functools
@@ -43,7 +53,7 @@ DEFAULT_MARK_CAP = 1024
 DEFAULT_SITUATION_CAP = 100000
 DEFAULT_SITUATION_RETENTION_S = 604800  # 7 d
 SWEEP_INTERVAL_S = 60
-EVICTION_TABLES = ("outcomes", "marks", "situations")
+EVICTION_TABLES = ("outcomes", "marks", "situations", "events")
 DEFAULT_EVENT_CAP = 100000
 DEFAULT_EVENT_RETENTION_S = 604800  # 7 d
 EVENT_BATCH_MAX = 500
@@ -108,6 +118,7 @@ _COUNT_SQL = {
     "outcomes": "SELECT COUNT(*) FROM outcomes",
     "marks": "SELECT COUNT(*) FROM marks",
     "situations": "SELECT COUNT(*) FROM situations",
+    "events": "SELECT COUNT(*) FROM events",
 }
 _EVICT_SQL = {
     "outcomes": "DELETE FROM outcomes WHERE rowid IN "
@@ -118,7 +129,7 @@ _EVICT_SQL = {
                   "(SELECT rowid FROM situations ORDER BY written_seq LIMIT ?)",
 }
 _COUNTER_NAME = {"outcomes": "evicted_outcomes", "marks": "evicted_marks",
-                 "situations": "evicted_situations"}
+                 "situations": "evicted_situations", "events": "evicted_events"}
 _QUARANTINE_COUNTER = {"no priority": "quarantine_no_priority",
                        "not text": "quarantine_not_text",
                        "too long": "quarantine_too_long",
@@ -298,6 +309,7 @@ class StateStore:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic
         self._last_sweep: float | None = None
+        self._last_event_sweep: float | None = None
         self._after: list = []
         self._lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
@@ -556,6 +568,7 @@ class StateStore:
             _check_event(e)
         quarantined = _check_quarantine(quarantined)
         stored = duplicates = unmapped = ambiguous = 0
+        swept_at = None
         with self._txn() as conn:
             seq = conn.execute("SELECT COALESCE(MAX(written_seq), 0) FROM events").fetchone()[0]
             for e in events:
@@ -587,6 +600,34 @@ class StateStore:
             for name, n in counts:
                 if n > 0:
                     conn.execute(_UPSERT_COUNTER, (name, n))
+            tick = self._monotonic()
+            if (self._last_event_sweep is None
+                    or tick - self._last_event_sweep >= SWEEP_INTERVAL_S):
+                cutoff = (self._event_retention_s * 1000000, _to_us(self._clock()))
+                conn.execute(
+                    "DELETE FROM event_devices WHERE event_id IN "
+                    "(SELECT event_id FROM events WHERE ingest_time_us + ? <= ?)", cutoff)
+                removed = conn.execute(
+                    "DELETE FROM events WHERE ingest_time_us + ? <= ?", cutoff).rowcount
+                swept_at = tick
+                if removed > 0:
+                    self._after.append(
+                        ("state retention: table=events removed=%d", (removed,)))
+            if stored > 0:  # one count per batch, not one per row
+                count = conn.execute(_COUNT_SQL["events"]).fetchone()[0]
+                excess = count - self._caps["events"]
+                if excess > 0:
+                    conn.execute(
+                        "DELETE FROM event_devices WHERE event_id IN "
+                        "(SELECT event_id FROM events ORDER BY written_seq LIMIT ?)",
+                        (excess,))
+                    conn.execute(
+                        "DELETE FROM events WHERE rowid IN "
+                        "(SELECT rowid FROM events ORDER BY written_seq LIMIT ?)", (excess,))
+                    conn.execute(_UPSERT_COUNTER, (_COUNTER_NAME["events"], excess))
+                    self._after.append(("state eviction: table=events evicted=%d", (excess,)))
+        if swept_at is not None:  # taken only after COMMIT
+            self._last_event_sweep = swept_at
         return EventBatch(stored=stored, duplicates=duplicates, unmapped=unmapped,
                           ambiguous=ambiguous)
 

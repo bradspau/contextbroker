@@ -309,7 +309,7 @@ def test_situation_eviction(path, caplog):
     assert store.get_situation("s2", now=T) is None
     assert store.get_situation("s1", now=T).repeat_count == 2
     assert store.situation_count() == 2
-    assert store.evictions() == {"outcomes": 0, "marks": 0, "situations": 1}
+    assert store.evictions() == {"outcomes": 0, "marks": 0, "situations": 1, "events": 0}
     assert [r.getMessage() for r in caplog.records] == [
         "state eviction: table=situations evicted=1"]
     store.close()

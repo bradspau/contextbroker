@@ -26,6 +26,13 @@ def path(tmp_path):
     return tmp_path / "s.sqlite3"
 
 
+def store_at(path, **kw):
+    """A store whose wall clock reads T, so the retention sweep treats T-dated events
+    as new instead of comparing them with the real date."""
+    kw.setdefault("clock", lambda: T)
+    return StateStore(path, **kw)
+
+
 def eid(n: int) -> str:
     return "evt-" + f"{n:032x}"
 
@@ -82,12 +89,12 @@ def test_constants_are_the_stated_ones():
 
 def test_batch_round_trip_across_reopen(path):
     mapped, amb, unm = make(1), make_ambiguous(2), make_unmapped(3)
-    store = StateStore(path)
+    store = store_at(path)
     batch = store.add_events([mapped, amb, unm])
     assert batch == EventBatch(stored=3, duplicates=0, unmapped=1, ambiguous=1)
     store.close()
 
-    again = StateStore(path)
+    again = store_at(path)
     rows = window(again)
     assert rows == [row_of(mapped), row_of(amb)] or rows == [row_of(amb), row_of(mapped)]
     by_id = {r.event_id: r for r in rows}
@@ -106,7 +113,7 @@ def test_batch_round_trip_across_reopen(path):
 
 
 def test_newest_placed_first_then_event_id(path):
-    store = StateStore(path)
+    store = store_at(path)
     older = make(1, event_time=T - 120 * S)
     newer = make(2, event_time=T - 30 * S)
     tie_b = make(4, event_time=T - 60 * S)
@@ -122,7 +129,7 @@ def test_event_row_has_no_raw_field():
 
 
 def test_event_without_time_is_placed_by_ingest_time(path):
-    store = StateStore(path)
+    store = store_at(path)
     e = make(1, event_time=None, format="rfc3164", ingest_time=T)
     store.add_events([e])
     assert [r.event_id for r in window(store, start=T - 10 * S, end=T)] == [e.event_id]
@@ -135,7 +142,7 @@ def test_event_without_time_is_placed_by_ingest_time(path):
 
 
 def test_window_ends_are_inclusive(path):
-    store = StateStore(path)
+    store = store_at(path)
     at_start = make(1, event_time=T - 900 * S)
     at_end = make(2, event_time=T)
     after = make(3, event_time=T + US)
@@ -147,7 +154,7 @@ def test_window_ends_are_inclusive(path):
 
 
 def test_known_at_cut_off_and_limit(path):
-    store = StateStore(path)
+    store = store_at(path)
     early = make(1, ingest_time=T - 10 * S, event_time=T - 30 * S)
     late = make(2, ingest_time=T, event_time=T - 20 * S)
     store.add_events([early, late])
@@ -161,7 +168,7 @@ def test_known_at_cut_off_and_limit(path):
 # -- duplicates and counters -----------------------------------------------------
 
 def test_duplicate_is_stored_once_and_counted_across_reopen(path):
-    store = StateStore(path)
+    store = store_at(path)
     first = make(1)
     assert store.add_events([first]) == EventBatch(1, 0, 0, 0)
     later = dataclasses.replace(first, ingest_time=T + 5 * S, mapping="unmapped",
@@ -173,13 +180,13 @@ def test_duplicate_is_stored_once_and_counted_across_reopen(path):
     assert store.event_counters()["unmapped"] == 0
     assert store.event_count() == 1
     store.close()
-    again = StateStore(path)
+    again = store_at(path)
     assert again.event_counters()["duplicates"] == 1
     again.close()
 
 
 def test_same_id_twice_in_one_call_stores_one_and_counts_one_duplicate(path):
-    store = StateStore(path)
+    store = store_at(path)
     e = make(1)
     assert store.add_events([e, e]) == EventBatch(1, 1, 0, 0)
     assert store.event_count() == 1
@@ -188,7 +195,7 @@ def test_same_id_twice_in_one_call_stores_one_and_counts_one_duplicate(path):
 
 
 def test_quarantine_counts_without_events_and_unmapped_counts_new_rows_only(path):
-    store = StateStore(path)
+    store = store_at(path)
     assert store.add_events([], quarantined={"no priority": 2, "too long": 1}) \
         == EventBatch(0, 0, 0, 0)
     assert store.event_count() == 0
@@ -204,13 +211,13 @@ def test_quarantine_counts_without_events_and_unmapped_counts_new_rows_only(path
     assert counters["duplicates"] == 1
     assert counters["quarantined"]["no priority"] == 3
     store.close()
-    again = StateStore(path)
+    again = store_at(path)
     assert again.event_counters() == counters
     again.close()
 
 
 def test_counters_are_zero_on_a_fresh_store_with_all_four_reasons(path):
-    store = StateStore(path)
+    store = store_at(path)
     c = store.event_counters()
     assert c["duplicates"] == 0 and c["unmapped"] == 0
     assert tuple(c["quarantined"]) == QUARANTINE_REASONS
@@ -241,7 +248,7 @@ class FailingConn:
                                             ("INSERT INTO event_devices", 2),
                                             ("INSERT INTO counters", 1)])
 def test_failed_batch_leaves_no_row_and_no_counter(path, prefix, on_call):
-    store = StateStore(path)
+    store = store_at(path)
     real = store._conn
     store._conn = FailingConn(real, prefix, on_call)
     with pytest.raises(StateUnavailable):
@@ -256,7 +263,7 @@ def test_failed_batch_leaves_no_row_and_no_counter(path, prefix, on_call):
 
 
 def test_closed_store_is_state_unavailable_for_every_event_method(path):
-    store = StateStore(path)
+    store = store_at(path)
     store.close()
     for call in (lambda: store.add_events([make(1)]),
                  lambda: window(store),
@@ -310,7 +317,7 @@ BAD_EVENTS = {
 
 @pytest.mark.parametrize("name", sorted(BAD_EVENTS))
 def test_invalid_event_is_value_error_and_changes_nothing(path, name):
-    store = StateStore(path)
+    store = store_at(path)
     good = make(7)
     with pytest.raises(ValueError):
         store.add_events([good, BAD_EVENTS[name]()], quarantined={"not text": 1})
@@ -320,7 +327,7 @@ def test_invalid_event_is_value_error_and_changes_nothing(path, name):
 
 
 def test_batch_over_the_maximum_is_value_error(path):
-    store = StateStore(path)
+    store = store_at(path)
     with pytest.raises(ValueError):
         store.add_events([make(i) for i in range(EVENT_BATCH_MAX + 1)])
     assert store.event_count() == 0
@@ -331,7 +338,7 @@ def test_batch_over_the_maximum_is_value_error(path):
 @pytest.mark.parametrize("quarantined", [{"nope": 1}, {"no priority": -1},
                                          {"no priority": True}, {"no priority": 1.5}])
 def test_bad_quarantine_map_is_value_error(path, quarantined):
-    store = StateStore(path)
+    store = store_at(path)
     with pytest.raises(ValueError):
         store.add_events([], quarantined=quarantined)
     assert set(store.event_counters()["quarantined"].values()) == {0}
@@ -347,7 +354,7 @@ def test_bad_quarantine_map_is_value_error(path, quarantined):
     dict(known_at=datetime(2026, 5, 1)),
     dict(limit=0), dict(limit=10001), dict(limit=True)])
 def test_bad_window_arguments_are_value_error(path, kw):
-    store = StateStore(path)
+    store = store_at(path)
     args = dict(device="Router-A", start=T - 900 * S, end=T, known_at=None, now=T, limit=10)
     args.update(kw)
     device = args.pop("device")
@@ -357,7 +364,7 @@ def test_bad_window_arguments_are_value_error(path, kw):
 
 
 def test_limit_bounds_are_accepted(path):
-    store = StateStore(path)
+    store = store_at(path)
     window(store, limit=1)
     window(store, limit=10000)
     store.close()
@@ -366,7 +373,7 @@ def test_limit_bounds_are_accepted(path):
 # -- hostile text is data ---------------------------------------------------------
 
 def test_hostile_host_and_raw_round_trip_as_data(path):
-    store = StateStore(path)
+    store = store_at(path)
     host = "x';DROP-TABLE-events;--"
     raw = "<13>1 '; DROP TABLE events; -- \"quoted\" \\ %s \x00 end"
     e = make(1, source_host=host, raw=raw)
@@ -447,7 +454,7 @@ def test_schema_version_stays_one():
 
 def test_phase4_file_upgrades_without_losing_a_row(path):
     phase4_file(path)
-    store = StateStore(path)
+    store = store_at(path)
     assert store.last_outcome("i1") == "success"
     assert store.marks("i1", ["urn:m"])["urn:m"][1] == 2.5
     assert store.situation_count() == 1
@@ -477,23 +484,23 @@ def test_newer_than_one_is_still_refused(path):
     raw.execute("PRAGMA user_version=2")
     raw.close()
     with pytest.raises(StateUnavailable):
-        StateStore(path)
+        store_at(path)
 
 
 def test_reopening_an_upgraded_file_changes_nothing(path):
     phase4_file(path)
-    StateStore(path).close()
+    store_at(path).close()
     before = schema_sql(path)
-    store = StateStore(path)
+    store = store_at(path)
     store.add_events([make(1)])
     store.close()
-    StateStore(path).close()
+    store_at(path).close()
     after = schema_sql(path)
     assert before == after
 
 
 def test_fresh_file_gets_all_tables_and_the_phase4_statements(path):
-    StateStore(path).close()
+    store_at(path).close()
     rows, version = schema_sql(path)
     assert version == 1
     for name in PHASE4_TABLES + ("events", "event_devices"):
@@ -510,17 +517,17 @@ def test_fresh_file_creation_is_one_transaction(path, monkeypatch):
     real = module._EVENT_SCHEMA
     monkeypatch.setattr(module, "_EVENT_SCHEMA", real + ("THIS IS NOT SQL",))
     with pytest.raises(StateUnavailable):
-        StateStore(path)
+        store_at(path)
     monkeypatch.setattr(module, "_EVENT_SCHEMA", real)
     rows, version = schema_sql(path)
     assert version == 0 and "outcomes" not in rows and "events" not in rows
-    StateStore(path).close()
+    store_at(path).close()
     rows, version = schema_sql(path)
     assert version == 1 and "outcomes" in rows and "events" in rows
 
 
 def test_events_table_constraints_hold_below_the_validation(path):
-    StateStore(path).close()
+    store_at(path).close()
     raw = sqlite3.connect(str(path))
     with pytest.raises(sqlite3.IntegrityError):
         raw.execute(
@@ -536,7 +543,7 @@ def test_events_table_constraints_hold_below_the_validation(path):
 
 
 def test_no_log_line_carries_event_text(path, caplog):
-    store = StateStore(path)
+    store = store_at(path)
     with caplog.at_level(logging.DEBUG):
         store.add_events([make(1, source_host="secret-host", raw="secret raw text")])
         window(store)
@@ -546,3 +553,230 @@ def test_no_log_line_carries_event_text(path, caplog):
 
 def test_eviction_tables_keep_phase4_names_before_task3():
     assert EVICTION_TABLES[:3] == ("outcomes", "marks", "situations")
+
+
+# -- cap and eviction (Task 3) ---------------------------------------------------
+
+def orphans(path_or_store) -> int:
+    conn = path_or_store._conn
+    return conn.execute("SELECT COUNT(*) FROM event_devices WHERE event_id NOT IN "
+                        "(SELECT event_id FROM events)").fetchone()[0]
+
+
+def device_rows(store) -> int:
+    return store._conn.execute("SELECT COUNT(*) FROM event_devices").fetchone()[0]
+
+
+def test_eviction_tables_include_events():
+    assert EVICTION_TABLES == ("outcomes", "marks", "situations", "events")
+
+
+def test_cap_evicts_the_oldest_written_first_and_logs_once(path, caplog):
+    store = store_at(path, event_cap=3)
+    first = make(1)
+    for n in (1, 2, 3):
+        store.add_events([make(n, event_time=T - n * S)])
+    assert store.evictions()["events"] == 0
+    with caplog.at_level(logging.WARNING):
+        store.add_events([make(4, event_time=T - 5 * S)])
+    assert store.event_count() == 3
+    ids = {r.event_id for r in window(store)}
+    assert ids == {eid(2), eid(3), eid(4)}
+    assert store.event_raw(first.event_id) is None
+    assert orphans(store) == 0 and device_rows(store) == 3
+    assert store.evictions()["events"] == 1
+    lines = [r.getMessage() for r in caplog.records if "eviction" in r.getMessage()]
+    assert lines == ["state eviction: table=events evicted=1"]
+    store.close()
+    again = store_at(path, event_cap=3)
+    assert again.evictions() == {"outcomes": 0, "marks": 0, "situations": 0, "events": 1}
+    again.close()
+
+
+def test_eviction_follows_write_order_not_event_time(path):
+    store = store_at(path, event_cap=2)
+    store.add_events([make(1, event_time=T - 1 * S)])
+    store.add_events([make(2, event_time=T - 800 * S)])
+    store.add_events([make(3, event_time=T - 400 * S)])
+    assert {r.event_id for r in window(store)} == {eid(2), eid(3)}
+    store.close()
+
+
+def test_one_batch_over_the_cap_evicts_the_excess_and_logs_once(path, caplog):
+    store = store_at(path, event_cap=3)
+    with caplog.at_level(logging.WARNING):
+        store.add_events([make(n) for n in range(1, 6)])
+    assert store.event_count() == 3
+    assert store.evictions()["events"] == 2
+    assert [r.getMessage() for r in caplog.records
+            if "eviction" in r.getMessage()] == ["state eviction: table=events evicted=2"]
+    assert orphans(store) == 0
+    store.close()
+
+
+def test_a_duplicate_never_evicts(path, caplog):
+    store = store_at(path, event_cap=2)
+    store.add_events([make(1), make(2)])
+    with caplog.at_level(logging.WARNING):
+        store.add_events([make(1), make(2)])
+    assert store.event_count() == 2
+    assert store.evictions()["events"] == 0
+    assert "eviction" not in caplog.text
+    store.close()
+
+
+def test_eviction_removes_ambiguous_children_too(path):
+    store = store_at(path, event_cap=1)
+    store.add_events([make_ambiguous(1)])
+    assert device_rows(store) == 2
+    store.add_events([make_unmapped(2)])
+    assert store.event_count() == 1
+    assert device_rows(store) == 0 and orphans(store) == 0
+    assert window(store) == [] and window(store, "router-a") == []
+    store.close()
+
+
+def test_rolled_back_batch_does_not_evict_or_log(path, caplog):
+    store = store_at(path, event_cap=1)
+    store.add_events([make(1)])
+    real = store._conn
+    store._conn = FailingConn(real, "INSERT INTO counters", 1)
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(StateUnavailable):
+            store.add_events([make(2), make(3)], quarantined={"not text": 1})
+    store._conn = real
+    assert [r for r in caplog.records if "eviction" in r.getMessage()] == []
+    assert store.event_count() == 1 and store.event_raw(eid(1)) is not None
+    assert store.evictions()["events"] == 0
+    store.close()
+
+
+# -- retention (Task 3) ------------------------------------------------------------
+
+class Ticker:
+    """A monotonic clock that only moves when the test says so."""
+
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+class Wall:
+    def __init__(self, now):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def retention_store(path, now=T, retention=3600):
+    wall, tick = Wall(now), Ticker()
+    return StateStore(path, event_retention_s=retention, clock=wall, monotonic=tick), wall, tick
+
+
+def test_read_hides_events_past_retention_without_a_sweep(path):
+    store, wall, tick = retention_store(path)
+    store.add_events([make(1, ingest_time=T, event_time=T - 10 * S)])
+    assert store.event_retention_s == 3600
+    inside = window(store, start=T - 900 * S, end=T + 7200 * S, now=T + 3600 * S - US)
+    assert [r.event_id for r in inside] == [eid(1)]
+    gone = window(store, start=T - 900 * S, end=T + 7200 * S, now=T + 3600 * S)
+    assert gone == []
+    assert store.event_count() == 1  # still on disk: no sweep has run
+    store.close()
+
+
+def test_sweep_inside_a_write_removes_events_and_children_and_logs(path, caplog):
+    store, wall, tick = retention_store(path)
+    store.add_events([make_ambiguous(1, ingest_time=T)])
+    wall.now = T + 3600 * S
+    tick.t += 60
+    with caplog.at_level(logging.WARNING):
+        store.add_events([make(2, ingest_time=wall.now, event_time=wall.now)])
+    assert store.event_count() == 1
+    assert store.event_raw(eid(1)) is None
+    assert orphans(store) == 0 and device_rows(store) == 1
+    assert [r.getMessage() for r in caplog.records if "retention" in r.getMessage()] \
+        == ["state retention: table=events removed=1"]
+    store.close()
+
+
+def test_nothing_is_logged_when_the_sweep_removes_nothing(path, caplog):
+    store, wall, tick = retention_store(path)
+    with caplog.at_level(logging.WARNING):
+        store.add_events([make(1)])
+        tick.t += 60
+        store.add_events([make(2)])
+    assert "retention" not in caplog.text
+    store.close()
+
+
+def test_sweep_runs_at_most_once_a_minute_of_the_monotonic_clock(path):
+    store, wall, tick = retention_store(path)
+    store.add_events([make(1, ingest_time=T)])  # first write sweeps (nothing old yet)
+    wall.now = T + 3600 * S
+    tick.t += 59
+    store.add_events([make(2, ingest_time=wall.now, event_time=wall.now)])
+    assert store.event_raw(eid(1)) is not None  # 59 s: no sweep
+    tick.t += 1
+    store.add_events([make(3, ingest_time=wall.now, event_time=wall.now)])
+    assert store.event_raw(eid(1)) is None  # 60 s: swept
+    store.close()
+
+
+def test_sweep_timers_are_separate_for_events_and_situations(path):
+    wall, tick = Wall(T), Ticker()
+    store = StateStore(path, event_retention_s=3600, situation_retention_s=3600,
+                       clock=wall, monotonic=tick)
+    s1, s2 = "sit-" + "ab" * 16, "sit-" + "cd" * 16
+    store.add_events([make(1, ingest_time=T)])  # event timer starts
+    store.record_situation(s1, "{}", expires_at=T, recorded_at=T)  # situation timer starts
+    wall.now = T + 3600 * S
+    tick.t += 30
+    store.record_situation(s2, "{}", expires_at=wall.now, recorded_at=wall.now)
+    assert store.situation_count() == 2  # 30 s: no situation sweep
+    store.add_events([make(2, ingest_time=wall.now, event_time=wall.now)])
+    assert store.event_raw(eid(1)) is not None  # the situation write did not sweep events
+    tick.t += 30
+    store.add_events([make(3, ingest_time=wall.now, event_time=wall.now)])
+    assert store.event_raw(eid(1)) is None  # 60 s since the event timer, not since s2
+    # the event writes above did not touch the situation timer: 60 s since it started
+    store.record_situation(s2, "{}", expires_at=wall.now, recorded_at=wall.now)
+    assert store.situation_count() == 1
+    assert store.get_situation(s1, now=T) is None
+    store.close()
+
+
+def test_a_situation_write_never_sweeps_events(path):
+    store, wall, tick = retention_store(path)
+    store.add_events([make(1, ingest_time=T)])
+    wall.now = T + 7200 * S
+    tick.t += 600
+    store.record_situation("sit-" + "ab" * 16, "{}", expires_at=wall.now, recorded_at=wall.now)
+    assert store.event_raw(eid(1)) is not None
+    store.close()
+
+
+def test_sweep_ages_by_ingest_time_only(path):
+    store, wall, tick = retention_store(path)
+    old_event_recent_ingest = make(1, ingest_time=T, event_time=T - 30 * 86400 * S)
+    future_event_old_ingest = make(2, ingest_time=T - 7200 * S, event_time=T + 86400 * S)
+    store.add_events([old_event_recent_ingest, future_event_old_ingest])
+    tick.t += 60
+    store.add_events([make(3)])
+    assert store.event_raw(eid(1)) is not None
+    assert store.event_raw(eid(2)) is None
+    assert orphans(store) == 0
+    store.close()
+
+
+def test_sweep_does_not_touch_other_tables(path):
+    store, wall, tick = retention_store(path)
+    store.record_outcome("i1", "success")
+    store.advance_mark("i1", "urn:m", T, 1.0)
+    store.add_events([make(1, ingest_time=T - 7200 * S)])
+    assert store.last_outcome("i1") == "success"
+    assert store.marks("i1", ["urn:m"])["urn:m"][1] == 1.0
+    store.close()

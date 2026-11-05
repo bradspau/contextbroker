@@ -102,3 +102,119 @@ def test_get_store_passes_the_retention(monkeypatch):
     monkeypatch.setenv("BROKER_SITUATION_RETENTION", "2h")
     reset_store()
     assert get_store()._retention_s == 7200
+
+
+# -- event settings (plan 05-01, Task 3) ----------------------------------------
+
+from broker_state.process import event_window_limits  # noqa: E402
+
+EVENT_RETENTION_MSG = ("BROKER_EVENT_RETENTION must be digits then h or d, "
+                       "from 1h to 90d, for example 7d")
+
+
+def window_msg(name):
+    return f"{name} must be digits then s, m, h or d, from 1m to 7d, for example 15m"
+
+
+def test_event_setting_defaults():
+    s = load_settings({})
+    assert (s.event_cap, s.event_retention_s, s.event_window_default_s,
+            s.event_window_max_s) == (100000, 604800, 900, 86400)
+    assert event_window_limits({}) == (900, 86400)
+    assert load_settings({"BROKER_EVENT_CAP": "", "BROKER_EVENT_RETENTION": "",
+                          "BROKER_EVENT_WINDOW_DEFAULT": "",
+                          "BROKER_EVENT_WINDOW_MAX": ""}).event_cap == 100000
+
+
+@pytest.mark.parametrize("bad", ["0", "1000001", "abc", " 5", "-1", "1e3", "canary99d"])
+def test_bad_event_cap_is_refused_naming_the_variable_only(bad):
+    with pytest.raises(ValueError) as info:
+        load_settings({"BROKER_EVENT_CAP": bad})
+    assert str(info.value) == "BROKER_EVENT_CAP must be a whole number from 1 to 1000000"
+    assert "canary99d" not in str(info.value)
+
+
+@pytest.mark.parametrize("good", ["1", "1000000"])
+def test_event_cap_limits_are_accepted(good):
+    assert load_settings({"BROKER_EVENT_CAP": good}).event_cap == int(good)
+
+
+@pytest.mark.parametrize("bad", ["59m", "91d", "7", "7 d", "0h", "7w", "canary99d", "5h\n",
+                                 "9" * 5000 + "d"])
+def test_bad_event_retention_is_refused_with_the_fixed_message(bad):
+    with pytest.raises(ValueError) as info:
+        load_settings({"BROKER_EVENT_RETENTION": bad})
+    assert str(info.value) == EVENT_RETENTION_MSG
+    assert "canary99d" not in str(info.value)
+
+
+def test_event_retention_limits():
+    assert load_settings({"BROKER_EVENT_RETENTION": "1h",
+                          "BROKER_EVENT_WINDOW_MAX": "1h"}).event_retention_s == 3600
+    assert load_settings({"BROKER_EVENT_RETENTION": "90d"}).event_retention_s == 90 * 86400
+
+
+@pytest.mark.parametrize("name", ["BROKER_EVENT_WINDOW_DEFAULT", "BROKER_EVENT_WINDOW_MAX"])
+@pytest.mark.parametrize("bad", ["30s", "8d", "15", "1w", "0m", "m", "15 m", "canary99d",
+                                 "5m\n", "9" * 5000 + "s"])
+def test_bad_window_is_refused_with_the_fixed_message(name, bad):
+    with pytest.raises(ValueError) as info:
+        load_settings({name: bad})
+    assert str(info.value) == window_msg(name)
+    with pytest.raises(ValueError) as info2:
+        event_window_limits({name: bad})
+    assert str(info2.value) == window_msg(name)
+    assert "canary99d" not in str(info.value)
+
+
+def test_window_limits_are_accepted():
+    s = load_settings({"BROKER_EVENT_WINDOW_DEFAULT": "1m", "BROKER_EVENT_WINDOW_MAX": "7d"})
+    assert (s.event_window_default_s, s.event_window_max_s) == (60, 604800)
+    assert event_window_limits({"BROKER_EVENT_WINDOW_DEFAULT": "90s",
+                                "BROKER_EVENT_WINDOW_MAX": "2h"}) == (90, 7200)
+
+
+def test_default_window_above_the_maximum_is_refused():
+    env = {"BROKER_EVENT_WINDOW_DEFAULT": "2h", "BROKER_EVENT_WINDOW_MAX": "1h"}
+    for call in (load_settings, event_window_limits):
+        with pytest.raises(ValueError) as info:
+            call(env)
+        assert str(info.value) == ("BROKER_EVENT_WINDOW_DEFAULT must not exceed "
+                                   "BROKER_EVENT_WINDOW_MAX")
+
+
+def test_maximum_window_above_the_retention_is_refused():
+    env = {"BROKER_EVENT_WINDOW_MAX": "2d", "BROKER_EVENT_RETENTION": "1d"}
+    for call in (load_settings, event_window_limits):
+        with pytest.raises(ValueError) as info:
+            call(env)
+        assert str(info.value) == ("BROKER_EVENT_WINDOW_MAX must not exceed "
+                                   "BROKER_EVENT_RETENTION")
+
+
+def test_maximum_window_equal_to_the_retention_is_accepted():
+    assert event_window_limits({"BROKER_EVENT_WINDOW_MAX": "1d",
+                                "BROKER_EVENT_RETENTION": "1d"}) == (900, 86400)
+
+
+def test_situation_retention_message_is_unchanged():
+    with pytest.raises(ValueError) as info:
+        load_settings({"BROKER_SITUATION_RETENTION": "7"})
+    assert str(info.value) == RETENTION_MSG
+
+
+def test_get_store_passes_the_event_settings(monkeypatch):
+    monkeypatch.setenv("BROKER_EVENT_CAP", "7")
+    monkeypatch.setenv("BROKER_EVENT_RETENTION", "2h")
+    monkeypatch.setenv("BROKER_EVENT_WINDOW_MAX", "1h")
+    reset_store()
+    store = get_store()
+    assert store._caps["events"] == 7
+    assert store.event_retention_s == 7200
+
+
+def test_bad_event_setting_stops_get_store(monkeypatch):
+    monkeypatch.setenv("BROKER_EVENT_WINDOW_DEFAULT", "30s")
+    reset_store()
+    with pytest.raises(ValueError):
+        get_store()
