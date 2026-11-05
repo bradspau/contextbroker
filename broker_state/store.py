@@ -11,6 +11,7 @@ All SQL text is literal; every value is passed as a query parameter.
 """
 import functools
 import logging
+import math
 import os
 import sqlite3
 import threading
@@ -57,6 +58,26 @@ _SCHEMA = (
     "CREATE INDEX situations_written_seq ON situations (written_seq)",
     "CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL)",
 )
+
+
+_OUTCOMES = ("success", "failure", "inconclusive")
+
+# Literal statements per table; the table name is never interpolated into SQL.
+_COUNT_SQL = {
+    "outcomes": "SELECT COUNT(*) FROM outcomes",
+    "marks": "SELECT COUNT(*) FROM marks",
+    "situations": "SELECT COUNT(*) FROM situations",
+}
+_EVICT_SQL = {
+    "outcomes": "DELETE FROM outcomes WHERE rowid IN "
+                "(SELECT rowid FROM outcomes ORDER BY written_seq LIMIT ?)",
+    "marks": "DELETE FROM marks WHERE rowid IN "
+             "(SELECT rowid FROM marks ORDER BY written_seq LIMIT ?)",
+    "situations": "DELETE FROM situations WHERE rowid IN "
+                  "(SELECT rowid FROM situations ORDER BY written_seq LIMIT ?)",
+}
+_COUNTER_NAME = {"outcomes": "evicted_outcomes", "marks": "evicted_marks",
+                 "situations": "evicted_situations"}
 
 
 class StateUnavailable(Exception):
@@ -111,6 +132,7 @@ class StateStore:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic
         self._last_sweep: float | None = None
+        self._after: list = []
         self._lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
         try:
@@ -154,15 +176,39 @@ class StateStore:
 
     @contextmanager
     def _txn(self):
+        """One BEGIN IMMEDIATE transaction under the lock. Log lines queued with
+        self._after are written only after COMMIT; a rolled-back write logs nothing."""
         with self._lock:
             conn = self._conn
             conn.execute("BEGIN IMMEDIATE")
+            self._after = []
             try:
                 yield conn
             except BaseException:
+                self._after = []
                 conn.execute("ROLLBACK")
                 raise
             conn.execute("COMMIT")
+            queued, self._after = self._after, []
+        for fmt, args in queued:
+            log.warning(fmt, *args)
+
+    def _make_room(self, conn, table: str, exists: bool) -> None:
+        """Before a new key is written to a full table, drop the least recently
+        written rows, count them and queue one fixed log line (D-11, D-12)."""
+        if exists:
+            return
+        count = conn.execute(_COUNT_SQL[table]).fetchone()[0]
+        cap = self._caps[table]
+        if count < cap:
+            return
+        n = count - cap + 1
+        conn.execute(_EVICT_SQL[table], (n,))
+        conn.execute(
+            "INSERT INTO counters (name, value) VALUES (?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET value = value + excluded.value",
+            (_COUNTER_NAME[table], n))
+        self._after.append(("state eviction: table=%s evicted=%d", (table, n)))
 
     @_guarded
     def close(self) -> None:
@@ -184,6 +230,9 @@ class StateStore:
         expires_us = _to_us(expires_at)
         recorded_us = _to_us(recorded_at)
         with self._txn() as conn:
+            exists = conn.execute("SELECT 1 FROM situations WHERE situation_id = ?",
+                                  (situation_id,)).fetchone() is not None
+            self._make_room(conn, "situations", exists)
             conn.execute(
                 "INSERT INTO situations (situation_id, expires_at_us, first_recorded_at_us, "
                 "last_recorded_at_us, repeat_count, written_seq, body) VALUES "
@@ -211,3 +260,96 @@ class StateStore:
     def situation_count(self) -> int:
         with self._lock:
             return self._conn.execute("SELECT COUNT(*) FROM situations").fetchone()[0]
+
+    # -- outcomes ------------------------------------------------------
+
+    @_guarded
+    def last_outcome(self, intent_id: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute("SELECT outcome FROM outcomes WHERE intent_id = ?",
+                                     (intent_id,)).fetchone()
+        return row[0] if row else None
+
+    @_guarded
+    def record_outcome(self, intent_id: str, outcome: str) -> None:
+        if outcome not in _OUTCOMES:
+            raise ValueError("outcome must be success, failure or inconclusive")
+        with self._txn() as conn:
+            exists = conn.execute("SELECT 1 FROM outcomes WHERE intent_id = ?",
+                                  (intent_id,)).fetchone() is not None
+            self._make_room(conn, "outcomes", exists)
+            conn.execute(
+                "INSERT INTO outcomes (intent_id, outcome, written_at_us, written_seq) "
+                "VALUES (?, ?, ?, (SELECT COALESCE(MAX(written_seq), 0) + 1 FROM outcomes)) "
+                "ON CONFLICT(intent_id) DO UPDATE SET outcome = excluded.outcome, "
+                "written_at_us = excluded.written_at_us, written_seq = excluded.written_seq",
+                (intent_id, outcome, _to_us(self._clock())))
+
+    @_guarded
+    def outcome_count(self) -> int:
+        with self._lock:
+            return self._conn.execute(_COUNT_SQL["outcomes"]).fetchone()[0]
+
+    # -- high-water marks ----------------------------------------------
+
+    @_guarded
+    def marks(self, intent_id: str, metric_uris) -> dict[str, tuple[datetime, float]]:
+        out: dict[str, tuple[datetime, float]] = {}
+        with self._lock:
+            for uri in metric_uris:
+                row = self._conn.execute(
+                    "SELECT observed_at_us, value FROM marks "
+                    "WHERE intent_id = ? AND metric_uri = ?", (intent_id, uri)).fetchone()
+                if row is not None:
+                    out[uri] = (_from_us(row[0]), row[1])
+        return out
+
+    @_guarded
+    def advance_mark(self, intent_id: str, metric_uri: str, observed_at: datetime,
+                     value: float) -> bool:
+        """Move the mark to (observed_at, value) unless that would go backwards.
+
+        One BEGIN IMMEDIATE transaction, so a second process cannot write between
+        the check and the advance (D-02). The refusal rule is the one the TMF921
+        path always had: refuse unless there is no mark, the time is later, or the
+        time is equal and the value is equal. Returns whether the mark was written.
+        """
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("value must be a finite number")
+        try:
+            number = float(value)
+        except OverflowError:
+            raise ValueError("value must be a finite number") from None
+        if not math.isfinite(number):
+            raise ValueError("value must be a finite number")
+        observed_us = _to_us(observed_at)
+        with self._txn() as conn:
+            row = conn.execute(
+                "SELECT observed_at_us, value FROM marks "
+                "WHERE intent_id = ? AND metric_uri = ?", (intent_id, metric_uri)).fetchone()
+            if row is not None and not (observed_us > row[0]
+                                        or (observed_us == row[0] and number == row[1])):
+                return False
+            self._make_room(conn, "marks", row is not None)
+            conn.execute(
+                "INSERT INTO marks (intent_id, metric_uri, observed_at_us, value, "
+                "written_at_us, written_seq) VALUES (?, ?, ?, ?, ?, "
+                "(SELECT COALESCE(MAX(written_seq), 0) + 1 FROM marks)) "
+                "ON CONFLICT(intent_id, metric_uri) DO UPDATE SET "
+                "observed_at_us = excluded.observed_at_us, value = excluded.value, "
+                "written_at_us = excluded.written_at_us, written_seq = excluded.written_seq",
+                (intent_id, metric_uri, observed_us, number, _to_us(self._clock())))
+            return True
+
+    @_guarded
+    def mark_count(self) -> int:
+        with self._lock:
+            return self._conn.execute(_COUNT_SQL["marks"]).fetchone()[0]
+
+    # -- eviction counters ---------------------------------------------
+
+    @_guarded
+    def evictions(self) -> dict[str, int]:
+        with self._lock:
+            rows = dict(self._conn.execute("SELECT name, value FROM counters").fetchall())
+        return {t: rows.get(_COUNTER_NAME[t], 0) for t in EVICTION_TABLES}

@@ -40,3 +40,36 @@ def test_get_store_opens_the_file_named_by_the_environment(tmp_path, monkeypatch
     get_store()
     assert target.exists()
     assert process._STORE is not None
+
+
+# -- caps (Task 2) ---------------------------------------------------------
+
+CAP_VARS = ["BROKER_OUTCOME_CAP", "BROKER_MARK_CAP", "BROKER_SITUATION_CAP"]
+
+
+def test_cap_defaults():
+    s = load_settings({})
+    assert (s.outcome_cap, s.mark_cap, s.situation_cap) == (1024, 1024, 100000)
+
+
+@pytest.mark.parametrize("name", CAP_VARS)
+@pytest.mark.parametrize("bad", ["0", "-1", "1000001", "abc", "1e3", " 5", "canary99x", "5\n"])
+def test_bad_cap_is_refused_naming_the_variable_only(name, bad):
+    with pytest.raises(ValueError) as info:
+        load_settings({name: bad})
+    assert str(info.value) == f"{name} must be a whole number from 1 to 1000000"
+    assert "canary99x" not in str(info.value)
+
+
+@pytest.mark.parametrize("name", CAP_VARS)
+@pytest.mark.parametrize("good", ["1", "1000000"])
+def test_cap_limits_are_accepted(name, good):
+    load_settings({name: good})
+
+
+def test_get_store_passes_the_caps(monkeypatch):
+    monkeypatch.setenv("BROKER_OUTCOME_CAP", "3")
+    monkeypatch.setenv("BROKER_MARK_CAP", "4")
+    monkeypatch.setenv("BROKER_SITUATION_CAP", "5")
+    reset_store()
+    assert get_store()._caps == {"outcomes": 3, "marks": 4, "situations": 5}

@@ -132,3 +132,205 @@ def test_importing_the_package_opens_no_file(tmp_path):
                     "import broker_state, broker_state.store, broker_state.process"],
                    check=True, env=env, cwd=str(tmp_path))
     assert not target.exists()
+
+
+# -- outcomes and marks (Task 2) -----------------------------------------
+
+U = "http://example.org/metric#latency"
+V = "http://example.org/metric#jitter"
+
+
+def test_outcome_round_trip_replace_and_reopen(path):
+    store = StateStore(path)
+    store.record_outcome("i1", "failure")
+    assert store.last_outcome("i1") == "failure"
+    store.record_outcome("i1", "success")
+    assert store.outcome_count() == 1
+    assert store.last_outcome("nope") is None
+    store.close()
+    again = StateStore(path)
+    assert again.last_outcome("i1") == "success"
+    again.close()
+
+
+def test_outcome_outside_the_three_values_is_refused_before_sql(path):
+    store = StateStore(path)
+    with pytest.raises(ValueError):
+        store.record_outcome("i1", "maybe")
+    assert store.outcome_count() == 0
+    store.close()
+
+
+def test_outcome_check_constraint_is_the_backstop(path):
+    store = StateStore(path)
+    with pytest.raises(sqlite3.IntegrityError):
+        store._conn.execute("INSERT INTO outcomes VALUES ('i', 'maybe', 0, 0)")
+    store.close()
+
+
+def test_mark_compare_semantics(path):
+    store = StateStore(path)
+    assert store.advance_mark("i1", U, T, 42.0) is True
+    assert store.marks("i1", [U, V]) == {U: (T, 42.0)}
+    assert store.advance_mark("i1", U, T - timedelta(microseconds=1), 1.0) is False
+    assert store.advance_mark("i1", U, T, 43.0) is False
+    assert store.advance_mark("i1", U, T, 42.0) is True
+    assert store.advance_mark("i1", U, T + timedelta(seconds=1), 1.0) is True
+    assert store.marks("i1", [U]) == {U: (T + timedelta(seconds=1), 1.0)}
+    assert store.mark_count() == 1
+    store.close()
+
+
+def test_mark_time_round_trips_to_the_microsecond(path):
+    store = StateStore(path)
+    t = datetime(2026, 5, 1, 12, 0, 0, 999999, tzinfo=timezone.utc)
+    store.advance_mark("i1", U, t, 1.5)
+    assert store.marks("i1", [U])[U][0] == t
+    store.close()
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), True, "1", None])
+def test_mark_value_must_be_a_finite_number(path, bad):
+    store = StateStore(path)
+    store.advance_mark("i1", U, T, 1.0)
+    with pytest.raises(ValueError):
+        store.advance_mark("i1", U, T + timedelta(seconds=1), bad)
+    assert store.marks("i1", [U]) == {U: (T, 1.0)}
+    store.close()
+
+
+def test_hostile_intent_and_metric_are_data(path):
+    store = StateStore(path)
+    nasty = "i'; DELETE FROM marks; --"
+    assert store.advance_mark(nasty, U, T, 1.0) is True
+    store.record_outcome(nasty, "success")
+    assert store.marks(nasty, [U]) == {U: (T, 1.0)}
+    assert store.last_outcome(nasty) == "success"
+    store.close()
+
+
+def test_restart_keeps_marks_and_outcomes(path):
+    store = StateStore(path)
+    store.advance_mark("i1", U, T, 7.0)
+    store.record_outcome("i1", "inconclusive")
+    store.close()
+    again = StateStore(path)
+    assert again.marks("i1", [U]) == {U: (T, 7.0)}
+    assert again.last_outcome("i1") == "inconclusive"
+    again.close()
+
+
+_SUBPROC = (
+    "import sys\n"
+    "from datetime import datetime, timedelta, timezone\n"
+    "from broker_state.store import StateStore\n"
+    "t = datetime.fromisoformat(sys.argv[2])\n"
+    "s = StateStore(sys.argv[1])\n"
+    "print(s.advance_mark('i1', sys.argv[3], t - timedelta(seconds=10), 0.5))\n"
+    "print(s.marks('i1', [sys.argv[3]])[sys.argv[3]][1])\n"
+)
+
+
+def _run_sub(path, uri):
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    return subprocess.run([sys.executable, "-c", _SUBPROC, str(path), T.isoformat(), uri],
+                          env=env, capture_output=True, text=True, timeout=30)
+
+
+def test_second_process_sees_the_mark_and_cannot_move_it_back(path):
+    store = StateStore(path)
+    store.advance_mark("i1", U, T, 42.0)
+    done = _run_sub(path, U)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split() == ["False", "42.0"]
+    store.close()
+
+
+def test_second_process_waits_for_a_held_write_lock(path):
+    import threading
+    import time
+    store = StateStore(path)
+    store.advance_mark("i1", U, T, 42.0)
+    holder = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
+    holder.execute("BEGIN IMMEDIATE")
+    threading.Timer(0.5, lambda: holder.execute("ROLLBACK")).start()
+    started = time.monotonic()
+    done = _run_sub(path, U)
+    assert done.returncode == 0, done.stderr
+    assert time.monotonic() - started >= 0.4
+    assert done.stdout.split() == ["False", "42.0"]
+    assert store.marks("i1", [U])[U] == (T, 42.0)
+    holder.close()
+    store.close()
+
+
+def test_outcome_eviction_drops_least_recently_written(path, caplog):
+    store = StateStore(path, outcome_cap=2)
+    store.record_outcome("a", "success")
+    store.record_outcome("b", "failure")
+    store.record_outcome("a", "failure")  # a is now the most recently written
+    assert store.evictions()["outcomes"] == 0  # re-writing evicts nothing
+    with caplog.at_level(logging.WARNING):
+        store.record_outcome("c", "success")
+    assert store.last_outcome("b") is None
+    assert store.last_outcome("a") == "failure"
+    assert store.outcome_count() == 2
+    assert store.evictions()["outcomes"] == 1
+    lines = [r.getMessage() for r in caplog.records if "eviction" in r.getMessage()]
+    assert lines == ["state eviction: table=outcomes evicted=1"]
+    store.close()
+    again = StateStore(path, outcome_cap=2)
+    assert again.evictions()["outcomes"] == 1
+    again.close()
+
+
+def test_mark_eviction_is_keyed_by_intent_and_metric(path, caplog):
+    store = StateStore(path, mark_cap=2)
+    store.advance_mark("i1", U, T, 1.0)
+    store.advance_mark("i1", V, T, 1.0)
+    store.advance_mark("i1", U, T + timedelta(seconds=1), 2.0)
+    with caplog.at_level(logging.WARNING):
+        store.advance_mark("i2", U, T, 3.0)
+    assert store.marks("i1", [U, V]).keys() == {U}
+    assert store.mark_count() == 2
+    assert store.evictions()["marks"] == 1
+    assert [r.getMessage() for r in caplog.records] == ["state eviction: table=marks evicted=1"]
+    store.close()
+
+
+def test_situation_eviction(path, caplog):
+    store = StateStore(path, situation_cap=2)
+    exp = T + timedelta(days=1)
+    store.record_situation("s1", "{}", expires_at=exp, recorded_at=T)
+    store.record_situation("s2", "{}", expires_at=exp, recorded_at=T)
+    store.record_situation("s1", "{}", expires_at=exp, recorded_at=T)
+    with caplog.at_level(logging.WARNING):
+        store.record_situation("s3", "{}", expires_at=exp, recorded_at=T)
+    assert store.get_situation("s2", now=T) is None
+    assert store.get_situation("s1", now=T).repeat_count == 2
+    assert store.situation_count() == 2
+    assert store.evictions() == {"outcomes": 0, "marks": 0, "situations": 1}
+    assert [r.getMessage() for r in caplog.records] == [
+        "state eviction: table=situations evicted=1"]
+    store.close()
+
+
+def test_a_failed_write_rolls_back_and_logs_no_eviction(path, caplog):
+    calls = []
+
+    def clock():
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError("boom")
+        return T
+
+    store = StateStore(path, outcome_cap=1, clock=clock)
+    store.record_outcome("a", "success")
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(RuntimeError):
+            store.record_outcome("b", "success")
+    assert store.last_outcome("a") == "success"
+    assert store.outcome_count() == 1
+    assert store.evictions()["outcomes"] == 0
+    assert "eviction" not in caplog.text
+    store.close()
