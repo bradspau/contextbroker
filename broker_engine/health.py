@@ -1,12 +1,17 @@
 """Upstream health for GET /health (OPS-01): is each store answering, in fixed strings only.
 
-The result holds six keys with fixed values: "status" ("ok" or "degraded") and "fuseki",
+The result holds seven keys with fixed values: "status" ("ok" or "degraded") and "fuseki",
 "victoriametrics", "tmf921" and "state", each "answering" or "not answering". "state" is the durable
-state store (D-04). A sixth key, "evictions", is {"outcomes": n, "marks": n, "situations": n} with
-whole-number counts of the entries each state table has evicted (D-12), or null when the state store
-does not answer. The body never carries a URL, hostname, port, version, path or response text,
-because the route is public. Results are cached for a short window so that a flood of unauthenticated
-requests makes at most three upstream probes and one state ping per window.
+state store (D-04). "evictions" is {"outcomes": n, "marks": n, "situations": n, "events": n} with
+whole-number counts of the entries each state table has evicted (D-12). "events" is {"duplicates": n,
+"unmapped": n, "quarantined": {"no priority": n, "not text": n, "too long": n, "unparsable header": n}}:
+whole-number counts of event lines dropped as repeats, events stored without a device, and lines
+quarantined for each of four fixed reasons (D-22). "evictions" and "events" are null when the state
+store does not answer. They are the same public exposure class as the eviction counters: whole numbers
+and fixed keys only, never a host, device, line text, path or server text. The body never carries a
+URL, hostname, port, version, path or response text, because the route is public. Results are cached for
+a short window so that a flood of unauthenticated requests makes at most three upstream probes and one
+state ping, one eviction read and one event counter read per window.
 """
 import logging
 import threading
@@ -19,6 +24,7 @@ import requests
 from broker_engine import sparql_resolver, tsdb_joiner
 from broker_engine.faults import log_fault
 from broker_state.process import get_store
+from broker_state.store import EVICTION_TABLES, QUARANTINE_REASONS
 from intent_management import tmf921_client
 
 log = logging.getLogger(__name__)
@@ -59,29 +65,37 @@ def _probe(name: str, url: str, auth) -> str:
     return NOT_ANSWERING
 
 
-def _probe_state() -> tuple[str, dict | None]:
-    """(state result, eviction counts or None). The ping and the counters are one cached probe, so a
-    flood of requests cannot starve the store lock. The class of a fault is logged, never its text."""
+def _probe_state() -> tuple[str, dict | None, dict | None]:
+    """(state result, eviction counts or None, event counts or None). The ping and both counter reads
+    are one cached probe, so a flood of requests cannot starve the store lock. The class of a fault is
+    logged, never its text."""
     try:
         store = get_store()
         store.ping()
         counts = store.evictions()
-        evictions = {name: int(counts[name]) for name in ("outcomes", "marks", "situations")}
+        evictions = {name: int(counts[name]) for name in EVICTION_TABLES}
+        raw = store.event_counters()
+        events = {
+            "duplicates": int(raw["duplicates"]),
+            "unmapped": int(raw["unmapped"]),
+            "quarantined": {reason: int(raw["quarantined"][reason]) for reason in QUARANTINE_REASONS},
+        }
     except Exception as exc:  # noqa: BLE001 - any fault means "not answering"
         log_fault(log, exc, "health probe failed: state")
-        return NOT_ANSWERING, None
-    return ANSWERING, evictions
+        return NOT_ANSWERING, None, None
+    return ANSWERING, evictions, events
 
 
 def _run_probes() -> dict:
     targets = _targets()
     with ThreadPoolExecutor(max_workers=len(targets)) as pool:
         results = list(pool.map(lambda t: _probe(*t), targets))
-    state, evictions = _probe_state()
+    state, evictions, events = _probe_state()
     body = {"status": "ok" if all(r == ANSWERING for r in [*results, state]) else "degraded"}
     body.update({name: result for (name, _, _), result in zip(targets, results)})
     body["state"] = state
     body["evictions"] = evictions
+    body["events"] = events
     return body
 
 

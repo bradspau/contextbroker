@@ -1,6 +1,7 @@
 """OPS-01: GET /health reports Fuseki, VictoriaMetrics, TMF921 and the state store with fixed strings, no credentials."""
 import logging
 import time
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -8,9 +9,15 @@ import requests
 from fastapi.testclient import TestClient
 
 from broker_engine import health, main
+from broker_state.process import get_store, reset_store
+from broker_state.store import NewEvent, StateStore, StateUnavailable
 
+ZERO_EVENTS = {"duplicates": 0, "unmapped": 0,
+               "quarantined": {"no priority": 0, "not text": 0, "too long": 0, "unparsable header": 0}}
 OK_BODY = {"status": "ok", "fuseki": "answering", "victoriametrics": "answering", "tmf921": "answering",
-           "state": "answering", "evictions": {"outcomes": 0, "marks": 0, "situations": 0}}
+           "state": "answering",
+           "evictions": {"outcomes": 0, "marks": 0, "situations": 0, "events": 0},
+           "events": ZERO_EVENTS}
 CANARY = "CANARY http://10.9.9.9:3030"
 client = TestClient(main.app)
 
@@ -52,11 +59,12 @@ def _dispatch(overrides=None, calls=None):
     return get
 
 
-def test_all_answering_is_200_with_exactly_six_keys():
+def test_all_answering_is_200_with_exactly_seven_keys():
     with patch("broker_engine.health.requests.get", side_effect=_dispatch()):
         r = client.get("/health")
     assert r.status_code == 200
     assert r.json() == OK_BODY
+    assert len(r.json()) == 7
 
 
 @pytest.mark.parametrize("name", ["fuseki", "victoriametrics", "tmf921"])
@@ -168,3 +176,95 @@ def test_failed_probe_logs_class_or_status_never_the_canary(caplog):
     assert "health probe failed: tmf921: HTTP 500" in text
     assert "CANARY" not in text and "10.9.9.9" not in text
     assert "victoriametrics" not in text
+
+
+# ---- event evictions and event counters (D-22) ----
+
+HOST_CANARY = "canary-host-77.example"
+DEVICE_CANARY = "CanaryDevice-77"
+LINE_CANARY = "canary line text 77"
+NOW = datetime.now(timezone.utc)
+
+
+def _event(n, mapped=True):
+    return NewEvent(
+        event_id="evt-" + f"{n:032x}", ingest_time=NOW, event_time=None, severity=4, facility=3,
+        format="rfc5424", source_host=HOST_CANARY,
+        mapping="mapped" if mapped else "unmapped",
+        device=DEVICE_CANARY if mapped else None,
+        candidates=(DEVICE_CANARY,) if mapped else (), kind=None, raw=f"<28>1 {LINE_CANARY} {n}")
+
+
+def _body():
+    with patch("broker_engine.health.requests.get", side_effect=_dispatch()):
+        return client.get("/health")
+
+
+def _all_ints(value):
+    if isinstance(value, dict):
+        return all(_all_ints(v) for v in value.values())
+    return type(value) is int
+
+
+def test_events_row_counts_duplicates_unmapped_and_quarantined_lines_per_reason():
+    store = get_store()
+    store.add_events([_event(1, mapped=False)], quarantined={"too long": 2})
+    store.add_events([_event(1, mapped=False)])
+    health._reset_cache()
+    r = _body()
+    assert r.status_code == 200
+    assert r.json()["events"] == {
+        "duplicates": 1, "unmapped": 1,
+        "quarantined": {"no priority": 0, "not text": 0, "too long": 2, "unparsable header": 0}}
+    assert _all_ints(r.json()["events"]) and _all_ints(r.json()["evictions"])
+    assert HOST_CANARY not in r.text and DEVICE_CANARY not in r.text and LINE_CANARY not in r.text
+    assert "sqlite" not in r.text and "tmp" not in r.text
+
+
+def test_events_counts_survive_a_reopen_of_the_state_file():
+    store = get_store()
+    store.add_events([_event(1)], quarantined={"no priority": 3})
+    store.add_events([_event(1)])
+    reset_store()
+    health._reset_cache()
+    r = _body()
+    assert r.json()["events"]["duplicates"] == 1
+    assert r.json()["events"]["quarantined"]["no priority"] == 3
+
+
+def test_events_evictions_show_the_oldest_first_cap(monkeypatch):
+    monkeypatch.setenv("BROKER_EVENT_CAP", "1")
+    reset_store()
+    get_store().add_events([_event(1), _event(2)])
+    health._reset_cache()
+    assert _body().json()["evictions"] == {"outcomes": 0, "marks": 0, "situations": 0, "events": 1}
+
+
+@pytest.mark.parametrize("target", ["ping", "evictions", "event_counters"])
+def test_events_are_null_when_the_state_store_does_not_answer(target):
+    with patch.object(StateStore, target, side_effect=StateUnavailable()):
+        r = _body()
+    assert r.status_code == 503
+    body = r.json()
+    assert body["state"] == "not answering" and body["status"] == "degraded"
+    assert body["evictions"] is None and body["events"] is None
+    assert len(body) == 7
+
+
+def test_events_counters_are_read_once_per_window():
+    real_counters, real_evictions = StateStore.event_counters, StateStore.evictions
+    reads = []
+
+    def counters(self):
+        reads.append("counters")
+        return real_counters(self)
+
+    def evictions(self):
+        reads.append("evictions")
+        return real_evictions(self)
+
+    with patch.object(StateStore, "event_counters", autospec=True, side_effect=counters), \
+            patch.object(StateStore, "evictions", autospec=True, side_effect=evictions):
+        for _ in range(20):
+            assert _body().status_code == 200
+    assert sorted(reads) == ["counters", "evictions"]

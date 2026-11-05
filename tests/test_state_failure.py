@@ -54,7 +54,9 @@ def test_a_missing_state_directory_stops_the_start_and_the_log_names_no_path(tmp
 
 
 @pytest.mark.parametrize("name", ["BROKER_OUTCOME_CAP", "BROKER_SITUATION_RETENTION",
-                                  "BROKER_MARK_CAP", "BROKER_SITUATION_CAP"])
+                                  "BROKER_MARK_CAP", "BROKER_SITUATION_CAP",
+                                  "BROKER_EVENT_CAP", "BROKER_EVENT_RETENTION",
+                                  "BROKER_EVENT_WINDOW_DEFAULT", "BROKER_EVENT_WINDOW_MAX"])
 def test_a_malformed_state_variable_stops_the_start_and_names_only_the_variable(monkeypatch, name):
     monkeypatch.setenv(name, CANARY)
     with pytest.raises(ValueError) as caught:
@@ -153,7 +155,7 @@ def test_twenty_health_requests_in_a_window_make_three_probes_and_one_ping():
 
 # ---- /health eviction counters (D-12) ----
 
-ZERO_EVICTIONS = {"outcomes": 0, "marks": 0, "situations": 0}
+ZERO_EVICTIONS = {"outcomes": 0, "marks": 0, "situations": 0, "events": 0}
 
 
 def test_health_carries_the_eviction_counts_as_integers_only():
@@ -172,12 +174,12 @@ def test_evictions_are_counted_per_table_persist_across_a_reopen_and_name_no_int
     web = TestClient(main.app)
     with patch("broker_engine.health.requests.get", side_effect=_answering):
         first = web.get("/health")
-        assert first.json()["evictions"] == {"outcomes": 1, "marks": 0, "situations": 0}
+        assert first.json()["evictions"] == {"outcomes": 1, "marks": 0, "situations": 0, "events": 0}
         assert "intent-secret" not in first.text
         reset_store()
         health._reset_cache()
         again = web.get("/health")
-    assert again.json()["evictions"] == {"outcomes": 1, "marks": 0, "situations": 0}
+    assert again.json()["evictions"] == {"outcomes": 1, "marks": 0, "situations": 0, "events": 0}
     assert "intent-secret" not in again.text
 
 
