@@ -40,7 +40,7 @@ structure below by a strangler migration.
 |---|---|
 | Context envelope, resolvers (SPARQL and PromQL), pruning, freshness handling | Built, unit-tested |
 | Deterministic outcome assurance (`success`/`failure`/`inconclusive`) | Built, unit-tested |
-| REST API (`/context/metric`, `/context/assess`, the three operations queries and `POST /context/request`) | Built, unit-tested. Every `/context/*` route needs a bearer token with a scope (see [Authentication](#authentication)); `GET /health` is public. `POST /context/request` is the context request and response contract (see [Context requests](#context-requests)); it has not yet been run against the live stack. |
+| REST API (`/context/metric`, `/context/assess`, the three operations queries and `POST /context/request`) | Built, unit-tested. Every `/context/*` route needs a bearer token with a scope (see [Authentication](#authentication)); `GET /health` is public. `POST /context/request` is the context request and response contract (see [Context requests](#context-requests)); run live on 2026-11-05 against the rebuilt API and the persistent stack: the refusals, the Context Graph (including the authority cut and a past request), goals and placements with provenance, and an `inconclusive` verdict. No telemetry was flowing, so no run saw a `success` or `failure` verdict. |
 | Operations queries, no intent needed (`metric-history`, `interfaces-nonzero`, `neighbours`; REST, MCP and agent tools) | Built, unit-tested, run live against Fuseki, VictoriaMetrics and LM Studio |
 | Agent harness (Claude tool-calling loop, LM Studio fallback, `broker.py` CLI) | Built, tested with mocks |
 | MCP server | Built and unit-tested, **not mounted** or served by anything |
