@@ -2,7 +2,7 @@
 
 Compares the architecture's Layer 3 (`docs/AI_Ready_Network_Operations_Layer_Markdowns/03_Layer_3_Semantic_Knowledge_and_Context.md`) with what the broker implements on `fullnetwork` as of 2026-11-04.
 
-The broker implements the Context Broker core (E01): resolve, join with observations, qualify, bound. It has part of the ontology and constraints (P07) and a graph platform with no temporal modelling. It has none of OKF, retrieval, events or durable situation state.
+The broker implements the Context Broker core (E01): resolve, join with observations, qualify, limit. It has part of the ontology and constraints (P07) and a graph platform with no temporal modelling. It has none of OKF or retrieval. Events were added in Phase 5 (a durable event store, a strict syslog parser and ingest command, an `events` context class and reconciliation against configured link state; see `design/event-store.md`). The rest of this analysis is as dated.
 
 Basis: broker engine, envelope, resolvers and ontology files read closely; `intent_management`, `decision_records`, `loop_coordination` and `artefact_governance` skimmed.
 
@@ -26,7 +26,7 @@ Basis: broker engine, envelope, resolvers and ontology files read closely; `inte
 | 2. Resolve canonical identities | Partial. Intent id, device/interface and metric URIs resolve via `metric_map` and bindings. Identity is split across the two Jena instances, linked only by the intent id (`data_contracts/intent_bindings.py`) |
 | 3. Traverse semantic knowledge | Minimal. intent, link, interface, device; `interface_neighbours` follows topology links. No generic depth-bounded traversal |
 | 4. Select applicable fluent state | Not built |
-| 5. Retrieve observations, aggregates, events | Observations and aggregates done (max, min, last, history, non-zero). Events not: `state_reconciliation` and `ingestion/syslog_parser.py` are stubs |
+| 5. Retrieve observations, aggregates, events | Observations and aggregates done (max, min, last, history, non-zero). Events built in Phase 5 (the parser and reconciler are no longer stubs; see `design/event-store.md`) |
 | 6. Retrieve governed OKF knowledge | Not built |
 | 7. Include approved-action references | Not built in context responses. `artefact_governance/action_catalogue.py` exists but only the action-readiness check uses it |
 | 8. Compose a Context Graph | Partial. Output is a list of `ContextEnvelope`s plus a verdict, not a graph |
@@ -54,7 +54,7 @@ Basis: broker engine, envelope, resolvers and ontology files read closely; `inte
 1. **Bitemporal fluents (spec section 5).** The largest gap, and spec risk 2 ("current state overwrites historically material fluent state"). Nothing in Fuseki records when a binding or topology link was valid or known.
 2. **Context request and response contract (sections 6 and 7).** Add purpose, scope, authority and context classes to the request; an eligibility result and expiry to the response. Open decision: JSON-LD, NGSI-LD or the current purpose-built envelope.
 3. **Durable situation state (E02).** Everything is in-memory, so continuity is lost on restart.
-4. **Events (section 3).** Needs a real event store with semantic references, which means finishing the reconciler and syslog parser.
+4. **Events (section 3).** Needs a real event store with semantic references, which means finishing the reconciler and syslog parser. *Built in Phase 5:* the store is in the state file, the parser is strict, a recognised link event is reconciled against configured link state at device level, and the details are in `design/event-store.md`. Semantic references beyond the device, inferred state from events and a live listener remain open.
 5. **OKF and vector retrieval.** The largest new components and the least urgent while the demo is an intent-assurance loop.
 6. **Authentication and authority scope.** The REST API is unauthenticated, which conflicts with the access and authority scope in the request contract.
 

@@ -1,17 +1,19 @@
-# Durable state (Phase 4)
+# Durable state (Phase 4, with the Phase 5 event tables)
 
 What the broker remembers between requests, where it keeps it, for how long, how it makes room and
-how it fails. Later phases (Phase 5 events, Phase 6 retrieval, Phase 7 exchange) read situations by
-id, so the rules here must not change without a plan for the rows already stored. The broker still
-resolves, joins and delivers context and never decides or acts: nothing stored here feeds a verdict
-or grants execution authority.
+how it fails. Phase 5 added the event tables to the same file (see `design/event-store.md`); later
+phases (Phase 6 retrieval, Phase 7 exchange) read situations and events by id, so the rules here
+must not change without a plan for the rows already stored. The broker still resolves, joins and
+delivers context and never decides or acts: nothing stored here feeds a verdict or grants execution
+authority.
 
 ## What is stored and where
 
 One SQLite file, `/data/broker-state.sqlite3` by default (`BROKER_STATE_PATH`), on the
 `broker-state` named volume mounted at `/data` in the API container. It is opened in WAL mode with
 `synchronous=FULL` and a 5 s busy timeout, with file mode 0600 (the `-wal` and `-shm` files too).
-`PRAGMA user_version` is 1; a file with a higher version is refused rather than read. All times are
+`PRAGMA user_version` is 1 (it stays 1 with the Phase 5 event tables, see the schema policy below); a
+file with a higher version is refused rather than read. All times are
 integer microseconds since the Unix epoch (UTC). Every statement is literal SQL with parameters.
 
 | Table | Key | Holds |
@@ -19,9 +21,19 @@ integer microseconds since the Unix epoch (UTC). Every statement is literal SQL 
 | `outcomes` | intent id | The last outcome per intent (`success`, `failure` or `inconclusive`) and when it was written |
 | `marks` | intent id and metric | The high-water mark: the observation time and value last pushed to the TMF921 server |
 | `situations` | situation id | The situation record (below), its expiry, first and last recorded time, repeat count |
-| `counters` | name | Eviction counters, one per table, so they survive a restart |
+| `counters` | name | Eviction counters, one per table, and the event counters (duplicates, unmapped, quarantined per reason), so they survive a restart |
+| `events` | event id | A stored syslog event (Phase 5): times, severity, facility, format, source host, mapping, device, recognised kind and the raw line |
+| `event_devices` | event id and device | One row per event and candidate device, so a device request finds its events |
 
-Each of the three data tables carries a write sequence number. Eviction orders by it.
+Each of the data tables (`outcomes`, `marks`, `situations`, `events`) carries a write sequence number.
+Eviction orders by it. What the event tables hold and how they are filled, mapped and read is in
+`design/event-store.md`.
+
+Schema policy (Phase 5, D-34): **additive**. The event tables are created with `IF NOT EXISTS` at
+schema version 1, so `user_version` stays 1, a Phase 4 file is upgraded in place by the first start of
+the new image, and the Phase 4 image can still open the upgraded file (it ignores the new tables).
+Rollback is therefore an image rollback. `user_version` moves only when an existing table changes
+shape or meaning.
 
 Decision records are not in this file. They stay in their own append-only file,
 `/data/decision-records.sqlite3` by default (`BROKER_DECISION_RECORDS_PATH`), on the same volume.
@@ -47,8 +59,10 @@ push. Making marks and locks safe across several workers needs a shared store an
   unavailable"}`, the same on every route that touches the store (`POST /context/assess`,
   `POST /context/request`, `GET /context/situation/{id}`). It is logged by exception class only. The
   TMF921 assess keeps the failure as itself; it is never relabelled "intent server unavailable".
-- `GET /health` carries a `state` row (`"answering"` or `"not answering"`) and an `evictions` object
-  of whole numbers per table (`null` when the store does not answer). A state store that does not
+- `GET /health` carries a `state` row (`"answering"` or `"not answering"`), an `evictions` object
+  of whole numbers per table, outcomes, marks, situations and events, and an `events` object of event
+  counters (duplicates, unmapped and quarantined per fixed reason). Both are `null` when the store does
+  not answer. A state store that does not
   answer makes the status `degraded` and the HTTP status 503. The ping and the counters are one
   probe inside the existing 5 s cache.
 - A mark write that fails after a successful push cannot undo the push. The pushed pinned metric
@@ -87,7 +101,13 @@ A situation is reported `expired` from its `expires_at` on and is removed 7 days
 default. `BROKER_SITUATION_RETENTION` is digits then `h` or `d`, from `1h` to `90d`. The removal
 sweep runs inside a situation write, at most once a minute, with no background thread. A read-side
 cut-off also hides a row past expiry plus retention, so the policy holds when nothing is written. The
-sweep touches situations only: never outcomes, marks or decision records.
+situation sweep touches situations only: never outcomes, marks or decision records.
+
+Events age differently: by **ingest time**, never by the time a device put in the line, so a line
+cannot pin itself in the store or age out early. `BROKER_EVENT_RETENTION` (default `7d`, from `1h` to
+`90d`) sets how long an event is kept, with its own sweep (inside an event write, at most once a minute)
+and its own read-side cut-off. The log line is `state retention: table=events removed=<n>`, written
+only when something was removed.
 
 ## Caps and eviction
 
@@ -96,6 +116,7 @@ sweep touches situations only: never outcomes, marks or decision records.
 | `outcomes` | `BROKER_OUTCOME_CAP` | 1024 | whole number from 1 to 1000000 |
 | `marks` | `BROKER_MARK_CAP` | 1024 | whole number from 1 to 1000000 |
 | `situations` | `BROKER_SITUATION_CAP` | 100000 | whole number from 1 to 1000000 |
+| `events` | `BROKER_EVENT_CAP` | 100000 | whole number from 1 to 1000000 |
 
 When a write would exceed a cap, the least recently written entry is evicted (by the write sequence,
 so an intent still being assessed keeps its place). The old behaviour, a silent stop that refused new
@@ -108,6 +129,9 @@ Why losing a mark is mostly safe: the pre-push check also refuses any sample old
 sample under 300 s old but older than the evicted mark could be pushed again. Evicting the least
 recently written entry avoids this unless more intents are active inside that window than the cap
 allows; raise `BROKER_MARK_CAP` if the number of active intents nears it.
+
+For events the oldest event (lowest write sequence) goes first, with its `event_devices` rows, and the
+eviction runs once per ingest batch. `/health` shows the count under `evictions.events`.
 
 ## Decision records, reservations and the action-readiness check
 
@@ -135,15 +159,23 @@ never echoes the value.
 | `BROKER_MARK_CAP` | `1024` | whole number from 1 to 1000000 |
 | `BROKER_SITUATION_CAP` | `100000` | whole number from 1 to 1000000 |
 | `BROKER_SITUATION_RETENTION` | `7d` | digits then `h` or `d`, from `1h` to `90d` |
+| `BROKER_EVENT_CAP` | `100000` | whole number from 1 to 1000000 |
+| `BROKER_EVENT_RETENTION` | `7d` | digits then `h` or `d`, from `1h` to `90d` |
+| `BROKER_EVENT_WINDOW_DEFAULT` | `15m` | digits then `s`, `m`, `h` or `d`, from `1m` to `7d`, not above the maximum |
+| `BROKER_EVENT_WINDOW_MAX` | `24h` | same grammar, not above the event retention |
 
 ## Operating it
 
 - Never run `docker compose down -v`: it deletes the `broker-state` volume together with the Fuseki
   and VictoriaMetrics data.
-- A backup is a copy of the two files with the API stopped.
-- Losing the state file loses outcomes, marks and situation records. After that the 300 s freshness
+- A backup is a copy of the two files with the API stopped. Take one before an upgrade that changes
+  the file (the Phase 5 image adds the event tables on its first start). Under the additive policy
+  the rollback is an image rollback: start the earlier image on the same volume; it ignores the event
+  tables. A restore of the copy is only needed if the file itself was damaged.
+- Losing the state file loses outcomes, marks, situation records and events. After that the 300 s freshness
   check is the only limit on re-pushing an observation.
-- The file holds requester subjects and device names. Keep the volume private.
+- The file holds requester subjects, device names and, for events, the raw syslog lines as sent (a
+  line can carry anything a device wrote). Keep the volume private. No route returns a raw line.
 - Tests get a state file of their own from `tests/conftest.py`, so no test shares marks with another.
 
 ## Deferred
@@ -152,5 +184,6 @@ never echoes the value.
 - Persisting reservations across restarts.
 - A retention period for decision records.
 - Storing the full response body for each situation.
-- Events (Phase 5), knowledge retrieval (Phase 6) and exchange profiles (Phase 7) build on the
-  situation row and its id.
+- Events are built (Phase 5): see `design/event-store.md`, which also lists what that phase deferred
+  (a live listener, interface-level mapping, re-resolving stored ambiguous events).
+- Knowledge retrieval (Phase 6) and exchange profiles (Phase 7) build on the situation row and its id.

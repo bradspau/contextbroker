@@ -25,13 +25,20 @@ not decided here.
 | `purpose` | One of `assurance`, `diagnosis`, `reporting` (a closed set kept in `context_contract.PURPOSES`). |
 | `scope` | A device and optionally an interface; letters, digits, `_`, `-`, `/`, at most 128 characters each. |
 | `intent_id` | Optional text in the TMF921 client's grammar; the intent whose goals and placements are wanted. |
-| `classes` | One to three of `topology`, `goals`, `observations`, no repeats. |
+| `classes` | One to four of `topology`, `goals`, `observations`, `events`, no repeats. |
 | `max_depth`, `relationship_types` | The traversal. Depth 0 to 3; types from `has_interface`, `connected_to`. |
 | `as_of`, `known_at` | Offsets such as `10m`, resolved against the single clock read of the request; limited by the retention period (400 beyond it). |
 | `freshness` | `1s` to `300s`; it can only tighten the default, a larger value is a 400, not a clamp. |
+| `window_seconds` | Optional, a whole number from 1 to 604800, only with the `events` class (422 without it). The window ends at the resolved instant. Above `BROKER_EVENT_WINDOW_MAX` it is a 400 `window_seconds above the event window maximum`, refused before any read. The default is `BROKER_EVENT_WINDOW_DEFAULT`. |
 
 There is no requester field. The requester is the token's `sub`, so a body cannot claim to be
 someone else. The model is strict: unknown fields and values of the wrong type are refused (422).
+
+The `events` class returns stored syslog events for the scope device (an interface scope reads its
+device's events) with quality flags, a recognised kind and, for a recognised link event, any conflict
+with the configured link state. It can be asked alone or with the other classes and adds no coherence
+rule of its own (an events-only request names no intent and no traversal fields). The rules for events
+are in `design/event-store.md`.
 
 Coherence rules, all refused by shape before any I/O: `topology` exactly when both `max_depth` and
 `relationship_types` are given; `intent_id` exactly when `goals` is asked for; `observations` only
@@ -50,7 +57,9 @@ its own):
 ```
 
 - Entities are exact device names or the single string `*`. There is no pattern matching of any
-  kind. Purposes and classes come from the closed sets.
+  kind. Purposes and classes come from the closed sets. `events` is one of the four classes, so it is
+  part of the signed claim: a token without it is refused with `outside authority scope: class` for an
+  events request only (D-12).
 - `scripts/mint_token.py` takes `--entity`, `--purpose` and `--class`, all three or none, and
   refuses an entity that is not `*` or a safe device name. The broker parses the claim totally:
   a malformed list, a wrong type or a list left empty after filtering makes the whole claim
@@ -82,7 +91,8 @@ already says something lies beyond, so this was accepted.
 
 `situation.id` lets Phase 4 store outcomes and decisions against a question. The inputs are the
 requester, purpose, scope device and interface, intent id, the valid instant, the knowledge
-instant, the sorted classes, `max_depth` and the sorted relationship types.
+instant, the sorted classes, `max_depth`, the sorted relationship types and, for an events request
+only, the window in seconds.
 
 Construction (`situation_id`, `SITUATION_VERSION = 1`): build a JSON object with the keys `v`,
 `requester`, `purpose`, `scope`, `intent`, `valid`, `known`, `classes`, `max_depth` and
@@ -95,6 +105,12 @@ the id is `sit-` followed by the first 32 hex characters (128 bits).
   ("latest"), never "now", so asking for the latest record is a stable meaning. A request with an
   offset resolves to an absolute instant, so the same offset asked a second later is a different
   situation.
+- The window key `window` is added to the canonical body **only for an events request** (D-33), with
+  the default applied first, so a request without `window_seconds` and one that names the default are
+  the same situation. Every id for a request without the events class is byte for byte what it was, and
+  `SITUATION_VERSION` stays 1. A second known answer pins an events id: requester `alice`, purpose
+  `diagnosis`, device `Router-A`, valid `2026-11-05T12:00:07Z`, classes `["events"]`, window 900 gives
+  `sit-cbb90b643cb87083175cc9640008817a`.
 - A known-answer test pins one id against hand-written canonical JSON (not against the function
   that produces it): requester `alice`, purpose `diagnosis`, device `Router-A`, valid
   `2026-11-05T12:00:07Z`, classes `["topology"]`, depth 2, types `["connected_to",
@@ -120,6 +136,8 @@ fixed strings; the only variable part is a pinned metric short name.
 | topology | ineligible | `ambiguous identity: scope entity`; `ambiguous identity: graph node`; `conflicting link records`; `invalid topology record` |
 | observations | gap | `no observation: <M>` (absent, missing, no value or not a finite number) |
 | observations | ineligible | `conflicting observation: <M>`; `stale observation: <M>`; `future-dated observation: <M>` |
+| events | gap | `no events in window`; `window reaches beyond event retention` |
+| events | ineligible | `ambiguous identity: event source` |
 
 - The evidence window for goals is the freshness limit before the valid instant. Changed goal means
   more than one distinct goal fluent in force over that window (for placements likewise). It needs
@@ -132,6 +150,9 @@ fixed strings; the only variable part is a pinned metric short name.
   5 s after the valid instant.
 - A non-finite sample stays `missing` in the joiner and classifies as `gap` here. It is never
   eligible and the joiner is unchanged.
+- The events reasons are fixed strings with no variable part. `time_unknown`, `future_dated` and
+  truncation are flags on the events, never reasons, and a conflict with configured state is never an
+  input to eligibility (D-15, D-31, D-32).
 - Eligibility grants no execution authority. The action-readiness check is a separate component and
   nothing in this response feeds it.
 
@@ -154,9 +175,11 @@ and is `inconclusive` ("goal changed: LatencyMetric pinned 100, now 150"). A cal
 | `oldest_observation` | current, with at least one observation time | oldest observation time plus the limit |
 | `configured_state` | current, only topology or fluent values found | retrieval time plus the limit |
 | `no_evidence` | current, nothing found | retrieval time |
+| `event_window` | current, an events request that returned at least one event | retrieval time plus the limit |
 | `historical_request` | `as_of` or `known_at` given | retrieval time |
 
-The limit is the 300 s default or the tightened freshness. It is never clamped to the future: an
+Precedence among the bases: `historical_request`, `oldest_observation`, `event_window`,
+`configured_state`, `no_evidence`. The limit is the 300 s default or the tightened freshness. It is never clamped to the future: an
 oldest observation that is already stale gives an expiry in the past, which is the honest answer.
 Configured evidence is anchored to the retrieval time because a fact's `recordedAt` says when the
 broker learned it, not how old the fact is. A past answer expires at retrieval because a historical
@@ -174,12 +197,14 @@ an upstream answer. An envelope with no provenance serialises `[]` on every rout
   `as_of` shifts the query instant.
 - A fluent value carries one record (`fuseki`, the fluent IRI, observed at the fluent's
   `recordedAt`).
-- The model client stamps a model record first and then one record per input envelope. The event
-  reconciler stamps one syslog record.
+- The model client stamps a model record first and then one record per input envelope. An event, and
+  the envelope the reconciler builds from it, carries one syslog record: source system `syslog`, the
+  event id as the reference, the event time (null when the line has none) and the retrieval time.
 - Fields left the model client and reconciler provenance when the dict became records: the always
   empty `uncertainty` and the `input_window` object (the inputs are now per-input records), and
-  the reconciler's raw device text and severity. Phase 5 owns event storage and semantic
-  references; Phases 5 and 7 add back whatever they need in their own structures.
+  the reconciler's raw device text and severity. Event storage is built in Phase 5 (see
+  `design/event-store.md`); semantic references on events and anything else Phase 7 needs are added in
+  their own structures.
 
 ## The Context Graph
 
@@ -258,4 +283,5 @@ outcome or records an outcome; tests spy on each.
 - Adoption by the MCP server and the agent tool (unchanged here; the MCP server is not mounted).
 - `/docs` and `/openapi.json` are still public (bead `contextbroker-8at`). A test checks that the
   OpenAPI document, which now describes the new route, holds no claim value, token or secret.
-- Event storage and semantic references on provenance: Phase 5.
+- Events are built (Phase 5): see `design/event-store.md` for the store, the events class and
+  reconciliation, and for what Phase 5 itself deferred.

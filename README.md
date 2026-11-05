@@ -46,11 +46,12 @@ structure below by a strangler migration.
 | MCP server | Built and unit-tested, **not mounted** or served by anything |
 | Action-readiness check (`governance_gate`) and executor (`action_lifecycle`) | A library only. The check fails closed on evidence freshness, catalogue membership, scope and loop reservation; it does not test identity or approval. The only controller is `NullController`, so nothing is ever changed on a device. No runtime path submits a proposal. |
 | TMF921 verification (`"source":"tmf921"`, the only source) | Built. Pushes fresh observations to the intent server, reads its reports, and maps them to a verdict. The old graph intent path was removed (see [Removed: the old graph intent path](#removed-the-old-graph-intent-path)). |
-| Outcomes, high-water marks, situation records and decision records | Durable. Outcomes, high-water marks and situation records are in one SQLite file on the `broker-state` volume; decision records are a file by default; the reservation book and the action catalogue stay in memory (see [Situation records](#situation-records) and [design/durable-state.md](design/durable-state.md)) |
-| LQM, System 1 / investigation models, state reconciliation, syslog parsing | Stubs |
+| Outcomes, high-water marks, situation records, events and decision records | Durable. Outcomes, high-water marks, situation records and syslog events are in one SQLite file on the `broker-state` volume; decision records are a file by default; the reservation book and the action catalogue stay in memory (see [Situation records](#situation-records) and [design/durable-state.md](design/durable-state.md)) |
+| Syslog events (strict RFC 5424 and RFC 3164 parser, durable event store, `events` context class, recognised link events reconciled against configured links) | Built, unit-tested; lines enter through a command, there is no listener (see [Events](#events) and [design/event-store.md](design/event-store.md)) |
+| LQM, System 1 / investigation models | Stubs |
 | Redpanda, Qdrant, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 1808 tests passing and 26 skipped (`pytest`): 15 live TMF921 tests, skipped
+The test suite has 2249 tests passing and 26 skipped (`pytest`): 15 live TMF921 tests, skipped
 unless `TMF921_LIVE=1`, and 11 real-engine Fuseki parity tests, skipped unless
 `FUSEKI_PARITY_URL` is set (see [Running the tests](#running-the-tests)). The work is on the `fullnetwork` branch
 (pushed to GitHub) and has not been reviewed by anyone else.
@@ -270,9 +271,9 @@ under [`ingestion/load_ontologies.py`](#ingestionload_ontologiespy).
 | `outcome_assurance` | Deterministic, three-valued intent verdict (the LLM is not the judge) | Outcome assurance |
 | `agent_harness` | Tool-calling LLM loop (Claude, LM Studio fallback); `broker.py` is a thin CLI shim over it | Agent harness |
 | `ontologies` | `tbox/` topology ontology (loader allow-list), `shacl/` shapes, `migrations/` one-off store clean-ups | Ontology / knowledge layer |
-| `ingestion` | `load_ontologies` (SHACL-gated load of tbox and abox into Fuseki), `bind_intent` (writes a `:ServiceBinding` to `ontologies/abox/` and Fuseki), `telemetry_simulator`, `syslog_parser` | Ingestion |
+| `ingestion` | `load_ontologies` (SHACL-gated load of tbox and abox into Fuseki), `bind_intent` (writes a `:ServiceBinding` to `ontologies/abox/` and Fuseki), `telemetry_simulator`, `syslog_parser` (strict parse and host mapping), `syslog_ingest` (the command that stores syslog lines as events) | Ingestion |
 | `ontologies/abox` | One `:ServiceBinding` Turtle file per bound TMF921 intent, written by `bind_intent` | Ontology / knowledge layer |
-| `broker_state` | Durable state: one SQLite file with outcomes, high-water marks and situation records, caps, eviction and retention (see [design/durable-state.md](design/durable-state.md)) | Context broker engine |
+| `broker_state` | Durable state: one SQLite file with outcomes, high-water marks, situation records and events, caps, eviction and retention (see [design/durable-state.md](design/durable-state.md)) | Context broker engine |
 | `intent_management` | Intent store (a facade over the durable outcomes and high-water marks) | Intent management |
 | `decision_records` | Append-only record store, a file by default | Decision records |
 | `loop_coordination` | Reservation book to stop concurrent loops acting on the same target | Loop coordination |
@@ -280,7 +281,7 @@ under [`ingestion/load_ontologies.py`](#ingestionload_ontologiespy).
 | `governance_gate` | Action-readiness check and controller interface; only `NullController` exists | Governance gate |
 | `action_lifecycle` | Executor: proposal snapshot, readiness check, recheck; the executor fails closed | Action lifecycle |
 | `investigation_workers` | `model_client` protocol with threshold/router stubs; unapproved models rejected | Investigation workers |
-| `state_reconciliation` | Event reconciler (stub) | State reconciliation |
+| `state_reconciliation` | Event reconciler: compares a recognised link event with the configured link state and reports a conflict naming both sides; writes nothing | State reconciliation |
 | `source_federation`, `platform_services` | Placeholders | Not implemented |
 
 ### Data flow
@@ -323,8 +324,9 @@ under [`ingestion/load_ontologies.py`](#ingestionload_ontologiespy).
 The spec lists these as candidates needing validation; none are built here:
 Redpanda transport, Qdrant retrieval, OPA/Rego policy (the policy is Python),
 Temporal durable execution, real LQM / System 1 / investigation models (only
-stubs), and real controllers (Nornir, OpenDaylight). `state_reconciliation`
-and the syslog parser are stubs, and the action catalogue is in-memory.
+stubs), and real controllers (Nornir, OpenDaylight). There is no live syslog
+listener (events enter through a command, see [Events](#events)), and the action
+catalogue is in-memory.
 
 ### `broker.py` and `agent_harness`
 
@@ -560,7 +562,7 @@ Every `/context/*` route needs `Authorization: Bearer <token>`. `/docs`, `/redoc
 - **Authority claim.** `POST /context/request` and `GET /context/situation/{id}` also need a signed `authority` claim that
   says what the caller may ask about: `entities` (device names written exactly, or `*`
   for all; no patterns), `purposes` (`assurance`, `diagnosis`, `reporting`) and
-  `classes` (`topology`, `goals`, `observations`). The other routes ignore the claim. A
+  `classes` (`topology`, `goals`, `observations`, `events`). The other routes ignore the claim. A
   token with the scope but no usable claim is `403 {"detail": "authority claims required"}`
   on those routes only, so a token minted before this claim existed keeps working on
   every other route. The broker keeps no list of tokens or claims: it verifies the signature and reads the
@@ -621,21 +623,26 @@ server must authenticate (Phase 7).
 
 `GET /health` needs no token and takes no parameters. It probes Fuseki (`/$/ping`, with
 the Fuseki credential), VictoriaMetrics (`/health`) and the TMF921 server (`/health`)
-in parallel, pings the state file, and answers with exactly six fixed keys:
+in parallel, pings the state file, and answers with exactly seven fixed keys:
 
 ```json
 {"status": "ok", "fuseki": "answering", "victoriametrics": "answering", "tmf921": "answering",
- "state": "answering", "evictions": {"outcomes": 0, "marks": 0, "situations": 0}}
+ "state": "answering",
+ "evictions": {"outcomes": 0, "marks": 0, "situations": 0, "events": 0},
+ "events": {"duplicates": 0, "unmapped": 0,
+            "quarantined": {"no priority": 0, "not text": 0, "too long": 0, "unparsable header": 0}}}
 ```
 
 The status is `200` when all four answer and `503` with `"status": "degraded"` when
 any one does not (that row reads `"not answering"`). The state store counts toward
-`degraded`, and then `evictions` is `null`. `evictions` counts, per table, the entries
+`degraded`, and then `evictions` and `events` are `null`. `evictions` counts, per table, the entries
 removed to make room under the cap since the file was created (whole numbers, kept across
-restarts); see [Situation records](#situation-records). The body never carries a
+restarts); see [Situation records](#situation-records). `events` counts the syslog lines the
+ingest command dropped as duplicates, stored without a device (`unmapped`) and refused as
+unreadable, per fixed reason; see [Events](#events). The body never carries a
 hostname, URL, path or server text; the cause goes to the server log as an exception class or
 an HTTP status. Results are cached for 5 s, so a flood of requests makes at most three
-upstream probes, one state ping and one counters read per window.
+upstream probes, one state ping and one read of each counter set per window.
 
 The TMF921 server counts toward `degraded`, so without the `tmf921` compose profile the
 API container reports unhealthy. The compose healthcheck on `contextbroker-api` calls
@@ -849,11 +856,12 @@ token's `sub`.
 |---|---|
 | `purpose` | One of `assurance`, `diagnosis`, `reporting`. |
 | `scope` | `{"device": ..., "interface": ...}`; `interface` is optional. Letters, digits, `_`, `-` and `/`, at most 128 characters each. |
-| `classes` | One or more of `topology`, `goals`, `observations`, each at most once. |
+| `classes` | One or more of `topology`, `goals`, `observations`, `events`, each at most once. |
 | `intent_id` | The TMF921 intent whose goals and placements are wanted. Needed with `goals` and refused without it. |
 | `max_depth`, `relationship_types` | The traversal. `max_depth` is 0 to 3; `relationship_types` is a non-empty set of `has_interface` and `connected_to`. Both are needed with `topology` and refused without it. |
 | `as_of`, `known_at` | Optional offsets such as `10m`, as in [Asking about the past](#asking-about-the-past), limited by the same retention period. |
 | `freshness` | Optional, `1s` to `300s`. It can only tighten the 300 s default, never loosen it. |
+| `window_seconds` | Optional, 1 to 604800, only with the `events` class. How far back from the resolved instant to look for events; the default is `BROKER_EVENT_WINDOW_DEFAULT` (15 minutes). |
 
 The coherence rules, in one place: `topology` goes with `max_depth` and
 `relationship_types` and nothing else does; `goals` goes with `intent_id` and nothing else
@@ -899,8 +907,9 @@ server. The bodies are fixed strings.
 | 403 | `outside authority scope: entity` | The scope device is not in the token's `entities`. |
 | 403 | `outside authority scope: purpose` | The purpose is not in the token's `purposes`. |
 | 403 | `outside authority scope: class` | A requested class is not in the token's `classes`. |
-| 422 | the validation body | Unknown field, wrong type, unknown purpose, class or relationship type, `max_depth` above 3, an incoherent combination, or any query parameter. |
+| 422 | the validation body | Unknown field, wrong type, unknown purpose, class or relationship type, `max_depth` above 3, an incoherent combination, `window_seconds` without the `events` class, or any query parameter. |
 | 400 | `as_of is further back than the retention period` (or the `known_at` form) | An offset beyond `BROKER_RETENTION_PERIOD`. |
+| 400 | `window_seconds above the event window maximum` | A `window_seconds` above `BROKER_EVENT_WINDOW_MAX` (24 hours by default). |
 | 400 | `freshness must be from 1 s to 300 s` | A freshness above the default limit (or `0s`). A value that is not digits and one of `s`, `m`, `h`, `d` is a 422. |
 | 502 | `upstream data store unavailable` | Fuseki or VictoriaMetrics could not be reached after the checks passed. |
 
@@ -947,12 +956,12 @@ An abridged answer to the request above (times shortened, one metric shown):
 
 - **Situation.** `situation.id` identifies the question. It is `sit-` followed by 32 hex
   characters of a version-1 hash over the requester, purpose, scope, intent, the valid
-  instant (to the second), the knowledge instant, the sorted classes, `max_depth` and the
-  sorted relationship types. The same question asked at the same instant gets the same id.
+  instant (to the second), the knowledge instant, the sorted classes, `max_depth`, the
+  sorted relationship types and, for an events request only, the window. The same question asked at the same instant gets the same id.
   A different instant is a different situation, so a repeat call that uses an offset
   such as `10m` gets a new id each second. `valid_at` and `known_at` are those resolved
   instants; `historical` is true when `as_of` or `known_at` was given.
-- **Eligibility.** One result per requested class (`topology`, `goals`, `observations`),
+- **Eligibility.** One result per requested class (`topology`, `goals`, `observations`, `events`),
   each `eligible`, `ineligible` or `gap`, with fixed-string reasons that name only pinned
   metric names. `gap` means the evidence is absent (no goal, placement or observation to
   judge); `ineligible` means evidence is present but unfit (stale, conflicting, a goal
@@ -960,7 +969,10 @@ An abridged answer to the request above (times shortened, one metric shown):
   asked for is fresh, finite, single-valued and unchanged. Any single problem beats
   `eligible`, and a class that was not requested is not judged, so a topology-only request
   is not made ineligible by a stale metric. The overall result is the worst of the
-  requested classes. A sample that is not a finite number is a gap, never eligible.
+  requested classes. A sample that is not a finite number is a gap, never eligible. For
+  `events`, no event in the window and a window reaching back past the event retention are gaps,
+  and an ambiguous event (one host name that matches two devices) is ineligible; a conflict with
+  configured state is never an eligibility reason.
   Eligibility is a fitness label for the evidence. **It grants no execution authority**:
   the action-readiness check is a separate component, and nothing here lets a caller act.
   It is also kept apart from the verdict: it never feeds it, and the two can disagree
@@ -970,6 +982,7 @@ An abridged answer to the request above (times shortened, one metric shown):
   and `expiry_basis` says why: `oldest_observation` (the oldest sample time plus the
   freshness limit), `configured_state` (only topology or fluent values were found; the
   retrieval time plus the limit, because the time a fact was recorded is not its age),
+  `event_window` (an events request that returned events; the retrieval time plus the limit),
   `no_evidence` (nothing was found; it expires at retrieval) and `historical_request`
   (`as_of` or `known_at` was given; a past answer is not reusable as current context, so
   it expires at retrieval). An expiry that is already in the past is reported as it is.
@@ -999,6 +1012,7 @@ An abridged answer to the request above (times shortened, one metric shown):
   Two interfaces that would get the same node id, an ambiguous scope, two conflicting
   link records or a malformed topology record make the topology class ineligible; a
   scope that is not in the topology is a gap.
+- **Events.** Present only when `events` was asked for, else `null`; see [Events](#events).
 - **Verdict.** Present only when the request names an `intent_id` with both `goals` and
   `observations`; otherwise it is `null`. It comes from the read-only TMF921 assess
   (`success`, `failure` or `inconclusive`), judged on the same goal snapshot and the same
@@ -1046,11 +1060,71 @@ digits then `h` or `d`, from `1h` to `90d`). The state lives in one SQLite file,
 `BROKER_STATE_PATH` (default `/data/broker-state.sqlite3`, on the `broker-state` volume), and
 the API refuses to start without a usable file. When a table is full the least recently
 written entry is evicted, with a log line and a count in `/health`:
-`BROKER_OUTCOME_CAP` (1024), `BROKER_MARK_CAP` (1024) and `BROKER_SITUATION_CAP` (100000).
+`BROKER_OUTCOME_CAP` (1024), `BROKER_MARK_CAP` (1024), `BROKER_SITUATION_CAP` (100000) and
+`BROKER_EVENT_CAP` (100000).
 Decision records go to `BROKER_DECISION_RECORDS_PATH` (default
 `/data/decision-records.sqlite3`) and are never swept. Never run `docker compose down -v`:
 it deletes the `broker-state` volume. The full rules, including what happens when a mark
 write fails after a push, are in [design/durable-state.md](design/durable-state.md).
+
+### Events
+
+Syslog lines (RFC 5424 and RFC 3164) become stored events that a context request can ask for
+with the `events` class. Lines enter through a command; there is no listener and no ingest
+route, so nothing new to authenticate. The full rules are in
+[design/event-store.md](design/event-store.md).
+
+```bash
+docker exec -i contextbroker-api python -m ingestion.syslog_ingest < syslog.txt
+```
+
+The command reads bytes from a file or standard input. It first reads the device names from
+Fuseki (the API container already has the Fuseki credential and query endpoint) and stores
+nothing, changing no counter, if Fuseki cannot answer. Then it
+parses each line strictly, maps the source host to a device, and prints one line:
+
+```
+stored=3 duplicates=1 unmapped=1 ambiguous=0 quarantined=4 (no priority=1, not text=1, too long=1, unparsable header=1)
+```
+
+- A line is quarantined, with only a count kept, when it has no valid priority (`no priority`),
+  is not text (`not text`), is over 4096 bytes (`too long`) or has a header that fits neither RFC
+  (`unparsable header`). The text of a quarantined line is never stored, printed or logged. A line
+  without a priority is refused, not read as priority 13 as RFC 3164 allows. The rsyslog default
+  file form is an `unparsable header`.
+- A host that matches one device exactly (or ignoring case) is stored with that device. A host
+  that matches none is stored `unmapped` and never returned. A host that matches two is stored
+  `ambiguous` with both candidates. The mapping is fixed when the line is ingested.
+- Two lines with identical text are one event; the repeat is counted as a duplicate.
+- Syslog origin is unauthenticated. A mapped event is a claim by whoever sent the line.
+- The store is capped (`BROKER_EVENT_CAP`, 100000, oldest first) and events are removed
+  `BROKER_EVENT_RETENTION` (7 days) after they were ingested. `BROKER_EVENT_WINDOW_DEFAULT` (15
+  minutes) and `BROKER_EVENT_WINDOW_MAX` (24 hours) set the request window.
+
+Ask for events with a token whose authority claim includes the `events` class (add
+`--class events` when minting). A made-up request:
+
+```json
+{"purpose": "diagnosis", "scope": {"device": "edge-sw-1"}, "classes": ["events"], "window_seconds": 600}
+```
+
+The `events` part of the answer holds:
+
+- `window` (start, end, seconds), `cap` (100), `truncated` and `events`, newest first. Each event
+  has its id, `mapping`, `device`, a `kind` when it is a recognised link up or down, severity,
+  facility, event and ingest times, `flags` (`time_unknown` for a line with no event time,
+  `future_dated`, `ambiguous`) and one provenance record with source `syslog`. An ambiguous event
+  names only the candidate devices the token covers and counts the rest.
+- `envelopes`: one `observed` envelope per recognised event on a mapped device.
+- `configured`: the device's configured link state at the request's instants (`held`,
+  `not_held` or `invalid`).
+- `conflicts`: a recognised link-down event while a link with an end on that device is in force
+  is a conflict that names both sides. The comparison is at device level, not per interface.
+  The broker writes nothing, marks nothing stale and ranks neither side; the verdict and the
+  eligibility never read a conflict.
+
+It never returns the raw line or the message text. The stored situation keeps references to the
+events it rested on, not their content.
 
 ## Using an external TMF921 intent server
 
@@ -1181,6 +1255,9 @@ Docker required to run the suite:
 ```bash
 pytest tests/ -v
 ```
+
+The full suite is 2249 passed and 26 skipped (the 15 live TMF921 tests and the 11 real-engine
+parity tests are skipped unless their variables are set).
 
 Every test gets its own state file and decision-record file from `tests/conftest.py`, so no test
 sees another test's marks, outcomes or records.
