@@ -26,7 +26,7 @@ def parts():
     cat = ActionCatalogue([TEMPLATE])
     res = ReservationBook()
     res.reserve("L1", "site/a", 60, NOW)
-    rec = RecordStore()
+    rec = RecordStore(":memory:")
     return cat, res, rec, Gate(cat, res, rec)
 
 

@@ -56,7 +56,7 @@ class Spy:
 def env():
     res = ReservationBook()
     res.reserve("L1", "site/a", 600, NOW)
-    rec = RecordStore()
+    rec = RecordStore(":memory:")
     gate = CountingGate(ActionCatalogue([TEMPLATE]), res, rec)
     return gate, rec, res
 
