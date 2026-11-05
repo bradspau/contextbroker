@@ -50,7 +50,7 @@ class ParsedLine:
     raw: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Quarantined:
     """A line the parser could not read. Holds one fixed reason and nothing else."""
 
@@ -72,3 +72,42 @@ class HostMapping:
     status: str
     device: str | None
     candidates: tuple[str, ...]
+
+
+# The recognised-kind table (D-16). The reconciler compares only these kinds; every
+# other message is stored and returned but never produces a conflict. Each pattern is
+# case-sensitive and anchored: the Cisco forms must start at the "%" token (not
+# preceded by a letter or digit) and end the message (\Z), and the interface name is
+# limited to letters, digits and "/", ".", ":", "_", "-" up to 64 characters, so
+# device-authored text cannot widen a match. The vendor wordings below are
+# community-sourced (research A1), not taken from a vendor guide; the table is
+# deliberately small and a new form is added here only with a near-miss test.
+_IFACE = r"[A-Za-z0-9/.:_-]{1,64}"
+_NOT_ALNUM_BEFORE = r"(?<![A-Za-z0-9])"
+
+_KIND_TABLE: tuple[re.Pattern[str], ...] = (
+    # Cisco IOS: %LINK-3-UPDOWN: Interface Gi0/0/0, changed state to down
+    re.compile(_NOT_ALNUM_BEFORE + r"%LINK-[0-7]-UPDOWN: Interface " + _IFACE + r", changed state to (?P<state>down|up)\Z"),
+    # Cisco IOS: %LINEPROTO-5-UPDOWN: Line protocol on Interface Gi0/0/0, changed state to down
+    re.compile(
+        _NOT_ALNUM_BEFORE
+        + r"%LINEPROTO-[0-7]-UPDOWN: Line protocol on Interface "
+        + _IFACE
+        + r", changed state to (?P<state>down|up)\Z"
+    ),
+    # Linux NIC drivers (e1000e, igb, ...): "eth0 NIC Link is Up 1000 Mbps Full Duplex"
+    re.compile(_NOT_ALNUM_BEFORE + r"NIC Link is (?P<state>Down|Up)(?![A-Za-z0-9])"),
+)
+
+_STATE_KIND = {"down": "link_down", "up": "link_up"}
+
+
+def recognise(message: str) -> str | None:
+    """The event kind of a message ("link_down" or "link_up"), or None for any other text."""
+    if message.startswith("\ufeff"):
+        message = message[1:]
+    for pattern in _KIND_TABLE:
+        found = pattern.search(message)
+        if found is not None:
+            return _STATE_KIND[found.group("state").lower()]
+    return None

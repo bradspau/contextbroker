@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable
 
-from data_contracts.syslog_events import HostMapping, ParsedLine, Quarantined
+from data_contracts.syslog_events import MAX_LINE_BYTES, HostMapping, ParsedLine, Quarantined
 
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
@@ -36,7 +36,13 @@ _PRI = re.compile(r"<(0|[1-9][0-9]{0,2})>")
 # RFC 3339 as RFC 5424 uses it: upper-case T and Z, a 1 to 6 digit fraction, a
 # numeric offset or Z. Matched BEFORE datetime.fromisoformat, which on Python 3.14
 # also accepts date-only, basic-format and lower-case forms.
-_TIMESTAMP = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})"
+# The ranges are in the pattern too, because Python 3.14 reads hour 24 as midnight; the
+# calendar (Feb 30) is left to fromisoformat. Second 60 (a leap second) is refused.
+_TIMESTAMP = (
+    r"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"
+    r"T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,6})?"
+    r"(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"
+)
 
 # RFC 5424 SD-ID: 1 to 32 printable US-ASCII except "=", space, "]" and a double quote.
 _SD_NAME = r'[!#-<>-\\^-~]{1,32}'
@@ -63,7 +69,10 @@ _3164 = re.compile(
     re.S,
 )
 
-_BOM = "﻿"
+_BOM = "\ufeff"  # U+FEFF, the decoded UTF-8 byte order mark
+
+# C0 controls except tab, DEL and the C1 controls: not text, whatever the encoding.
+_CONTROL = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f]")
 
 
 def _event_time(text: str) -> datetime | None:
@@ -106,20 +115,49 @@ def _body(pri_end: int, text: str) -> tuple[str, str | None, datetime | None, st
     return "rfc3164", m.group("host"), None, m.group("msg") or ""
 
 
-def parse_line(raw: "bytes | str") -> "ParsedLine | Quarantined":
-    """Read one syslog line (terminator already removed) or quarantine it."""
-    if isinstance(raw, bytes):
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            return Quarantined("unparsable header")
-    elif isinstance(raw, str):
-        text = raw
+def _read_text(raw: Any) -> "str | Quarantined":
+    """The decoded line, or the first of: not text (type), too long, not text (content)."""
+    if isinstance(raw, str):
+        # Every UTF-8 byte is at most one character wide, so more characters than the cap
+        # is over the cap whatever the encoding; nothing longer is ever encoded or scanned.
+        if len(raw) > MAX_LINE_BYTES:
+            return Quarantined("too long")
+        data = raw.encode("utf-8", "surrogatepass")  # a lone surrogate fails the decode below
+    elif isinstance(raw, bytes):
+        data = raw
     else:
-        return Quarantined("unparsable header")
+        return Quarantined("not text")
+    if len(data) > MAX_LINE_BYTES:
+        return Quarantined("too long")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return Quarantined("not text")
+    if _CONTROL.search(text):
+        return Quarantined("not text")
+    return text
+
+
+def parse_line(raw: "bytes | str") -> "ParsedLine | Quarantined":
+    """Read one syslog line (terminator already removed) or quarantine it.
+
+    The checks run in one pinned order, so a line has exactly one reason: input type,
+    length in bytes (over MAX_LINE_BYTES is "too long", before any decoding), strict
+    UTF-8 and control characters ("not text"), a valid PRI at the first byte
+    ("no priority"), then a header that fits RFC 5424 or RFC 3164 ("unparsable header").
+    A readable header whose host maps to no device is still a ParsedLine (D-20).
+
+    RFC 3164 says a receiver with no valid PRI treats the packet as content with
+    priority 13. This parser deliberately quarantines such a line as "no priority"
+    instead (D-20). The reason is all that is kept; the line is never stored in the
+    result, an exception or a log line (D-21).
+    """
+    text = _read_text(raw)
+    if isinstance(text, Quarantined):
+        return text
     pri = _PRI.match(text)
     if pri is None or int(pri.group(1)) > 191:
-        return Quarantined("unparsable header")
+        return Quarantined("no priority")
     read = _body(pri.end(), text)
     if read is None:
         return Quarantined("unparsable header")
