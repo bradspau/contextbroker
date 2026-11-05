@@ -6,6 +6,8 @@ de-duplicated provenance records and the Context Graph node ids) and the verdict
 metric value, no envelope and no fluent value: those are fetched again from their sources, so a
 stored situation can never be read as the data itself (D-07).
 
+When the events class was answered, the evidence also lists one provenance record per returned event.
+
 It reuses the Phase 3 response models. The module is pure: no FastAPI and no I/O.
 """
 import re
@@ -77,6 +79,11 @@ def stored_situation(response: ContextResponse) -> StoredSituation:
             seen.setdefault(_key(record), record)
     for value in response.fluent_values:
         seen.setdefault(_key(value.provenance), value.provenance)
+    if response.events is not None:
+        # A reference per returned event (its id), never the event: a fetched situation points at the
+        # events it rested on and holds none of them (D-07).
+        for event in response.events.events:
+            seen.setdefault(_key(event.provenance), event.provenance)
     nodes = sorted(node.id for node in response.graph.nodes) if response.graph is not None else []
     label = response.verdict.get("verdict") if response.verdict is not None else None
     return StoredSituation(

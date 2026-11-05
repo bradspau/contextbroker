@@ -1137,3 +1137,59 @@ def test_a_current_events_answer_with_an_event_expires_a_limit_after_retrieval(r
 def test_a_current_events_answer_with_no_event_has_no_evidence_expiry(rig):
     out = post(EVENTS, headers=events_headers()).json()
     assert out["expires_at"] == NOW.isoformat() and out["expiry_basis"] == "no_evidence"
+
+
+# ---- every coherent combination of classes keeps one result per requested class ----
+
+ALL_FOUR = {"entities": ["*"], "purposes": ["assurance"], "classes": list(CONTEXT_CLASSES)}
+OLT_EVENT = dict(device="olt1", source_host="olt1", candidates=("olt1",))
+COMBINATIONS = {
+    "events": {"classes": ["events"]},
+    "events_topology": {"classes": ["events", "topology"], "max_depth": 1, "relationship_types": BOTH},
+    "events_goals": {"classes": ["events", "goals"], "intent_id": "i1"},
+    "events_goals_observations": {"classes": ["events", "goals", "observations"], "intent_id": "i1"},
+}
+
+
+@pytest.mark.parametrize("name", sorted(COMBINATIONS))
+def test_the_eligibility_has_exactly_one_entry_per_requested_class(name, olt):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt)
+    live_goal(olt)
+    put(event(1, **OLT_EVENT))
+    body = {"purpose": "assurance", "scope": OLT_PON0, **COMBINATIONS[name]}
+    r = assure(body, authority=ALL_FOUR)
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert set(out["eligibility"]["classes"]) == set(body["classes"])
+    assert out["events"] is not None and out["events"]["events"][0]["device"] == "olt1"
+    assert out["eligibility"]["classes"]["events"]["result"] == "eligible"
+    # The overall result is the worst of the classes asked for, events included.
+    results = {c["result"] for c in out["eligibility"]["classes"].values()}
+    assert out["eligibility"]["result"] == ("ineligible" if "ineligible" in results
+                                            else "gap" if "gap" in results else "eligible")
+
+
+def test_an_ineligible_events_class_makes_the_overall_result_ineligible(rig):
+    put(ambiguous(1))
+    out = post({**TOPOLOGY, "classes": ["topology", "events"]}, headers=events_headers()).json()
+    assert out["eligibility"]["classes"]["topology"]["result"] == "eligible"
+    assert out["eligibility"]["classes"]["events"]["result"] == "ineligible"
+    assert out["eligibility"]["result"] == "ineligible"
+
+
+def test_a_request_without_the_events_class_has_no_events_key_value(rig):
+    out = post(TOPOLOGY).json()
+    assert out["events"] is None and "events" not in out["eligibility"]["classes"]
+
+
+def test_the_openapi_document_lists_events_and_describes_its_result_without_names(rig):
+    spec = client.get("/openapi.json").json()
+    schemas = spec["components"]["schemas"]
+    assert "events" in schemas["ContextRequest"]["properties"]["classes"]["items"]["enum"]
+    assert {"EventsResult", "EventOut", "EventWindow"} <= set(schemas)
+    assert "window_seconds" in schemas["ContextRequest"]["properties"]
+    assert "events" in schemas["ContextResponse"]["properties"]
+    text = str(spec)
+    for secret in ("Router-A", "olt1", "eyJ", "BEGIN", "test-caller", "testpassword0"):
+        assert secret not in text

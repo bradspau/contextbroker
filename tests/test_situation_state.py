@@ -14,7 +14,8 @@ import requests
 from broker_state.process import get_store, reset_store
 from broker_state.store import STATE_UNAVAILABLE, StateStore, StateUnavailable
 from test_context_request import (  # noqa: F401  (fixtures and helpers)
-    ASSURANCE, NOW, SCOPES, TOPOLOGY, WIDE, assure, client, live_goal, olt, rig, sample, token)
+    ASSURANCE, EVENTS, NOW, SCOPES, TOPOLOGY, WIDE, _store_clock, assure, client, event, events_headers,
+    live_goal, olt, put, rig, sample, token)
 from data_contracts.context_contract import Authority, ContextRequest, authorize, authorize_scope
 from data_contracts.situation_record import SITUATION_ID_PATTERN
 from tests.fluent_helpers import IF0, LAT, T0, bind
@@ -260,3 +261,47 @@ def test_a_request_changes_only_the_situations_table(olt):
     assert assure().status_code == 200
     store = get_store()
     assert (store.situation_count(), store.outcome_count(), store.mark_count()) == (1, 0, 0)
+
+
+# ---- a situation answered from events references them and holds none ----
+
+def test_an_events_situation_references_its_events_and_holds_none_of_them(rig):
+    put(event(1), event(2, at=None, ingest=NOW - 30 * timedelta(seconds=1), format="rfc3164", kind=None))
+    answer = recorded(rig, headers=events_headers(), body=EVENTS)
+    store = get_store()
+    row = store.get_situation(answer["situation"]["id"], now=NOW)
+    body = json.loads(row.body)
+    assert set(body) == {"situation", "eligibility", "expires_at", "expiry_basis", "evidence", "verdict"}
+    assert body["expiry_basis"] == "event_window" and body["situation"]["window_seconds"] == 900
+    assert not {"flags", "candidates", "kind", "source_host", "event_time", "severity"} & set(_keys(body))
+    r = fetch(answer["situation"]["id"], headers=events_headers())
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["situation"] == answer["situation"]
+    assert out["evidence"]["graph_nodes"] == []
+    sent = [e["provenance"] for e in answer["events"]["events"]]
+    assert len(sent) == 2
+    assert all(p["source_system"] == "syslog" for p in out["evidence"]["provenance"])
+    assert sorted(out["evidence"]["provenance"], key=lambda p: p["reference"]) == sorted(
+        sent, key=lambda p: p["reference"])
+    assert out["evidence"]["provenance"] == sorted(
+        out["evidence"]["provenance"], key=lambda p: (p["source_system"], p["reference"]))
+    assert (store.event_count(), store.outcome_count(), store.mark_count()) == (2, 0, 0)
+
+
+def test_event_references_sit_beside_the_other_evidence(rig):
+    put(event(1))
+    answer = recorded(rig, headers=events_headers(),
+                      body={**TOPOLOGY, "classes": ["topology", "events"]})
+    out = fetch(answer["situation"]["id"], headers=events_headers()).json()
+    systems = sorted(p["source_system"] for p in out["evidence"]["provenance"])
+    assert systems == ["fuseki", "syslog"]
+    assert out["evidence"]["graph_nodes"] == sorted(n["id"] for n in answer["graph"]["nodes"])
+
+
+def test_fetching_an_events_situation_without_the_events_class_is_403(rig):
+    put(event(1))
+    sid = recorded(rig, headers=events_headers(), body=EVENTS)["situation"]["id"]
+    narrow = token({**WIDE, "classes": ["topology"]})
+    r = fetch(sid, headers=narrow)
+    assert r.status_code == 403 and r.json() == {"detail": "outside authority scope: class"}

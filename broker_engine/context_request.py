@@ -1,11 +1,13 @@
 """The I/O shell of the context request (CTX-01 to CTX-08).
 
+The events class reads the state file only, is judged on its own and never returns device-authored
+text (no raw line, no message): only structured fields, a recognised kind and quality flags.
+
 It composes the pure modules (the request contract, eligibility, the Context Graph, the binding
-selection) over the sources: one Fuseki read for the intent's fluents, the Context Graph reads, and one
-VictoriaMetrics read per placed metric, and for the events class one read of the state file (stored
-syslog events, as structured fields and quality flags only, never the raw line or its message text).
-It resolves, joins and delivers context and never decides or
-acts: it pushes nothing to the TMF921 server, writes no high-water mark and records no outcome.
+selection) over the sources: one Fuseki read for the intent's fluents, the Context Graph reads, one
+VictoriaMetrics read per placed metric, and for the events class one read of the state file. It
+resolves, joins and delivers context and never decides or acts: it pushes nothing to the TMF921
+server, writes no high-water mark and records no outcome.
 
 Every refusal (no authority claim, a request outside the caller's entities, purposes or classes, an
 intent named without ``context:assess``, an offset beyond retention, a freshness above the default
