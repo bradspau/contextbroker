@@ -46,11 +46,11 @@ structure below by a strangler migration.
 | MCP server | Built and unit-tested, **not mounted** or served by anything |
 | Action-readiness check (`governance_gate`) and executor (`action_lifecycle`) | A library only. The check fails closed on evidence freshness, catalogue membership, scope and loop reservation; it does not test identity or approval. The only controller is `NullController`, so nothing is ever changed on a device. No runtime path submits a proposal. |
 | TMF921 verification (`"source":"tmf921"`, the only source) | Built. Pushes fresh observations to the intent server, reads its reports, and maps them to a verdict. The old graph intent path was removed (see [Removed: the old graph intent path](#removed-the-old-graph-intent-path)). |
-| Intent / decision / loop / artefact stores | In-memory |
+| Outcomes, high-water marks, situation records and decision records | Durable. Outcomes, high-water marks and situation records are in one SQLite file on the `broker-state` volume; decision records are a file by default; the reservation book and the action catalogue stay in memory (see [Situation records](#situation-records) and [design/durable-state.md](design/durable-state.md)) |
 | LQM, System 1 / investigation models, state reconciliation, syslog parsing | Stubs |
 | Redpanda, Qdrant, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 1642 tests passing and 26 skipped (`pytest`): 15 live TMF921 tests, skipped
+The test suite has 1808 tests passing and 26 skipped (`pytest`): 15 live TMF921 tests, skipped
 unless `TMF921_LIVE=1`, and 11 real-engine Fuseki parity tests, skipped unless
 `FUSEKI_PARITY_URL` is set (see [Running the tests](#running-the-tests)). The work is on the `fullnetwork` branch
 (pushed to GitHub) and has not been reviewed by anyone else.
@@ -131,7 +131,7 @@ python -m ingestion.telemetry_simulator --hsi          # or --hsi-breach for lat
   too. `POST /context/assess` therefore needs the `context:assess` scope, and port
   8080 is still published on all interfaces: keep it behind your own network controls
   as well as the bearer token.
-- Locks and high-water marks are in-process: run a single broker process.
+- Outcomes and high-water marks are durable (a restart no longer lets a stale observation be pushed again); per-intent locks are in-process, so run one API worker.
 - Observations pushed by other clients are invisible to the broker.
 
 ## Licensing
@@ -272,8 +272,9 @@ under [`ingestion/load_ontologies.py`](#ingestionload_ontologiespy).
 | `ontologies` | `tbox/` topology ontology (loader allow-list), `shacl/` shapes, `migrations/` one-off store clean-ups | Ontology / knowledge layer |
 | `ingestion` | `load_ontologies` (SHACL-gated load of tbox and abox into Fuseki), `bind_intent` (writes a `:ServiceBinding` to `ontologies/abox/` and Fuseki), `telemetry_simulator`, `syslog_parser` | Ingestion |
 | `ontologies/abox` | One `:ServiceBinding` Turtle file per bound TMF921 intent, written by `bind_intent` | Ontology / knowledge layer |
-| `intent_management` | Intent store | Intent management |
-| `decision_records` | Record store | Decision records |
+| `broker_state` | Durable state: one SQLite file with outcomes, high-water marks and situation records, caps, eviction and retention (see [design/durable-state.md](design/durable-state.md)) | Context broker engine |
+| `intent_management` | Intent store (a facade over the durable outcomes and high-water marks) | Intent management |
+| `decision_records` | Append-only record store, a file by default | Decision records |
 | `loop_coordination` | Reservation book to stop concurrent loops acting on the same target | Loop coordination |
 | `artefact_governance` | Action catalogue and model registry | Artefact governance |
 | `governance_gate` | Action-readiness check and controller interface; only `NullController` exists | Governance gate |
@@ -534,7 +535,7 @@ the API is not built.
 - The API image runs as uid 10001, not root, and excludes `.beads/`, `.planning/`,
   `scripts/`, `design/` and key files (`*.pem`, `*.key`).
 - To apply a compose change to an existing container run `docker compose up -d <service>`.
-  Never `docker compose down -v`: it deletes the Fuseki, TMF921 and VictoriaMetrics data.
+  Never `docker compose down -v`: it deletes the Fuseki, TMF921 and VictoriaMetrics data and the `broker-state` volume (outcomes, high-water marks, situation records and decision records).
 
 ## Authentication
 
@@ -546,22 +547,24 @@ Every `/context/*` route needs `Authorization: Bearer <token>`. `/docs`, `/redoc
   (`BROKER_JWT_AUDIENCE`, default `context-broker`), and refuses a token that lives
   longer than 3600 s.
 - Scopes: `context:read` for `GET /context/metric`, `/context/metric-history`,
-  `/context/interfaces-nonzero`, `/context/neighbours` and `POST /context/request`;
+  `/context/interfaces-nonzero`, `/context/neighbours`, `POST /context/request` and
+  `GET /context/situation/{id}`;
   `context:assess` for `POST /context/assess`, because a current-moment assess pushes
   observations to the TMF921 server. A context request that names an `intent_id` needs
-  `context:assess` as well as `context:read`, although it never pushes.
+  `context:assess` as well as `context:read`, although it never pushes; so does fetching
+  a stored situation that names one.
 - `401` means missing or invalid credentials; `403` means a valid token without the
   scope. Both bodies are fixed strings. A token whose `sub` is empty, longer than 128
   characters or not printable is `401` on every `/context/*` route: the `sub` is the
   requester of a context request and part of its identity, so it must name someone.
-- **Authority claim.** `POST /context/request` also needs a signed `authority` claim that
+- **Authority claim.** `POST /context/request` and `GET /context/situation/{id}` also need a signed `authority` claim that
   says what the caller may ask about: `entities` (device names written exactly, or `*`
   for all; no patterns), `purposes` (`assurance`, `diagnosis`, `reporting`) and
   `classes` (`topology`, `goals`, `observations`). The other routes ignore the claim. A
   token with the scope but no usable claim is `403 {"detail": "authority claims required"}`
-  on that route only, so a token minted before this claim existed keeps working on
-  every other route. The broker stays stateless: it verifies the signature and reads the
-  claim, with no list of its own to maintain.
+  on those routes only, so a token minted before this claim existed keeps working on
+  every other route. The broker keeps no list of tokens or claims: it verifies the signature and reads the
+  claim.
 - There is no revocation list. Revoke by short expiry or by rotating the key pair.
 - The API holds only the public key. With no key or issuer configured it still starts,
   `/health` answers, and every `/context/*` call is `401`.
@@ -618,17 +621,21 @@ server must authenticate (Phase 7).
 
 `GET /health` needs no token and takes no parameters. It probes Fuseki (`/$/ping`, with
 the Fuseki credential), VictoriaMetrics (`/health`) and the TMF921 server (`/health`)
-in parallel, and answers with exactly four fixed keys:
+in parallel, pings the state file, and answers with exactly six fixed keys:
 
 ```json
-{"status": "ok", "fuseki": "answering", "victoriametrics": "answering", "tmf921": "answering"}
+{"status": "ok", "fuseki": "answering", "victoriametrics": "answering", "tmf921": "answering",
+ "state": "answering", "evictions": {"outcomes": 0, "marks": 0, "situations": 0}}
 ```
 
-The status is `200` when all three answer and `503` with `"status": "degraded"` when
-any one does not (that upstream reads `"not answering"`). The body never carries a
-hostname, URL or server text; the cause goes to the server log as an exception class or
+The status is `200` when all four answer and `503` with `"status": "degraded"` when
+any one does not (that row reads `"not answering"`). The state store counts toward
+`degraded`, and then `evictions` is `null`. `evictions` counts, per table, the entries
+removed to make room under the cap since the file was created (whole numbers, kept across
+restarts); see [Situation records](#situation-records). The body never carries a
+hostname, URL, path or server text; the cause goes to the server log as an exception class or
 an HTTP status. Results are cached for 5 s, so a flood of requests makes at most three
-upstream probes per window.
+upstream probes, one state ping and one counters read per window.
 
 The TMF921 server counts toward `degraded`, so without the `tmf921` compose profile the
 API container reports unhealthy. The compose healthcheck on `contextbroker-api` calls
@@ -998,8 +1005,52 @@ An abridged answer to the request above (times shortened, one metric shown):
   telemetry reads as the eligibility. It is `null` also when a placement of the intent
   lies on a device the token does not cover. A current request makes one read-only `GET` to
   the TMF921 server (the intent's status and live goal); a past request makes none.
-  A context request never pushes an observation, writes a high-water mark or records an
-  outcome.
+  A context request records one situation row per answered request (see
+  [Situation records](#situation-records)) and still never pushes an observation, writes a
+  high-water mark or records an outcome.
+
+### Situation records
+
+Every answered `POST /context/request` (a 200) leaves one situation record, written just
+before the response is returned. A refusal records nothing. The record holds the resolved
+request (requester, purpose, scope, intent id, instants, classes, depth, relationship types),
+the evidence references (provenance records and graph node ids), the eligibility per class
+with its fixed reasons, the expiry and its basis, and the verdict label when there was one.
+It holds no metric values; ask again for those.
+
+There is one row per situation id. Asking the same question again within the same second
+replaces the body and the expiry and keeps `first_recorded_at`; `repeat_count` goes up by
+one. The record is fetched with:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/context/situation/sit-<32 hex characters>
+```
+
+The answer is the stored record plus `expired` (computed when you ask, true from
+`expires_at` on), `first_recorded_at`, `last_recorded_at` and `repeat_count`. Only the
+original requester can fetch a record, and the token's authority claims must cover the stored
+scope, purpose and classes.
+
+| Status | Detail | When |
+|---|---|---|
+| 401 | `authentication required` | No token, an invalid token, or an unusable `sub`. |
+| 403 | `insufficient scope` | No `context:read`, or the situation names an intent and the token lacks `context:assess`. |
+| 403 | `authority claims required` | A read token without a usable `authority` claim. |
+| 403 | `outside authority scope: entity` (or `purpose`, `class`) | The stored device, purpose or classes are not covered by the token. |
+| 404 | `situation not found` | An unknown, malformed or expired-and-removed id, or a record someone else requested. |
+| 422 | the validation body | Any query parameter. |
+| 503 | `state store unavailable` | The state file cannot be read or written. |
+
+A record is removed 7 days after its expiry by default (`BROKER_SITUATION_RETENTION`,
+digits then `h` or `d`, from `1h` to `90d`). The state lives in one SQLite file,
+`BROKER_STATE_PATH` (default `/data/broker-state.sqlite3`, on the `broker-state` volume), and
+the API refuses to start without a usable file. When a table is full the least recently
+written entry is evicted, with a log line and a count in `/health`:
+`BROKER_OUTCOME_CAP` (1024), `BROKER_MARK_CAP` (1024) and `BROKER_SITUATION_CAP` (100000).
+Decision records go to `BROKER_DECISION_RECORDS_PATH` (default
+`/data/decision-records.sqlite3`) and are never swept. Never run `docker compose down -v`:
+it deletes the `broker-state` volume. The full rules, including what happens when a mark
+write fails after a push, are in [design/durable-state.md](design/durable-state.md).
 
 ## Using an external TMF921 intent server
 
@@ -1099,8 +1150,8 @@ A marker for such a change would have to come from the intent server. Re-create 
 bind the new id. Do not use `bind_intent --replace` on an intent that reported a changed goal: it
 re-pins whatever goal the server now holds, which is the changed one (verified
 live: the latency limit 25 became the observed 40.535 and `--replace` pinned
-40.535 without a warning; the original 25 stays in the graph as the closed goal). Per-intent locks and high-water marks are in-process, so
-run a single broker process. Observations pushed by other clients are invisible to the broker.
+40.535 without a warning; the original 25 stays in the graph as the closed goal). Outcomes and high-water marks are durable and per-intent locks are in-process, so
+run one API worker. Observations pushed by other clients are invisible to the broker.
 
 Known behaviours / troubleshooting:
 - The first assess right after a new series appears can return `inconclusive`
@@ -1130,6 +1181,9 @@ Docker required to run the suite:
 ```bash
 pytest tests/ -v
 ```
+
+Every test gets its own state file and decision-record file from `tests/conftest.py`, so no test
+sees another test's marks, outcomes or records.
 
 `tests/test_fuseki_parity.py` runs the real bind, resolve, neighbours and migration-002 code
 against a real Fuseki 6.1.0, which the mocks cannot show (one update request is one

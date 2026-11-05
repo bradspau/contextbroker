@@ -100,7 +100,7 @@ the id is `sit-` followed by the first 32 hex characters (128 bits).
   `2026-11-05T12:00:07Z`, classes `["topology"]`, depth 2, types `["connected_to",
   "has_interface"]` gives `sit-178907b20344e21c79bdc9c57b918ef7`.
 
-Phase 4 stores these ids and node ids. The inputs, their order of encoding and the node id rules
+Phase 4 stores one record per id (see `design/durable-state.md`), which is why the id inputs carry `SITUATION_VERSION`. The inputs, their order of encoding and the node id rules
 below must not change without a `SITUATION_VERSION` bump and a plan for matching old records.
 
 ## Eligibility
@@ -254,7 +254,7 @@ outcome or records an outcome; tests spy on each.
   proven.
 - JSON-LD and NGSI-LD views of the Context Graph: Phase 7, as an exchange profile over this
   content.
-- Storing situations and decision records against `situation.id`: Phase 4.
+- Where situations and decision records are kept: see `design/durable-state.md` (Phase 4).
 - Adoption by the MCP server and the agent tool (unchanged here; the MCP server is not mounted).
 - `/docs` and `/openapi.json` are still public (bead `contextbroker-8at`). A test checks that the
   OpenAPI document, which now describes the new route, holds no claim value, token or secret.

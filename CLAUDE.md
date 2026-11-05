@@ -1,7 +1,7 @@
 # Context Broker
 
 ## Commands
-- `venv/bin/python -m pytest -q` - full suite (1642 pass, 26 skipped); live TMF921 tests need `TMF921_LIVE=1`, the real-engine parity tests need `FUSEKI_PARITY_URL`
+- `venv/bin/python -m pytest -q` - full suite (1808 pass, 26 skipped); live TMF921 tests need `TMF921_LIVE=1`, the real-engine parity tests need `FUSEKI_PARITY_URL`
 - `python -m ingestion.bind_intent <intent_id> --place <Metric>=<device>/<interface> ...` - write a `:ServiceBinding` as goal and placement fluents in one SPARQL update; on an existing binding pass `--replace` (the goal changed: close the old goal, open the new) or `--correct` (the earlier record was wrong: keep it, mark it superseded), never both; `--replace --valid-from YYYY-MM-DDTHH:MM:SSZ` says when the goal really changed. Nothing is deleted, and `--replace` on an intent whose goal changed re-pins the changed goal (the original stays as a closed goal)
 - `scripts/create_demo_intent.sh <ttl>` - create and activate a TMF921 demo intent (intents are never evaluated until ACTIVE)
 - `docker start fuseki victoriametrics tmf921-server` - start the demo stack; `docker compose up -d contextbroker-api` then `docker network connect contextbroker-arch_default contextbroker-api` (lost on recreate, bead contextbroker-i2q). Never `docker compose down -v` (deletes Fuseki data)
@@ -11,6 +11,7 @@
 - Fuseki enforces basic auth on every endpoint, including `/$/ping`. `FUSEKI_ADMIN_PASSWORD` (letters and digits only) is required in `.env` by compose, and in the shell environment for `ingestion.load_ontologies`, `ingestion.bind_intent` and `seed_graph.py`. Never print or commit it.
 - Every `/context/*` route needs a bearer JWT (RS256/ES256, `iss`/`aud` pinned, lifetime at most 3600 s): 401 if missing or invalid, 403 `{"detail": "insufficient scope"}` without `context:read` or `context:assess`. Mint with `scripts/mint_token.py` from a key kept outside the repo; the API gets only the public key (mode 644).
 - `POST /context/request` also needs the signed `authority` claim (`entities`, `purposes`, `classes`), minted with `scripts/mint_token.py --entity/--purpose/--class` (all three or none): 403 `authority claims required` without it, 403 `outside authority scope: entity|purpose|class` when the request is outside it, all before any upstream call. Naming an `intent_id` also needs `context:assess` (403 `insufficient scope`). An empty, overlong or non-printable `sub` is 401 on every `/context/*` route.
+- `GET /context/situation/{id}` needs `context:read` and the authority claims, returns a stored situation only to its original requester (anyone else gets the same 404 `situation not found` as for an unknown id) and needs `context:assess` when the situation names an intent. Every answered `POST /context/request` records one situation row; a refusal records nothing.
 - `GET /health` is unauthenticated and reports each upstream with fixed strings (200, or 503). The API container reports unhealthy without the tmf921 profile.
 - The graph intent path is gone (`source` is `tmf921` only; no `/context/intent/{id}`; no `:OperationalIntent`).
 
@@ -38,9 +39,11 @@
 - `docs/superpowers/plans/` - dated implementation plans
 
 ## Design notes (tracked)
-- `design/` - tracked analysis docs (e.g. `layer3-gap-analysis.md`, `context-contract.md` for the Phase 3 request and response contract); `docs/` is untracked, so anything meant for git goes here
+- `design/` - tracked analysis docs (e.g. `layer3-gap-analysis.md`, `context-contract.md` for the Phase 3 request and response contract, `durable-state.md` for what the broker stores, retention, eviction and the store's failure rules); `docs/` is untracked, so anything meant for git goes here
 
 ## Gotchas
+- State lives in one SQLite file on the `broker-state` volume at `/data` (`BROKER_STATE_PATH`, never `:memory:`): last outcome per intent, high-water marks and situation records. The API refuses to start without it and answers 503 `state store unavailable` when it fails mid-request; there is no memory fallback. Caps and retention: `BROKER_OUTCOME_CAP`, `BROKER_MARK_CAP`, `BROKER_SITUATION_CAP`, `BROKER_SITUATION_RETENTION` (see `design/durable-state.md`). One API worker is the supported setup. Never `docker compose down -v`: it deletes `broker-state`.
+- Decision records are a file by default (`BROKER_DECISION_RECORDS_PATH`, append-only, never swept); `RecordStore(":memory:")` only when a caller asks. The reservation book stays in memory. Tests get a per-test state file and decision-record file from `tests/conftest.py`.
 - TMF921 server evaluates latency, jitter and packet loss with strict `<`; bandwidth with `>=` (`data_contracts/metric_map.json`).
 - After a Degraded evaluation the server replaces the failed goal with the observed value (Flow 3) and keeps no original; the goal pinned in the graph (a goal fluent with its valid and recorded times) is the only record.
 - Fluent times are `:validStart`/`:validEnd` (not `:validFrom`/`:validTo`) because migration 001 deletes every triple with those two predicates. `assess` and `neighbours` take `as_of` and `known_at` offsets, limited by `BROKER_RETENTION_PERIOD` (default `30d`, digits then `h` or `d`).
