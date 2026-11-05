@@ -2,7 +2,9 @@
 
 It composes the pure modules (the request contract, eligibility, the Context Graph, the binding
 selection) over the sources: one Fuseki read for the intent's fluents, the Context Graph reads, and one
-VictoriaMetrics read per placed metric. It resolves, joins and delivers context and never decides or
+VictoriaMetrics read per placed metric, and for the events class one read of the state file (stored
+syslog events, as structured fields and quality flags only, never the raw line or its message text).
+It resolves, joins and delivers context and never decides or
 acts: it pushes nothing to the TMF921 server, writes no high-water mark and records no outcome.
 
 Every refusal (no authority claim, a request outside the caller's entities, purposes or classes, an
@@ -10,6 +12,7 @@ intent named without ``context:assess``, an offset beyond retention, a freshness
 limit) happens before the first Fuseki, VictoriaMetrics or TMF921 call (D-10). Nothing here logs the
 request body, the requester or a claim value.
 """
+import re
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -18,9 +21,11 @@ from broker_engine import context_graph
 from broker_engine.auth import SCOPE_ASSESS, Caller
 from broker_engine.binding_resolver import fetch_fluents, select_binding
 from broker_engine.context_eligibility import (
+    FUTURE_TOLERANCE_S,
     INVALID_BINDING,
     NO_BINDING,
     binding_problem,
+    events_eligibility,
     goals_eligibility,
     observations_eligibility,
     overall,
@@ -32,9 +37,15 @@ from broker_engine.temporal import temporal_observation
 from broker_engine.tsdb_joiner import join_observed_metric
 from broker_engine.validation import ClientInputError
 from data_contracts.context_contract import (
+    CONTEXT_CLASSES,
+    EVENT_RESULT_CAP,
+    EVENT_SOURCE,
     ContextRequest,
     ContextResponse,
     EnvelopeOut,
+    EventOut,
+    EventsResult,
+    EventWindow,
     FluentValue,
     Provenance,
     Situation,
@@ -44,7 +55,7 @@ from data_contracts.context_contract import (
     resolve_times,
     situation_id,
 )
-from broker_state.process import get_store
+from broker_state.process import event_window_limits, get_store
 from data_contracts.metric_map import load_metric_map
 from data_contracts.situation_record import (
     SITUATION_ID_PATTERN,
@@ -62,6 +73,10 @@ OBSERVATION_LOOKBACK = "10m"
 AUTHORITY_REQUIRED = "authority claims required"
 INSUFFICIENT_SCOPE = "insufficient scope"
 SITUATION_NOT_FOUND = "situation not found"
+
+
+# A sending host is returned only when it is a plain token like a device name (research Pitfall 8).
+_HOST_TOKEN = re.compile(r"[A-Za-z0-9_\-/]{1,128}")
 
 
 class Refused(Exception):
@@ -87,6 +102,30 @@ def recording(join, seen):
 
 def _iso(moment: datetime | None) -> str | None:
     return None if moment is None else moment.astimezone(timezone.utc).isoformat()
+
+
+def _event_out(row, retrieved_at: datetime, covers) -> EventOut:
+    """One stored event as the response shows it: structured fields, a recognised kind and flags. The
+    raw line is never read here. An ambiguous event names only the candidates the caller's entities
+    cover and counts the rest (research Pitfall 7)."""
+    flags = []
+    if row.event_time is None:
+        flags.append("time_unknown")
+    elif (row.event_time - row.ingest_time).total_seconds() > FUTURE_TOLERANCE_S:
+        flags.append("future_dated")
+    candidates, withheld = [], 0
+    if row.mapping == "ambiguous":
+        flags.append("ambiguous")
+        candidates = sorted(c for c in row.candidates if covers(c))
+        withheld = len(row.candidates) - len(candidates)
+    return EventOut(
+        event_id=row.event_id, mapping=row.mapping, device=row.device,
+        source_host=row.source_host if _HOST_TOKEN.fullmatch(row.source_host) else None,
+        candidates=candidates, candidates_withheld=withheld, format=row.format,
+        facility=row.facility, severity=row.severity, event_time=_iso(row.event_time),
+        ingest_time=_iso(row.ingest_time), kind=row.kind, flags=sorted(flags),
+        provenance=Provenance(source_system=EVENT_SOURCE, reference=row.event_id,
+                              observed_at=_iso(row.event_time), retrieved_at=_iso(retrieved_at)))
 
 
 def _fluent_value(metric, kind, fluent, device_interface, valid_at, retrieved_at) -> FluentValue:
@@ -248,6 +287,24 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
             read.scope_identity, conflicting_links=read.conflicting_links,
             colliding_ids=read.colliding_ids, malformed=read.malformed)
 
+    events = None
+    if "events" in body.classes:
+        # The state file only: no Fuseki, VictoriaMetrics or TMF921 call. The window ends at the
+        # resolved instant; one row past the cap tells whether the cap cut the result.
+        window_s = event_window_limits()[0]
+        start = times.valid_at - timedelta(seconds=window_s)
+        rows = get_store().events_in_window(
+            body.scope.device, start=start, end=times.valid_at, known_at=times.known_at, now=now,
+            limit=EVENT_RESULT_CAP + 1)
+        truncated = len(rows) > EVENT_RESULT_CAP
+        returned = [_event_out(row, now, covers) for row in rows[:EVENT_RESULT_CAP]]
+        events = EventsResult(
+            window=EventWindow(start=_iso(start), end=_iso(times.valid_at), seconds=window_s),
+            cap=EVENT_RESULT_CAP, truncated=truncated, events=returned)
+        eligibility["events"] = events_eligibility(
+            count=len(returned), ambiguous=sum(e.mapping == "ambiguous" for e in returned),
+            beyond_retention=False)
+
     expires_at, basis = expiry(
         retrieved_at=now, observation_times=observation_times,
         configured_evidence=bool((graph is not None and graph.nodes) or fluent_values),
@@ -259,10 +316,9 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
             intent_id=body.intent_id, classes=classes, max_depth=body.max_depth,
             relationship_types=relationship_types, valid_at=_iso(times.valid_at),
             known_at=_iso(times.known_at), retrieved_at=_iso(now), historical=times.historical),
-        eligibility=overall({name: eligibility[name] for name in ("topology", "goals", "observations")
-                             if name in eligibility}),
+        eligibility=overall({name: eligibility[name] for name in CONTEXT_CLASSES if name in eligibility}),
         expires_at=_iso(expires_at), expiry_basis=basis, fluent_values=fluent_values,
-        envelopes=envelopes, graph=graph, verdict=verdict)
+        envelopes=envelopes, graph=graph, events=events, verdict=verdict)
     # One row per answered request, written before the answer leaves (D-05). Every refusal and every
     # upstream failure happened above this line, so none of them records anything.
     get_store().record_situation(

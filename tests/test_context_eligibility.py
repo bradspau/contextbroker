@@ -419,6 +419,7 @@ TEMPLATES = re.compile(
     r"^(no binding for intent|invalid binding|scope entity not in the topology"
     r"|ambiguous identity: scope entity|ambiguous identity: graph node"
     r"|conflicting link records|invalid topology record"
+    r"|no events in window|window reaches beyond event retention|ambiguous identity: event source"
     r"|(no goal in force|no placement in force|duplicate goal in force"
     r"|duplicate placement in force|goal changed within window|placement changed within window"
     r"|placement outside authority scope|unmapped metric|no observation"
@@ -503,3 +504,49 @@ def test_eligibility_neither_takes_nor_returns_a_verdict():
     got = goals(fx, valid_at=V)
     assert "verdict" not in got.model_dump()
     assert not any(word in " ".join(ce.__doc__.split()) for word in ("success|failure",))
+
+
+# ---- the events class ------------------------------------------------------------------------
+
+@pytest.mark.parametrize("args,result,reasons", [
+    ((0, 0, False), "gap", ["no events in window"]),
+    ((3, 0, False), "eligible", []),
+    ((3, 1, False), "ineligible", ["ambiguous identity: event source"]),
+    ((0, 0, True), "gap", ["no events in window", "window reaches beyond event retention"]),
+    ((3, 0, True), "gap", ["window reaches beyond event retention"]),
+    ((3, 1, True), "ineligible", ["ambiguous identity: event source",
+                                  "window reaches beyond event retention"]),
+])
+def test_events_eligibility_results(args, result, reasons):
+    count, ambiguous, beyond = args
+    got = ce.events_eligibility(count=count, ambiguous=ambiguous, beyond_retention=beyond)
+    assert (got.result, got.reasons) == (result, reasons)
+
+
+def test_events_eligibility_takes_no_conflict_or_verdict_argument():
+    import inspect
+    assert sorted(inspect.signature(ce.events_eligibility).parameters) == [
+        "ambiguous", "beyond_retention", "count"]
+
+
+def test_the_events_reasons_are_templates():
+    reasons = []
+    for args in ((0, 0, True), (3, 1, True)):
+        reasons += ce.events_eligibility(count=args[0], ambiguous=args[1], beyond_retention=args[2]).reasons
+    check_fixed(reasons)
+
+
+def test_no_broker_engine_module_imports_the_syslog_parser_or_ingest():
+    root = Path(ce.__file__).parent
+    offenders = []
+    for path in sorted(root.glob("**/*.py")):
+        for module, names in imported(path):
+            joined = [module or ""] + [f"{module}.{n}" for n in names]
+            if any(j.startswith(("ingestion.syslog_parser", "ingestion.syslog_ingest")) for j in joined):
+                offenders.append(path.name)
+    assert offenders == []
+
+
+def test_the_contract_module_imports_nothing_from_ingestion():
+    from data_contracts import context_contract
+    assert [m for m, _ in imported(context_contract.__file__) if m and m.startswith("ingestion")] == []

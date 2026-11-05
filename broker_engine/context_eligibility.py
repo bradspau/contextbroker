@@ -2,7 +2,7 @@
 
 Pure functions: no network, no clock reads (times come in as arguments), no verdict.
 
-Three outcomes (D-15). A gap is absent evidence (no goal, placement or observation to judge).
+Four classes are judged: topology, goals, observations and events. Three outcomes (D-15). A gap is absent evidence (no goal, placement or observation to judge).
 Ineligible is present but unfit evidence (stale, conflicted, changed-goal, duplicated, unmapped,
 outside the caller's authority, or ambiguous identity). Eligible means every applicable item is
 fresh, finite, single-valued and unchanged. Any single failure beats eligible, so the goals class
@@ -37,6 +37,9 @@ SCOPE_MISSING = "scope entity not in the topology"
 SCOPE_AMBIGUOUS = "ambiguous identity: scope entity"
 NODE_AMBIGUOUS = "ambiguous identity: graph node"
 LINK_CONFLICT = "conflicting link records"
+NO_EVENTS = "no events in window"
+WINDOW_BEYOND_RETENTION = "window reaches beyond event retention"
+EVENT_AMBIGUOUS = "ambiguous identity: event source"
 TOPOLOGY_INVALID = "invalid topology record"
 
 # Reason prefixes; the metric short name follows ": ".
@@ -148,6 +151,22 @@ def topology_eligibility(scope_identity: str, *, conflicting_links: bool = False
         problems.append(NODE_AMBIGUOUS)
     if malformed:
         problems.append(TOPOLOGY_INVALID)
+    return classify(gaps, problems)
+
+
+def events_eligibility(*, count: int, ambiguous: int, beyond_retention: bool) -> ClassEligibility:
+    """Judge the events returned for the window.
+
+    No event in the window is a gap, and so is a window that reaches back beyond the event retention
+    (the kept part cannot show everything the window asked for) (D-31). An ambiguous event is present
+    but unfit: its device is not known (D-09). `time_unknown` and a cut by the result cap are quality
+    flags the result shows, not reasons here (D-32), and a conflict is never an input (D-15)."""
+    gaps = []
+    if count == 0:
+        gaps.append(NO_EVENTS)
+    if beyond_retention:
+        gaps.append(WINDOW_BEYOND_RETENTION)
+    problems = [EVENT_AMBIGUOUS] if ambiguous > 0 else []
     return classify(gaps, problems)
 
 

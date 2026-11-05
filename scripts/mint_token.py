@@ -31,7 +31,7 @@ SCOPES = ("context:read", "context:assess")
 # Copies of data_contracts.context_contract.PURPOSES / CONTEXT_CLASSES and broker_engine.auth
 # CLAIM_AUTHORITY / AUTHORITY_KEYS; tests/test_mint_token.py pins them equal.
 PURPOSES = ("assurance", "diagnosis", "reporting")
-CONTEXT_CLASSES = ("topology", "goals", "observations")
+CONTEXT_CLASSES = ("topology", "goals", "observations", "events")
 CLAIM_AUTHORITY = "authority"
 KEY_ENTITIES, KEY_PURPOSES, KEY_CLASSES = "entities", "purposes", "classes"
 MAX_ENTITY_LENGTH = 128

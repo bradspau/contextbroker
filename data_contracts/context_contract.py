@@ -1,8 +1,8 @@
 """The logical context request and response contract, independent of its wire format (D-06).
 
 This module is pure: no FastAPI, no I/O. It is the one tracked place for the closed sets a request is
-expressed in (the purposes it can name, the context classes it can ask for, the relationship types a
-traversal follows) and for the request model, the authority check, the situation identity, the time
+expressed in (the purposes it can name, the four context classes it can ask for (topology, goals,
+observations and events), the relationship types a traversal follows) and for the request model, the authority check, the situation identity, the time
 and expiry rules and the response models. The HTTP layer only wires it.
 scripts/mint_token.py is standalone and keeps a copy of PURPOSES and CONTEXT_CLASSES; a test pins the
 copy equal.
@@ -17,9 +17,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from broker_engine.validation import freshness_seconds, window_seconds
 from data_contracts.envelope import DEFAULT_MAX_AGE_S
+from data_contracts.syslog_events import EVENT_FORMATS, EVENT_KINDS
 
 PURPOSES = ("assurance", "diagnosis", "reporting")
-CONTEXT_CLASSES = ("topology", "goals", "observations")
+CONTEXT_CLASSES = ("topology", "goals", "observations", "events")
 RELATIONSHIP_TYPES = ("has_interface", "connected_to")
 
 # Traversal limits (D-23). The hard maximum depth is refused at validation, so it is never a cut
@@ -28,6 +29,11 @@ MAX_DEPTH = 3
 NODE_CAP = 50
 # What can cut a traversal result (D-23, D-26).
 CUT_REASONS = ("authority", "depth", "node_cap", "relationship_types")
+# What can be said about one event beyond its stored fields (D-14, D-33). The result of an events
+# request holds at most EVENT_RESULT_CAP events; the cap cutting it is shown as `truncated`.
+EVENT_RESULT_CAP = 100
+EVENT_FLAGS = ("ambiguous", "future_dated", "time_unknown")
+EVENT_SOURCE = "syslog"
 # Eligibility outcomes (D-15).
 RESULTS = ("eligible", "ineligible", "gap")
 
@@ -359,6 +365,46 @@ class ContextGraph(_Out):
     limits: GraphLimits
 
 
+class EventWindow(_Out):
+    """The span an events request looked at: it ends at the resolved instant."""
+
+    start: str
+    end: str
+    seconds: int
+
+
+class EventOut(_Out):
+    """One stored syslog event. Only structured fields, the recognised kind and quality flags are
+    returned: never the raw line or any message text, which a device or a sender authored (research A2)."""
+
+    event_id: str
+    mapping: Literal["mapped", "ambiguous"]
+    device: str | None = Field(description="The device node id, or null for an ambiguous event.")
+    source_host: str | None = Field(description="The sending host as written when it is a plain token, "
+                                                "else null.")
+    candidates: list[str] = Field(description="For an ambiguous event, the candidate devices the caller's "
+                                              "entities cover; empty for a mapped event.")
+    candidates_withheld: int = Field(ge=0, description="How many other candidates the caller's entities "
+                                                       "do not cover. They are counted, never named.")
+    format: Literal[EVENT_FORMATS]
+    facility: int
+    severity: int
+    event_time: str | None = Field(description="The time the sender stamped, or null when it gave none.")
+    ingest_time: str
+    kind: Literal[EVENT_KINDS] | None = Field(description="A recognised kind, or null.")
+    flags: list[Literal[EVENT_FLAGS]]
+    provenance: Provenance
+
+
+class EventsResult(_Out):
+    """The events class: the events of the device in the window, newest first, at most `cap` of them."""
+
+    window: EventWindow
+    cap: int
+    truncated: bool = Field(description="True when the cap cut the result.")
+    events: list[EventOut]
+
+
 class Situation(_Out):
     """The identity and resolved inputs of the question (CTX-03). `requester` is the token's sub."""
 
@@ -386,6 +432,8 @@ class ContextResponse(_Out):
     fluent_values: list[FluentValue]
     envelopes: list[EnvelopeOut]
     graph: ContextGraph | None = Field(description="Present only when the topology class was requested.")
+    events: EventsResult | None = Field(
+        default=None, description="Present only when the events class was requested.")
     verdict: dict | None = Field(
         description="Present only when an intent is named with the goals and observations classes. It comes "
                     "from the read-only TMF921 assess, never reads eligibility and can disagree with it.")

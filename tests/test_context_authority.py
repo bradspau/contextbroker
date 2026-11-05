@@ -146,7 +146,7 @@ def test_authority_of_an_empty_claim_set_is_none():
 
 def test_the_closed_sets_are_the_documented_ones():
     assert PURPOSES == ("assurance", "diagnosis", "reporting")
-    assert CONTEXT_CLASSES == ("topology", "goals", "observations")
+    assert CONTEXT_CLASSES == ("topology", "goals", "observations", "events")
     assert auth.CLAIM_AUTHORITY == "authority"
     assert auth.AUTHORITY_KEYS == ("entities", "purposes", "classes")
 
@@ -192,7 +192,7 @@ MALFORMED = {
     "entity_129_chars": _with(entities=["a" * 129]),
     "entity_newline": _with(entities=["Router-A\n"]),
     "purpose_unknown": _with(purposes=["admin"]),
-    "class_unknown": _with(classes=["events"]),
+    "class_unknown": _with(classes=["knowledge"]),
     "purpose_not_a_string": _with(purposes=[["diagnosis"]]),
 }
 
@@ -210,7 +210,7 @@ def test_authority_of_is_total_for_any_json_value(value):
 
 def test_a_mixed_list_keeps_only_the_valid_part():
     a = auth.authority_of(_with(entities=["Router-A", "R*", 3, "bad name"],
-                                purposes=["diagnosis", "admin"], classes=["topology", "events"]))
+                                purposes=["diagnosis", "admin"], classes=["topology", "knowledge"]))
     assert a.entities == {"Router-A"} and a.purposes == {"diagnosis"} and a.classes == {"topology"}
 
 

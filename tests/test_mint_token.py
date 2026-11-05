@@ -261,7 +261,15 @@ def test_the_wildcard_and_a_slashed_name_are_accepted(tmp_path, keys):
     assert auth.authority_of(claims).entities == {"*", "Router-A/GigabitEthernet0/0/0"}
 
 
-@pytest.mark.parametrize("flag,value", [("--purpose", "admin"), ("--class", "events")])
+def test_the_events_class_can_be_issued(tmp_path, keys):
+    path = _write_key(tmp_path, keys["ec"])
+    r = _run(*_ok_args(path, "--entity", "Router-A", "--purpose", "diagnosis", "--class", "events"))
+    assert r.returncode == 0
+    claims = auth.verify_token(r.stdout.strip(), _cfg(keys["ec"]))
+    assert auth.authority_of(claims).classes == {"events"}
+
+
+@pytest.mark.parametrize("flag,value", [("--purpose", "admin"), ("--class", "knowledge")])
 def test_an_unknown_purpose_or_class_is_rejected_by_the_command_line(tmp_path, keys, flag, value):
     path = _write_key(tmp_path, keys["ec"])
     r = _run(*_ok_args(path, flag, value))

@@ -17,6 +17,8 @@ import requests
 from fastapi.testclient import TestClient
 
 from broker_engine import main
+from broker_state.process import get_store
+from broker_state.store import NewEvent
 from data_contracts import fluents as f
 from data_contracts.context_contract import (
     CONTEXT_CLASSES, PURPOSES, RELATIONSHIP_TYPES, ClassEligibility, Eligibility, situation_id)
@@ -853,3 +855,149 @@ def test_openapi_document_describes_the_contract_without_secrets_and_stays_publi
     for secret in ("Router-A", "olt1", "eyJ", "BEGIN", "test-caller", "testpassword0"):
         assert secret not in text
     rig.untouched()
+
+
+# ---- the events class: stored syslog events for a device in a window (EVT-03) ----
+
+EVENTS = {"purpose": "diagnosis", "scope": {"device": "Router-A"}, "classes": ["events"]}
+EVENTS_AUTH = {**WIDE, "classes": ["topology", "events"]}
+S = timedelta(seconds=1)
+RAW_CANARY = "canary-raw-line-text-91"
+
+
+def event(n, *, ingest=NOW - 59 * S, at=NOW - 60 * S, **kw):
+    base = dict(event_id="evt-" + f"{n:032x}", ingest_time=ingest, event_time=at, severity=4,
+                facility=3, format="rfc5424", source_host="Router-A", mapping="mapped",
+                device="Router-A", candidates=("Router-A",), kind="link_down",
+                raw=f"<28>1 {RAW_CANARY} {n}")
+    base.update(kw)
+    return NewEvent(**base)
+
+
+def ambiguous(n, candidates=("Router-A", "router-a"), **kw):
+    return event(n, mapping="ambiguous", device=None, candidates=candidates, kind=None,
+                 source_host="rtr", **kw)
+
+
+def put(*events):
+    get_store().add_events(list(events))
+
+
+def events_headers(entities=("*",), classes=("topology", "events")):
+    return token({"entities": list(entities), "purposes": ["diagnosis"], "classes": list(classes)})
+
+
+def test_events_request_returns_the_stored_events_newest_first_with_flags(rig):
+    put(event(1),
+        event(2, ingest=NOW - 30 * S, at=None, format="rfc3164", kind=None, severity=6, facility=1))
+    r = post(EVENTS, headers=events_headers())
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["events"]["window"] == {
+        "start": (NOW - 900 * S).isoformat(), "end": NOW.isoformat(), "seconds": 900}
+    assert out["events"]["cap"] == 100 and out["events"]["truncated"] is False
+    newer, older = out["events"]["events"]
+    assert newer == {
+        "event_id": "evt-" + f"{2:032x}", "mapping": "mapped", "device": "Router-A",
+        "source_host": "Router-A", "candidates": [], "candidates_withheld": 0, "format": "rfc3164",
+        "facility": 1, "severity": 6, "event_time": None, "ingest_time": (NOW - 30 * S).isoformat(),
+        "kind": None, "flags": ["time_unknown"],
+        "provenance": {"source_system": "syslog", "reference": "evt-" + f"{2:032x}",
+                       "observed_at": None, "retrieved_at": NOW.isoformat()}}
+    assert older["kind"] == "link_down" and older["flags"] == []
+    assert older["event_time"] == (NOW - 60 * S).isoformat()
+    assert older["provenance"]["observed_at"] == (NOW - 60 * S).isoformat()
+    assert out["eligibility"]["classes"] == {"events": {"result": "eligible", "reasons": []}}
+    assert out["eligibility"]["result"] == "eligible"
+    assert out["graph"] is None and out["fluent_values"] == [] and out["envelopes"] == []
+    assert RAW_CANARY not in r.text and "<28>" not in r.text
+    assert "message" not in str(out["events"]["events"][0].keys())
+
+
+def test_an_event_stamped_after_its_ingest_time_is_flagged_future_dated(rig):
+    put(event(1, ingest=NOW - 60 * S, at=NOW - 50 * S),   # 10 s after ingest
+        event(2, ingest=NOW - 60 * S, at=NOW - 56 * S),   # 4 s: inside the tolerance
+        event(3, ingest=NOW - 60 * S, at=NOW - 55 * S))   # exactly 5 s: inside
+    flags = {e["event_id"][-1]: e["flags"]
+             for e in post(EVENTS, headers=events_headers()).json()["events"]["events"]}
+    assert flags == {"1": ["future_dated"], "2": [], "3": []}
+
+
+def test_an_interface_scope_returns_the_events_of_its_device(rig):
+    put(event(1))
+    body = {**EVENTS, "scope": {"device": "Router-A", "interface": "GigabitEthernet0/0/0"}}
+    out = post(body, headers=events_headers()).json()
+    assert [e["event_id"] for e in out["events"]["events"]] == ["evt-" + f"{1:032x}"]
+
+
+def test_events_of_another_device_are_not_returned(rig):
+    put(event(1, device="Router-B", source_host="Router-B", candidates=("Router-B",)))
+    out = post(EVENTS, headers=events_headers()).json()
+    assert out["events"]["events"] == []
+
+
+def test_no_event_in_the_window_is_a_gap(rig):
+    out = post(EVENTS, headers=events_headers()).json()
+    assert out["events"]["events"] == []
+    assert out["eligibility"]["classes"]["events"] == {"result": "gap", "reasons": ["no events in window"]}
+    assert out["eligibility"]["result"] == "gap"
+
+
+def test_an_ambiguous_event_is_flagged_and_the_class_ineligible(rig):
+    put(ambiguous(1))
+    out = post(EVENTS, headers=events_headers(("*",))).json()
+    [e] = out["events"]["events"]
+    assert e["mapping"] == "ambiguous" and e["device"] is None and e["source_host"] == "rtr"
+    assert e["candidates"] == ["Router-A", "router-a"] and e["candidates_withheld"] == 0
+    assert "ambiguous" in e["flags"]
+    assert out["eligibility"]["classes"]["events"] == {
+        "result": "ineligible", "reasons": ["ambiguous identity: event source"]}
+    assert out["eligibility"]["result"] == "ineligible"
+
+
+def test_ambiguous_candidates_outside_the_callers_entities_are_only_counted(rig):
+    put(ambiguous(1))
+    r = post(EVENTS, headers=events_headers(("Router-A",)))
+    [e] = r.json()["events"]["events"]
+    assert e["candidates"] == ["Router-A"] and e["candidates_withheld"] == 1
+    assert "router-a" not in r.text
+
+
+def test_an_unmapped_event_is_in_no_response(rig):
+    put(event(1, mapping="unmapped", device=None, candidates=(), source_host="edge-9", kind=None))
+    r = post(EVENTS, headers=events_headers())
+    assert r.json()["events"]["events"] == [] and "edge-9" not in r.text
+
+
+def test_a_token_without_the_events_class_is_refused_before_anything_is_read(rig, monkeypatch):
+    from broker_state.store import StateStore
+    spy = Mock(side_effect=AssertionError("the store was read"))
+    monkeypatch.setattr(StateStore, "events_in_window", spy)
+    r = post(EVENTS, headers=token({**WIDE, "classes": ["topology"]}))
+    assert r.status_code == 403 and r.json() == {"detail": "outside authority scope: class"}
+    spy.assert_not_called()
+    rig.untouched()
+    assert post(TOPOLOGY, headers=token({**WIDE, "classes": ["topology"]})).status_code == 200
+
+
+def test_an_events_only_request_reads_only_the_state_file(rig):
+    put(event(1))
+    r = post(EVENTS, headers=events_headers())
+    assert r.status_code == 200
+    rig.untouched()
+    assert get_store().event_count() == 1
+
+
+def test_events_with_topology_judge_each_class_and_keep_both_in_the_overall(rig):
+    out = post({**TOPOLOGY, "classes": ["topology", "events"]}, headers=events_headers()).json()
+    assert set(out["eligibility"]["classes"]) == {"topology", "events"}
+    assert out["eligibility"]["classes"]["topology"]["result"] == "eligible"
+    assert out["eligibility"]["classes"]["events"]["result"] == "gap"
+    assert out["eligibility"]["result"] == "gap"
+    assert out["graph"] is not None
+
+
+def test_a_source_host_outside_the_token_pattern_is_returned_as_null(rig):
+    put(event(1, source_host="a;b"))
+    [e] = post(EVENTS, headers=events_headers()).json()["events"]["events"]
+    assert e["source_host"] is None
