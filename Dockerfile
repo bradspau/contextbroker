@@ -7,6 +7,9 @@ COPY . .
 # Run as an unprivileged user; the app files stay root-owned and read-only to it.
 RUN groupadd --system --gid 10001 app \
  && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin app
+# A new named volume mounted at /data copies this ownership on first use, so the
+# non-root user can write its durable state file there.
+RUN mkdir -p /data && chown 10001:10001 /data
 ENV PYTHONDONTWRITEBYTECODE=1
 USER 10001:10001
 EXPOSE 8080

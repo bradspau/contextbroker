@@ -197,3 +197,43 @@ def test_retention_is_one_value_for_victoriametrics_and_the_api():
         if name in ("victoriametrics", "contextbroker-api"):
             continue
         assert "BROKER_RETENTION_PERIOD" not in repr(svc), name
+
+
+STATE_ENV_ITEMS = [
+    "BROKER_STATE_PATH=/data/broker-state.sqlite3",
+    "BROKER_DECISION_RECORDS_PATH=/data/decision-records.sqlite3",
+    "BROKER_OUTCOME_CAP=${BROKER_OUTCOME_CAP:-1024}",
+    "BROKER_MARK_CAP=${BROKER_MARK_CAP:-1024}",
+    "BROKER_SITUATION_CAP=${BROKER_SITUATION_CAP:-100000}",
+    "BROKER_SITUATION_RETENTION=${BROKER_SITUATION_RETENTION:-7d}",
+]
+
+
+def test_state_volume_is_mounted_on_the_api_only():
+    content = yaml.safe_load(COMPOSE_PATH.read_text())
+    api = content["services"]["contextbroker-api"]
+    assert "broker-state" in content["volumes"]
+    assert api["volumes"].count("broker-state:/data") == 1
+    assert len([v for v in api["volumes"] if v.endswith(":/run/secrets/broker_jwt_public.pem:ro")]) == 1
+    for name, svc in content["services"].items():
+        if name == "contextbroker-api":
+            continue
+        assert "broker-state" not in repr(svc), name
+
+
+def test_state_environment_items_and_defaults():
+    services = yaml.safe_load(COMPOSE_PATH.read_text())["services"]
+    api_env = services["contextbroker-api"]["environment"]
+    for item in STATE_ENV_ITEMS:
+        assert api_env.count(item) == 1, item
+    env = _env_as_dict(api_env)
+    for key in ("BROKER_STATE_PATH", "BROKER_DECISION_RECORDS_PATH"):
+        assert env[key].startswith("/data/"), key
+        assert "$" not in env[key], key
+    for name, svc in services.items():
+        if name == "contextbroker-api":
+            continue
+        text = repr(svc)
+        for key in ("BROKER_STATE_PATH", "BROKER_DECISION_RECORDS_PATH", "BROKER_OUTCOME_CAP",
+                    "BROKER_MARK_CAP", "BROKER_SITUATION_CAP", "BROKER_SITUATION_RETENTION"):
+            assert key not in text, (name, key)

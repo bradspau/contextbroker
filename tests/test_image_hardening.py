@@ -54,3 +54,20 @@ def test_dockerignore_keeps_the_licensed_patterns():
     for entry in ("ontologies/licensed", "**/ontology/**/*.ttl", "ontologies/tbox/*.ttl",
                   "!ontologies/tbox/topology.ttl", "ontologies/**/*.zip"):
         assert entry in lines, entry
+
+
+def test_data_dir_is_created_and_owned_by_the_container_user_before_user():
+    # A new named volume copies the ownership of the image directory it covers, so
+    # the non-root user can write its state file only if /data exists and is owned
+    # by it in the image (Pitfall 3).
+    insts = _instructions()
+    kws = [kw for kw, _ in insts]
+    user_at = kws.index("USER")
+    last_copy = max(i for i, kw in enumerate(kws) if kw == "COPY")
+    (user_line,) = [l for kw, l in insts if kw == "USER"]
+    uid_gid = user_line.split(None, 1)[1].strip()
+    runs = [(i, l) for i, (kw, l) in enumerate(insts)
+            if kw == "RUN" and last_copy < i < user_at and "mkdir -p /data" in l]
+    assert len(runs) == 1, runs
+    assert "chown {} /data".format(uid_gid) in runs[0][1]
+    assert uid_gid == "10001:10001"
