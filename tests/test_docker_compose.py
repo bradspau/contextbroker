@@ -5,6 +5,7 @@ import re
 import yaml
 
 from broker_engine.validation import max_as_of_seconds
+from broker_state.process import load_settings
 
 COMPOSE_PATH = Path(__file__).resolve().parent.parent / "docker-compose.yml"
 
@@ -206,7 +207,14 @@ STATE_ENV_ITEMS = [
     "BROKER_MARK_CAP=${BROKER_MARK_CAP:-1024}",
     "BROKER_SITUATION_CAP=${BROKER_SITUATION_CAP:-100000}",
     "BROKER_SITUATION_RETENTION=${BROKER_SITUATION_RETENTION:-7d}",
+    "BROKER_EVENT_CAP=${BROKER_EVENT_CAP:-100000}",
+    "BROKER_EVENT_RETENTION=${BROKER_EVENT_RETENTION:-7d}",
+    "BROKER_EVENT_WINDOW_DEFAULT=${BROKER_EVENT_WINDOW_DEFAULT:-15m}",
+    "BROKER_EVENT_WINDOW_MAX=${BROKER_EVENT_WINDOW_MAX:-24h}",
 ]
+EVENT_KEYS = ("BROKER_EVENT_CAP", "BROKER_EVENT_RETENTION", "BROKER_EVENT_WINDOW_DEFAULT",
+              "BROKER_EVENT_WINDOW_MAX")
+ENV_EXAMPLE_PATH = COMPOSE_PATH.parent / ".env.example"
 
 
 def test_state_volume_is_mounted_on_the_api_only():
@@ -235,5 +243,39 @@ def test_state_environment_items_and_defaults():
             continue
         text = repr(svc)
         for key in ("BROKER_STATE_PATH", "BROKER_DECISION_RECORDS_PATH", "BROKER_OUTCOME_CAP",
-                    "BROKER_MARK_CAP", "BROKER_SITUATION_CAP", "BROKER_SITUATION_RETENTION"):
+                    "BROKER_MARK_CAP", "BROKER_SITUATION_CAP", "BROKER_SITUATION_RETENTION",
+                    *EVENT_KEYS):
             assert key not in text, (name, key)
+
+
+def test_event_compose_defaults_equal_the_code_defaults():
+    api_env = yaml.safe_load(COMPOSE_PATH.read_text())["services"]["contextbroker-api"]["environment"]
+    pattern = re.compile(r"^(BROKER_EVENT_[A-Z_]+)=\$\{\1:-([^}]*)\}$")
+    defaults = {}
+    for item in api_env:
+        match = pattern.match(item)
+        if match:
+            defaults[match.group(1)] = match.group(2)
+    assert set(defaults) == set(EVENT_KEYS)
+    from_compose = load_settings(defaults)
+    from_code = load_settings({})
+    for field in ("event_cap", "event_retention_s", "event_window_default_s", "event_window_max_s"):
+        assert getattr(from_compose, field) == getattr(from_code, field), field
+
+
+def test_env_example_documents_each_event_setting_with_a_limit_line_and_no_live_assignment():
+    lines = ENV_EXAMPLE_PATH.read_text().splitlines()
+    for key in EVENT_KEYS:
+        assert not any(line.startswith(key + "=") for line in lines), key
+        indexes = [i for i, line in enumerate(lines) if line.startswith(f"# {key}=")]
+        assert len(indexes) == 1, key
+        i = indexes[0]
+        assert lines[i - 1].startswith("# ") and not re.match(r"# BROKER_[A-Z_]+=", lines[i - 1]), key
+        assert " to " in lines[i - 1], key  # the limit line states a range
+    # the four sit inside the broker state block, before the TMF921 block
+    block_end = lines.index("# TMF921 server (compose profile tmf921)")
+    block_start = next(i for i, line in enumerate(lines) if line.startswith("# Broker state."))
+    for key in EVENT_KEYS:
+        i = next(i for i, line in enumerate(lines) if line.startswith(f"# {key}="))
+        assert block_start < i < block_end, key
+    assert "events" in "\n".join(lines[block_start:block_start + 6])

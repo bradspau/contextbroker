@@ -79,12 +79,16 @@ services:
       - BROKER_MARK_CAP=${BROKER_MARK_CAP:-1024}
       - BROKER_SITUATION_CAP=${BROKER_SITUATION_CAP:-100000}
       - BROKER_SITUATION_RETENTION=${BROKER_SITUATION_RETENTION:-7d}
+      - BROKER_EVENT_CAP=${BROKER_EVENT_CAP:-100000}
+      - BROKER_EVENT_RETENTION=${BROKER_EVENT_RETENTION:-7d}
+      - BROKER_EVENT_WINDOW_DEFAULT=${BROKER_EVENT_WINDOW_DEFAULT:-15m}
+      - BROKER_EVENT_WINDOW_MAX=${BROKER_EVENT_WINDOW_MAX:-24h}
     # The API verifies bearer tokens with a public key only. An unset HOST_BROKER_JWT_PUBLIC_KEY
     # mounts an empty file: the API starts and refuses every /context/* call (no key configured).
     volumes:
       - ${HOST_BROKER_JWT_PUBLIC_KEY:-/dev/null}:/run/secrets/broker_jwt_public.pem:ro
-      # Holds the broker's durable state (outcomes, high-water marks, situation records, decision
-      # records). Never remove it: never run `docker compose down -v`.
+      # Holds the broker's durable state (outcomes, high-water marks, situation records, the event
+      # store, decision records). Never remove it: never run `docker compose down -v`.
       - broker-state:/data
     # /health answers 503 when Fuseki, VictoriaMetrics or the TMF921 server does not answer, and
     # urlopen raises on 503, so a degraded broker reports unhealthy. The image has no curl.
