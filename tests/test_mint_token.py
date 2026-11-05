@@ -225,3 +225,51 @@ def test_the_script_constants_equal_the_broker_constants():
     assert module.CONTEXT_CLASSES == context_contract.CONTEXT_CLASSES
     assert module.CLAIM_AUTHORITY == auth.CLAIM_AUTHORITY
     assert (module.KEY_ENTITIES, module.KEY_PURPOSES, module.KEY_CLASSES) == auth.AUTHORITY_KEYS
+
+
+PARTIAL = [
+    ("--entity", "Router-A"),
+    ("--purpose", "diagnosis"),
+    ("--class", "topology"),
+    ("--entity", "Router-A", "--purpose", "diagnosis"),
+    ("--entity", "Router-A", "--class", "topology"),
+    ("--purpose", "diagnosis", "--class", "topology"),
+]
+
+
+@pytest.mark.parametrize("flags", PARTIAL, ids=lambda f: "+".join(x[2:] for x in f if x.startswith("--")))
+def test_a_partial_authority_set_is_refused(tmp_path, keys, flags):
+    path = _write_key(tmp_path, keys["ec"])
+    _assert_refused(_run(*_ok_args(path, *flags)), "--entity, --purpose and --class go together")
+
+
+@pytest.mark.parametrize("entity", ["R*", "a b", "", "Router-A\n", "a" * 129, "R?", "*x", "Rôuter"])
+def test_an_unsafe_entity_is_refused_without_echoing_it(tmp_path, keys, entity):
+    path = _write_key(tmp_path, keys["ec"])
+    r = _run(*_ok_args(path, "--entity", entity, "--purpose", "diagnosis", "--class", "topology"))
+    _assert_refused(r, "an --entity must be * or a device name")
+    if entity.strip():
+        assert entity not in r.stderr
+
+
+def test_the_wildcard_and_a_slashed_name_are_accepted(tmp_path, keys):
+    path = _write_key(tmp_path, keys["ec"])
+    r = _run(*_ok_args(path, "--entity", "*", "--entity", "Router-A/GigabitEthernet0/0/0",
+                       "--purpose", "assurance", "--class", "goals"))
+    assert r.returncode == 0
+    claims = auth.verify_token(r.stdout.strip(), _cfg(keys["ec"]))
+    assert auth.authority_of(claims).entities == {"*", "Router-A/GigabitEthernet0/0/0"}
+
+
+@pytest.mark.parametrize("flag,value", [("--purpose", "admin"), ("--class", "events")])
+def test_an_unknown_purpose_or_class_is_rejected_by_the_command_line(tmp_path, keys, flag, value):
+    path = _write_key(tmp_path, keys["ec"])
+    r = _run(*_ok_args(path, flag, value))
+    assert r.returncode == 2 and r.stdout == ""
+
+
+def test_the_script_entity_pattern_equals_the_broker_pattern():
+    from broker_engine import validation
+    module = _load_script()
+    assert module._SAFE_ENTITY.pattern == validation._SAFE_TOKEN.pattern
+    assert module.MAX_ENTITY_LENGTH == auth.MAX_ENTITY_LENGTH

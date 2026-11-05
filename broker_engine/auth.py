@@ -38,6 +38,7 @@ _KNOWN_SCOPES = (SCOPE_READ, SCOPE_ASSESS)
 CLAIM_AUTHORITY = "authority"
 AUTHORITY_KEYS = ("entities", "purposes", "classes")  # scripts/mint_token.py keeps a copy (tests pin it)
 MAX_REQUESTER_LENGTH = 128
+MAX_ENTITY_LENGTH = 128  # scripts/mint_token.py keeps a copy (tests pin it)
 
 ENV_KEY_FILE = "BROKER_JWT_PUBLIC_KEY_FILE"
 ENV_KEY = "BROKER_JWT_PUBLIC_KEY"
@@ -140,7 +141,7 @@ def scopes_of(claims: dict) -> frozenset[str]:
 def _usable_entity(item) -> bool:
     return isinstance(item, str) and (
         item == ENTITY_WILDCARD
-        or (len(item) <= MAX_REQUESTER_LENGTH and _SAFE_TOKEN.match(item) is not None))
+        or (len(item) <= MAX_ENTITY_LENGTH and _SAFE_TOKEN.match(item) is not None))
 
 
 def authority_of(claims: dict) -> Authority | None:
@@ -176,7 +177,13 @@ def authenticate(authorization_header: str | None) -> Caller:
         log.warning("authentication refused: missing bearer token")
         raise AuthError("missing bearer token")
     claims = verify_token(token, cfg)
-    return Caller(requester=claims["sub"], scopes=scopes_of(claims), authority=authority_of(claims))
+    requester = claims.get("sub")
+    if not (isinstance(requester, str) and 0 < len(requester) <= MAX_REQUESTER_LENGTH
+            and requester.isprintable()):
+        # An empty sub would make anonymous callers share one requester and one situation identity.
+        log.warning("authentication refused: invalid subject")
+        raise AuthError("invalid token")
+    return Caller(requester=requester, scopes=scopes_of(claims), authority=authority_of(claims))
 
 
 def _is_protected(path: str) -> bool:

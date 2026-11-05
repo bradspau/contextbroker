@@ -14,6 +14,7 @@ Standalone on purpose: standard library, PyJWT and cryptography only, no broker 
 """
 import argparse
 import os
+import re
 import stat
 import sys
 import time
@@ -33,6 +34,9 @@ PURPOSES = ("assurance", "diagnosis", "reporting")
 CONTEXT_CLASSES = ("topology", "goals", "observations")
 CLAIM_AUTHORITY = "authority"
 KEY_ENTITIES, KEY_PURPOSES, KEY_CLASSES = "entities", "purposes", "classes"
+MAX_ENTITY_LENGTH = 128
+# The same pattern as broker_engine.validation._SAFE_TOKEN (standalone copy).
+_SAFE_ENTITY = re.compile(r"^[A-Za-z0-9_\-/]+\Z")
 MIN_RSA_BITS = 2048
 REPO = Path(__file__).resolve().parent.parent
 
@@ -88,6 +92,13 @@ def main(argv=None) -> int:
     try:
         if not args.scope:
             raise Refusal("at least one --scope is required")
+        given = [bool(args.entity), bool(args.purpose), bool(args.classes)]
+        if any(given) and not all(given):
+            raise Refusal("--entity, --purpose and --class go together: give all three or none")
+        for entity in args.entity or []:
+            if entity != "*" and not (len(entity) <= MAX_ENTITY_LENGTH and _SAFE_ENTITY.match(entity)):
+                raise Refusal("an --entity must be * or a device name of letters, digits, _, - or /, "
+                              f"at most {MAX_ENTITY_LENGTH} characters")
         if not 0 < args.ttl <= MAX_TTL_S:
             raise Refusal(f"--ttl must be between 1 and {MAX_TTL_S} seconds")
         if not args.issuer:

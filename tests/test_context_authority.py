@@ -149,3 +149,179 @@ def test_the_closed_sets_are_the_documented_ones():
     assert CONTEXT_CLASSES == ("topology", "goals", "observations")
     assert auth.CLAIM_AUTHORITY == "authority"
     assert auth.AUTHORITY_KEYS == ("entities", "purposes", "classes")
+
+
+# --- Task 2: malformed claims fail closed ---
+
+import logging
+import time
+from unittest.mock import patch
+
+import jwt
+
+from broker_engine import main
+from tests.auth_helpers import make_token
+
+CANARY = "CANARY-ENTITY-77"
+_GOOD = {"entities": ["Router-A"], "purposes": ["diagnosis"], "classes": ["topology"]}
+
+
+def _with(**over) -> dict:
+    return {"authority": {**_GOOD, **over}}
+
+
+MALFORMED = {
+    "no_claim": {},
+    "claim_is_a_string": {"authority": "x"},
+    "claim_is_a_list": {"authority": [_GOOD]},
+    "claim_is_a_number": {"authority": 7},
+    "claim_is_null": {"authority": None},
+    "entities_missing": {"authority": {k: v for k, v in _GOOD.items() if k != "entities"}},
+    "purposes_missing": {"authority": {k: v for k, v in _GOOD.items() if k != "purposes"}},
+    "classes_missing": {"authority": {k: v for k, v in _GOOD.items() if k != "classes"}},
+    "entities_is_a_string": _with(entities="Router-A"),
+    "purposes_is_a_number": _with(purposes=5),
+    "classes_is_null": _with(classes=None),
+    "entities_empty": _with(entities=[]),
+    "purposes_empty": _with(purposes=[]),
+    "classes_empty": _with(classes=[]),
+    "entity_glob_only": _with(entities=["R*"]),
+    "entity_with_space": _with(entities=["Router A"]),
+    "entity_empty_string": _with(entities=[""]),
+    "entity_not_a_string": _with(entities=[7]),
+    "entity_129_chars": _with(entities=["a" * 129]),
+    "entity_newline": _with(entities=["Router-A\n"]),
+    "purpose_unknown": _with(purposes=["admin"]),
+    "class_unknown": _with(classes=["events"]),
+    "purpose_not_a_string": _with(purposes=[["diagnosis"]]),
+}
+
+
+@pytest.mark.parametrize("case", sorted(MALFORMED))
+def test_authority_of_never_grants_for_a_malformed_claim(case):
+    assert auth.authority_of(MALFORMED[case]) is None
+
+
+@pytest.mark.parametrize("value", [None, 0, 1.5, "x", [], [1, "a"], {"a": 1}, True])
+def test_authority_of_is_total_for_any_json_value(value):
+    assert auth.authority_of({"authority": value}) is None
+    assert auth.authority_of({"authority": {"entities": value, "purposes": value, "classes": value}}) is None
+
+
+def test_a_mixed_list_keeps_only_the_valid_part():
+    a = auth.authority_of(_with(entities=["Router-A", "R*", 3, "bad name"],
+                                purposes=["diagnosis", "admin"], classes=["topology", "events"]))
+    assert a.entities == {"Router-A"} and a.purposes == {"diagnosis"} and a.classes == {"topology"}
+
+
+def test_extra_keys_inside_the_claim_are_ignored():
+    a = auth.authority_of({"authority": {**_GOOD, "extra": ["x"]}})
+    assert a is not None and a.entities == {"Router-A"}
+
+
+def test_a_128_character_entity_is_kept():
+    assert auth.authority_of(_with(entities=["a" * 128])).entities == {"a" * 128}
+
+
+def test_covers_entity_is_exact_and_never_a_glob():
+    star = auth.authority_of(_with(entities=["*"]))
+    assert star.covers_entity("Router-A") and star.covers_entity("anything/at/all")
+    named = auth.authority_of(_with(entities=["Router-A"]))
+    assert named.covers_entity("Router-A")
+    assert not named.covers_entity("Router-B") and not named.covers_entity("router-a")
+    assert auth.authority_of(_with(entities=["R*"])) is None
+    mixed = auth.authority_of(_with(entities=["Router-A", "R*"]))
+    assert not mixed.covers_entity("Router-B") and not mixed.covers_entity("R*")
+
+
+def _signed(**claims) -> str:
+    # The probe app trusts the key generated at import by tests.auth_helpers; broker_env is not used here.
+    return make_token(("context:read",), **claims)
+
+
+@pytest.mark.parametrize("case", sorted(MALFORMED))
+def test_a_malformed_claim_is_403_on_a_route_that_needs_it(case, caplog):
+    app, seen = _probe_app()
+    token = _signed(**MALFORMED[case], sub="canary-requester")
+    with caplog.at_level(logging.DEBUG):
+        r = TestClient(app).post("/context/probe", headers=_bearer(token))
+    assert r.status_code == 403 and r.json() == AUTHORITY_DENIED
+    assert seen == []
+    assert "canary-requester" not in caplog.text and "canary-requester" not in r.text
+
+
+def test_claim_values_never_reach_logs_or_responses(caplog):
+    app, seen = _probe_app()
+    token = _signed(authority={"entities": [CANARY + "*"], "purposes": ["diagnosis"], "classes": ["topology"]})
+    with caplog.at_level(logging.DEBUG):
+        r = TestClient(app).post("/context/probe", headers=_bearer(token))
+    assert r.status_code == 403 and CANARY not in r.text and CANARY not in caplog.text
+    ok = _signed(authority={"entities": [CANARY], "purposes": ["diagnosis"], "classes": ["topology"]})
+    with caplog.at_level(logging.DEBUG):
+        r = TestClient(app).post("/context/probe", headers=_bearer(ok))
+    assert r.status_code == 200 and CANARY not in r.text and CANARY not in caplog.text
+
+
+# --- requester refusals, on the real app, before any upstream call ---
+
+SUBJECT_DENIED = {"detail": "authentication required"}
+BAD_SUBJECTS = {
+    "empty": "",
+    "129_chars": "a" * 129,
+    "newline": "ali\nce",
+    "tab": "ali\tce",
+    "nul": "ali\x00ce",
+}
+_METRIC = {"device": "r1", "interface": "e0", "metric_type": "latency_ms", "time_window": "5m"}
+_app_client = TestClient(main.app)
+
+
+@pytest.fixture
+def no_upstream():
+    with patch("requests.get") as get, patch("requests.post") as post, \
+            patch("intent_management.tmf921_client.Tmf921Client.post_observation") as push:
+        yield get, post, push
+
+
+@pytest.mark.parametrize("case", sorted(BAD_SUBJECTS))
+def test_an_unusable_requester_is_401_before_any_upstream_call(case, no_upstream, caplog):
+    sub = BAD_SUBJECTS[case]
+    token = _signed(sub=sub)
+    with caplog.at_level(logging.DEBUG):
+        r = _app_client.get("/context/metric", params=_METRIC, headers=_bearer(token))
+    assert r.status_code == 401 and r.json() == SUBJECT_DENIED
+    assert r.headers["www-authenticate"] == "Bearer"
+    for mocked in no_upstream:
+        mocked.assert_not_called()
+    assert "authentication refused: invalid subject" in caplog.text
+    assert token not in caplog.text
+    if sub.strip():
+        assert sub not in caplog.text
+
+
+def test_a_canary_subject_is_never_logged_when_refused(no_upstream, caplog):
+    sub = "CANARY-SUB-" + "z" * 120 + "\n"
+    with caplog.at_level(logging.DEBUG):
+        r = _app_client.get("/context/metric", params=_METRIC, headers=_bearer(_signed(sub=sub)))
+    assert r.status_code == 401
+    assert "CANARY-SUB" not in caplog.text and "CANARY-SUB" not in r.text
+
+
+def test_a_subject_of_exactly_128_printable_characters_is_accepted():
+    sub = "s" * 128
+    with patch("broker_engine.main.operations.interface_neighbours", return_value={"ok": 1}):
+        r = _app_client.get("/context/neighbours", params={"device": "r1", "interface": "e0"},
+                            headers=_bearer(_signed(sub=sub)))
+    assert r.status_code == 200
+
+
+def test_authenticate_returns_the_subject_as_the_requester():
+    caller = auth.authenticate("Bearer " + _signed(sub="alice", authority=_GOOD))
+    assert caller.requester == "alice" and caller.authority.entities == {"Router-A"}
+
+
+def test_old_routes_answer_as_before_for_a_token_without_authority(no_upstream):
+    with patch("broker_engine.main.operations.interface_neighbours", return_value={"ok": 1}):
+        r = _app_client.get("/context/neighbours", params={"device": "r1", "interface": "e0"},
+                            headers=_bearer(_signed()))
+    assert r.status_code == 200 and r.json() == {"ok": 1}
