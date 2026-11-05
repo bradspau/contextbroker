@@ -131,6 +131,21 @@ def read_device_interfaces(devices, query_endpoint=FUSEKI_QUERY_ENDPOINT) -> lis
     return sorted(out)
 
 
+def read_device_names(query_endpoint=FUSEKI_QUERY_ENDPOINT) -> list[str]:
+    """One SELECT for the distinct ``:onDevice`` values of every ``:Interface``: the device table
+    (D-07). Each value must pass the token check, else the fixed Malformed; the list is sorted
+    and distinct, and an empty graph gives ``[]``. It reads and never writes."""
+    sparql = f"""
+    PREFIX : <{NS}>
+    SELECT DISTINCT ?d WHERE {{
+      ?i a :Interface ; :onDevice ?d .
+    }}"""
+    names = set()
+    for binding in _select(query_endpoint, sparql):
+        names.add(_checked(_check_token, _value(binding, "d"), "device"))
+    return sorted(names)
+
+
 def read_links(interface_iris, query_endpoint=FUSEKI_QUERY_ENDPOINT) -> list[dict]:
     """One SELECT for every link fluent that names one of the given interfaces, with no time filter.
 

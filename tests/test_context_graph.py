@@ -526,3 +526,43 @@ def test_an_unsafe_scope_never_reaches_a_query(device, interface):
     with pytest.raises(ValueError):
         build(fx, device, interface)
     assert queries(fx) == []
+
+
+# ---- read_device_names (Phase 5, D-07) ----------------------------------------------------
+
+
+def _devices(fx):
+    with patch("broker_engine.context_graph.requests.post", fx.post):
+        return cg.read_device_names(QUERY_URL)
+
+
+def test_read_device_names_is_sorted_and_distinct():
+    assert _devices(demo()) == ["Router-A", "Router-B"]
+    g = rdflib.Graph()
+    g.parse(data=IFACES_TTL, format="turtle")
+    assert _devices(GraphFuseki(g)) == ["olt1"]
+    assert _devices(GraphFuseki(rdflib.Graph())) == []
+
+
+def test_read_device_names_refuses_a_bad_value_without_echoing_it():
+    g = rdflib.Graph()
+    g.parse(data=f'@prefix : <{NS}> . :i a :Interface ; :onDevice "Router A canary77" .',
+            format="turtle")
+    with pytest.raises(cg.MalformedTopology) as exc:
+        _devices(GraphFuseki(g))
+    assert "canary77" not in str(exc.value)
+
+
+def test_read_device_names_refuses_a_non_json_reply_and_lets_a_network_error_through():
+    from unittest.mock import Mock
+    bad = Mock()
+    bad.raise_for_status.return_value = None
+    bad.json.side_effect = ValueError("not json")
+    with patch("broker_engine.context_graph.requests.post", return_value=bad):
+        with pytest.raises(cg.MalformedTopology):
+            cg.read_device_names(QUERY_URL)
+    import requests
+    with patch("broker_engine.context_graph.requests.post",
+               side_effect=requests.ConnectionError("down")):
+        with pytest.raises(requests.ConnectionError):
+            cg.read_device_names(QUERY_URL)
