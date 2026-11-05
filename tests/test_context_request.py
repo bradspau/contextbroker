@@ -18,10 +18,12 @@ from fastapi.testclient import TestClient
 
 from broker_engine import main
 from data_contracts import fluents as f
-from data_contracts.context_contract import situation_id
+from data_contracts.context_contract import (
+    CONTEXT_CLASSES, PURPOSES, RELATIONSHIP_TYPES, ClassEligibility, Eligibility, situation_id)
 from intent_management import tmf921_source
 from tests.auth_helpers import make_token
-from tests.fluent_helpers import IF0, IF1, IFACES_TTL, LAT, NS, T0, T1, GraphFuseki, bind, replace_goal
+from tests.fluent_helpers import (
+    IF0, IF1, IFACES_TTL, LAT, NS, T0, T1, UPDATE_URL, GraphFuseki, bind, replace_goal)
 
 DEMO = Path(__file__).resolve().parent.parent / "ontologies" / "abox" / "topology-demo.ttl"
 NOW = datetime(2026, 11, 6, 12, 0, 0, tzinfo=timezone.utc)
@@ -702,3 +704,152 @@ def test_verdict_with_two_placements_in_force_is_inconclusive_invalid_binding(ol
     assert len([q for q in olt.queries() if "ServiceBinding" in q]) == 2
     olt.get_intent.assert_not_called()
     assert olt.vm.queries == []
+
+
+# ---- eligibility and verdict are independent; a changed goal is caught through the route ----
+
+def test_verdict_and_eligibility_disagree_by_design_when_the_live_goal_differs_from_the_pin(olt):
+    # The verdict compares the live TMF921 goal with the pin, while eligibility reads the fluents only
+    # (the goal pinned in the graph, whose history is what the window judges). Flow 3: the server
+    # replaced the goal with the observed value, so the fluent-based goals class is eligible while the
+    # verdict is inconclusive. Neither feeds the other (Ph3 D-16, D-19).
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt)
+    live_goal(olt, 150)
+    out = assure().json()
+    assert reasons(out, "goals") == {"result": "eligible", "reasons": []}
+    assert out["verdict"]["verdict"] == "inconclusive"
+    assert out["verdict"]["reasons"][0].startswith("goal changed: LatencyMetric pinned 100, now 150")
+    assert out["verdict"]["intent_status"] == "unknown"
+    olt.push.assert_not_called()
+
+
+def test_independent_eligibility_does_not_change_the_verdict(olt):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt)
+    live_goal(olt)
+    alone = assure().json()
+    fixed = Eligibility(result="ineligible", reasons=["stale observation: LatencyMetric"],
+                        classes={"goals": ClassEligibility(result="ineligible", reasons=[])})
+    with patch("broker_engine.context_request.overall", return_value=fixed) as overall:
+        patched = assure().json()
+    assert patched["eligibility"]["result"] == "ineligible"
+    assert patched["verdict"] == alone["verdict"] and patched["verdict"]["verdict"] == "success"
+    [(args, kwargs)] = [(c.args, c.kwargs) for c in overall.call_args_list]
+    assert all(isinstance(v, ClassEligibility) for v in args[0].values())  # only class labels go in
+    assert not kwargs
+
+
+def test_independent_verdict_does_not_change_the_eligibility(olt):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt)
+    live_goal(olt)
+    alone = assure().json()
+    fixed = {"verdict": "failure", "reasons": ["LatencyMetric: forced"], "context": [], "goals": []}
+    with patch("broker_engine.context_request.assess_tmf921_as_of",
+               side_effect=lambda *a, **kw: dict(fixed)) as judge:
+        patched = assure().json()
+    assert patched["verdict"] == {"verdict": "failure", "reasons": ["LatencyMetric: forced"]}
+    assert patched["eligibility"] == alone["eligibility"]
+    [call] = judge.call_args_list
+    for value in (*call.args, *call.kwargs.values()):  # nothing the assess is given is a label
+        assert not isinstance(value, (Eligibility, ClassEligibility))
+        assert "eligib" not in repr(value).lower()
+
+
+def _reissue(fx, binding, new_goal, change_at, recorded_at, old_recorded=T0):
+    """What `bind_intent --replace --valid-from` writes: the old goal superseded, a copy of it ending at
+    `change_at`, and the new goal starting then, all recorded at `recorded_at`."""
+    old = f.fluent_iri(binding, "goal", old_recorded)
+    g = rdflib.Graph()
+    f.supersede(g, old, recorded_at)
+    f.add_goal(g, binding, 100.0, old_recorded, recorded_at, change_at, kind="goal-reissue")
+    f.add_goal(g, binding, new_goal, change_at, recorded_at)
+    fx.post(UPDATE_URL, data=f.guarded_insert(g, [old]).encode("utf-8"))
+
+
+def _correct_goal(fx, binding, value, at, old_recorded=T0):
+    """The earlier goal record was wrong: supersede it at `at` and reissue with the same start."""
+    old = f.fluent_iri(binding, "goal", old_recorded)
+    g = rdflib.Graph()
+    f.add_goal(g, binding, value, old_recorded, at)
+    f.supersede(g, old, at)
+    fx.post(UPDATE_URL, data=f.guarded_insert(g, [old]).encode("utf-8"))
+
+
+GOALS_ONLY = {**ASK, "classes": ["goals"]}
+
+
+def test_changed_goal_inside_the_window_makes_goals_ineligible_through_the_route(olt):
+    binding = bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    replace_goal(olt.fx, binding, 80.0, NOW - timedelta(seconds=100), T0)
+    out = assure(GOALS_ONLY).json()
+    assert reasons(out, "goals") == {"result": "ineligible",
+                                     "reasons": ["goal changed within window: LatencyMetric"]}
+
+
+def test_changed_goal_outside_the_window_is_eligible(olt):
+    binding = bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    replace_goal(olt.fx, binding, 80.0, NOW - timedelta(hours=1), T0)
+    assert reasons(assure(GOALS_ONLY).json(), "goals")["result"] == "eligible"
+
+
+def test_changed_goal_by_correction_is_not_a_change(olt):
+    binding = bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    _correct_goal(olt.fx, binding, 90.0, NOW - timedelta(seconds=100))
+    out = assure(GOALS_ONLY).json()
+    assert reasons(out, "goals")["result"] == "eligible"
+    assert [v["value"] for v in out["fluent_values"] if v["kind"] == "goal"] == [90.0]
+
+
+def test_changed_goal_by_a_valid_from_reissue_inside_the_window_is_a_change(olt):
+    binding = bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    _reissue(olt.fx, binding, 80.0, NOW - timedelta(seconds=100), NOW - timedelta(seconds=50))
+    out = assure(GOALS_ONLY).json()
+    assert reasons(out, "goals") == {"result": "ineligible",
+                                     "reasons": ["goal changed within window: LatencyMetric"]}
+
+
+def test_changed_goal_by_a_reissue_is_not_known_before_it_was_recorded(olt):
+    binding = bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    _reissue(olt.fx, binding, 80.0, NOW - timedelta(seconds=100), NOW - timedelta(seconds=50))
+    out = assure({**GOALS_ONLY, "known_at": "1m"}).json()
+    assert reasons(out, "goals") == {"result": "eligible", "reasons": []}
+    [goal] = [v for v in out["fluent_values"] if v["kind"] == "goal"]
+    assert (goal["value"], goal["in_force"], goal["valid_to"]) == (100.0, True, None)
+
+
+def test_changed_goal_in_a_past_request_judges_the_goal_in_force_then(olt):
+    binding = bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    replace_goal(olt.fx, binding, 80.0, NOW - timedelta(minutes=30), T0)
+    then = NOW - timedelta(hours=1)
+    olt.vm.add("latency_ms", "olt1", "pon0", (90.0, (then - timedelta(seconds=30)).timestamp()))
+    out = assure({**ASK, "as_of": "1h"}).json()
+    assert reasons(out, "goals")["result"] == "eligible"
+    assert [(v["value"], v["in_force"]) for v in out["fluent_values"] if v["kind"] == "goal"] == [
+        (100.0, True)]  # the 80.0 goal started after the window, so it is not listed
+    assert out["verdict"]["verdict"] == "success"  # 90 is inside the goal of 100, not the later 80
+    olt.get_intent.assert_not_called()
+
+
+def test_openapi_document_describes_the_contract_without_secrets_and_stays_public(rig):
+    r = client.get("/openapi.json")  # no token
+    assert r.status_code == 200
+    spec = r.json()
+    operation = spec["paths"]["/context/request"]["post"]
+    assert operation["requestBody"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/ContextRequest")
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/ContextResponse")
+    schemas = spec["components"]["schemas"]
+    request = schemas["ContextRequest"]["properties"]
+    assert tuple(request["purpose"]["enum"]) == PURPOSES
+    assert tuple(request["classes"]["items"]["enum"]) == CONTEXT_CLASSES
+    [types] = [a for a in request["relationship_types"]["anyOf"] if a.get("type") == "array"]
+    assert tuple(types["items"]["enum"]) == RELATIONSHIP_TYPES
+    assert "grants no execution authority" in schemas["Eligibility"]["description"]
+    assert "never reads eligibility" in schemas["ContextResponse"]["properties"]["verdict"]["description"]
+    text = str(spec)
+    for secret in ("Router-A", "olt1", "eyJ", "BEGIN", "test-caller", "testpassword0"):
+        assert secret not in text
+    rig.untouched()
