@@ -1,7 +1,8 @@
 """Real-engine parity check for the fluent history code and migration 002.
 
-The in-memory tests (tests/test_fluent_history.py, tests/test_migration_002.py) run the
-real bind, resolve, neighbours and migration code against an rdflib stand-in. This module
+The in-memory tests (tests/test_fluent_history.py, tests/test_migration_002.py,
+tests/test_context_graph.py) run the real bind, resolve, neighbours, migration and context graph
+reader code against an rdflib stand-in. This module
 runs the same code against a real Apache Jena Fuseki 6.1.0, which is the one thing a mock
 cannot show: the engine's transaction behaviour (one update request is one transaction),
 its comparison of zoned xsd:dateTime values, and how it writes timestamps back.
@@ -34,7 +35,7 @@ import re
 import uuid
 from datetime import timedelta
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
 import pytest
@@ -42,12 +43,13 @@ import rdflib
 import requests
 
 from broker_engine.binding_resolver import resolve_binding
+from broker_engine.context_graph import build_graph
 from broker_engine.operations import interface_neighbours
 from data_contracts import fluents as f
 from data_contracts.fluents import parse_dt
 from ingestion.bind_intent import bind
 from ingestion.load_ontologies import load_ttl_to_fuseki
-from tests.fluent_helpers import JIT, LAT, NS, T0, T1, T2
+from tests.fluent_helpers import JIT, LAT, NS, QUERY_URL, T0, T1, T2, GraphFuseki
 
 ROOT = Path(__file__).resolve().parent.parent
 MIGRATION = ROOT / "ontologies" / "migrations" / "002-bitemporal-fluents.ru"
@@ -394,3 +396,92 @@ def test_migration_002_reads_back_through_the_resolver_and_a_second_run_changes_
     assert scoped_count(target, m) == count
     again = resolve_binding(f"{m}-2", target["query"], valid_at=start + timedelta(seconds=1))
     assert again.bounds == {LAT: 40.0}
+
+
+# ---- the context graph readers (plan 03-05) -------------------------------------------------------
+
+
+def chain_fixture(sfx):
+    """Three devices a-b-c: a/ge0 - b/ge1 (closed at T1) and b/ge2 - c/ge3 (open from T0).
+
+    Returns the Turtle of the interfaces and the graph of the two link fluents; the same pair
+    loads into the real engine and into the in-memory stand-in."""
+    a, b, c = (f"{n}{sfx}" for n in ("ga", "gb", "gc"))
+    turtle = f"""@prefix : <{NS}> .
+    :if-{a} a :Interface ; :onDevice "{a}" ; :interfaceName "ge0" .
+    :if-{b}-1 a :Interface ; :onDevice "{b}" ; :interfaceName "ge1" .
+    :if-{b}-2 a :Interface ; :onDevice "{b}" ; :interfaceName "ge2" .
+    :if-{c} a :Interface ; :onDevice "{c}" ; :interfaceName "ge3" .
+    """
+    g = rdflib.Graph()
+    f.add_link_fluent(g, f"{NS}link-ab-{sfx}", f"{NS}if-{a}", f"{NS}if-{b}-1", T0, T0, T1)
+    f.add_link_fluent(g, f"{NS}link-bc-{sfx}", f"{NS}if-{b}-2", f"{NS}if-{c}", T0, T0)
+    return (a, b, c), turtle, g
+
+
+def load_chain(target, tmp_path, sfx):
+    devices, turtle, fluents = chain_fixture(sfx)
+    load_turtle(target, tmp_path, turtle)
+    assert update(target, f.guarded_insert(fluents, [])).status_code < 300
+    return devices
+
+
+def in_memory(turtle, extra=None):
+    g = rdflib.Graph()
+    g.parse(data=turtle, format="turtle")
+    if extra is not None:
+        g += extra
+    return GraphFuseki(g)
+
+
+def graph_args(**kw):
+    args = dict(max_depth=3, relationship_types=["has_interface", "connected_to"],
+                known_at=None, retrieved_at=T2, allowed=lambda d: True)
+    args.update(kw)
+    return args
+
+
+def test_the_context_graph_is_the_same_on_the_real_engine_as_in_memory(target, sfx, tmp_path):
+    (a, b, c), turtle, fluents = chain_fixture(sfx)
+    load_chain(target, tmp_path, sfx)
+    memory = in_memory(turtle, fluents)
+    seen = []
+    for valid_at in (T0 + HOUR, T1 + HOUR):
+        real = build_graph(a, None, valid_at=valid_at, query_endpoint=target["query"], **graph_args())
+        with patch("broker_engine.context_graph.requests.post", memory.post):
+            local = build_graph(a, None, valid_at=valid_at, query_endpoint=QUERY_URL, **graph_args())
+        assert real.graph.model_dump(by_alias=True) == local.graph.model_dump(by_alias=True)
+        assert [v.model_dump(by_alias=True) for v in real.fluent_values] == [
+            v.model_dump(by_alias=True) for v in local.fluent_values]
+        assert (real.scope_identity, real.conflicting_links, real.colliding_ids, real.malformed) == (
+            local.scope_identity, local.conflicting_links, local.colliding_ids, local.malformed)
+        seen.append(real)
+    before, after = seen
+    # the answers differ across T1, so the comparison above is not vacuous
+    assert [n.id for n in before.graph.nodes] == [a, f"{a}/ge0", f"{b}/ge1", b]
+    assert before.graph.limits.cut_by == ["depth"]
+    assert [n.id for n in after.graph.nodes] == [a, f"{a}/ge0"]
+    assert after.graph.limits.cut_by == [] and after.fluent_values == []
+
+
+def test_a_twin_interface_node_is_ambiguous_on_the_real_engine(target, sfx, tmp_path):
+    t = f"tw{sfx}"
+    load_turtle(target, tmp_path, f"""@prefix : <{NS}> .
+    :if-{t} a :Interface ; :onDevice "{t}" ; :interfaceName "ge0" .
+    :if-{t}-twin a :Interface ; :onDevice "{t}" ; :interfaceName "ge0" .
+    """)
+    got = build_graph(t, "ge0", valid_at=T2, query_endpoint=target["query"], **graph_args())
+    assert got.scope_identity == "ambiguous"
+    assert got.graph.nodes == []
+    device = build_graph(t, None, valid_at=T2, query_endpoint=target["query"], **graph_args())
+    assert device.colliding_ids is True
+    assert [n.id for n in device.graph.nodes] == [t, f"{t}/ge0"]
+
+
+def test_authority_cuts_the_context_graph_on_the_real_engine(target, sfx, tmp_path):
+    a, b, c = load_chain(target, tmp_path, sfx)
+    got = build_graph(a, None, valid_at=T0 + HOUR, query_endpoint=target["query"],
+                      **graph_args(allowed=lambda d: d == a))
+    assert [n.id for n in got.graph.nodes] == [a, f"{a}/ge0"]
+    assert got.graph.limits.cut_by == ["authority"]
+    assert got.fluent_values == []
