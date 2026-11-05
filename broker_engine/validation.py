@@ -2,6 +2,8 @@
 import os
 import re
 
+from data_contracts.envelope import DEFAULT_MAX_AGE_S
+
 REQUEST_TIMEOUT_S = 10
 
 
@@ -53,4 +55,17 @@ def window_seconds(value, label: str) -> int:
     seconds = int(value[:-1]) * _UNIT_SECONDS[value[-1]]
     if seconds > max_as_of_seconds():
         raise ClientInputError(f"{label} is further back than the retention period")
+    return seconds
+
+
+def freshness_seconds(value, label: str = "freshness") -> int:
+    """Seconds in a "2m"/"300s" style freshness limit; ClientInputError if malformed or outside
+    1 s to DEFAULT_MAX_AGE_S. A freshness expectation can only tighten the default limit (D-13), so a
+    larger value is refused, not clamped. Not window_seconds: its retention cap means something else.
+    The messages are fixed and never echo `value`. `label` is a literal from code, never caller text."""
+    if not isinstance(value, str) or not _SAFE_WINDOW.match(value):
+        raise ClientInputError(f"{label} must be a duration of 1 s to {DEFAULT_MAX_AGE_S} s using s, m, h or d")
+    seconds = int(value[:-1]) * _UNIT_SECONDS[value[-1]]
+    if not 1 <= seconds <= DEFAULT_MAX_AGE_S:
+        raise ClientInputError(f"{label} must be from 1 s to {DEFAULT_MAX_AGE_S} s")
     return seconds

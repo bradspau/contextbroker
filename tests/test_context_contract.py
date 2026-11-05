@@ -289,3 +289,146 @@ def test_the_contract_module_loads_no_web_framework():
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=str(REPO))
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "False"
+
+
+# ---- freshness and time resolution ----
+
+NOW = datetime(2026, 11, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_freshness_seconds_accepts_a_limit_up_to_the_default():
+    from broker_engine.validation import freshness_seconds
+    assert freshness_seconds("2m") == 120
+    assert freshness_seconds("300s") == 300
+    assert freshness_seconds("5m") == 300
+    assert freshness_seconds("1s") == 1
+
+
+@pytest.mark.parametrize("value", ["301s", "6m", "1h", "0s", "0m", "2x", " 2m", "2m ", "2m\n", "", "m5", 2, None, 2.0])
+def test_freshness_seconds_refuses_a_value_without_echoing_it(value):
+    from broker_engine.validation import ClientInputError, freshness_seconds
+    with pytest.raises(ClientInputError) as refused:
+        freshness_seconds(value)
+    message = str(refused.value)
+    assert "freshness" in message and "300" in message
+    if isinstance(value, str) and value.strip():
+        assert value not in message
+
+
+def test_freshness_seconds_names_the_label_it_is_given():
+    from broker_engine.validation import ClientInputError, freshness_seconds
+    with pytest.raises(ClientInputError, match="max age"):
+        freshness_seconds("1h", label="max age")
+
+
+def test_freshness_seconds_limit_is_the_envelope_default():
+    from broker_engine.validation import freshness_seconds
+    from data_contracts.envelope import DEFAULT_MAX_AGE_S
+    assert freshness_seconds(f"{DEFAULT_MAX_AGE_S}s") == DEFAULT_MAX_AGE_S
+    with pytest.raises(ValueError):
+        freshness_seconds(f"{DEFAULT_MAX_AGE_S + 1}s")
+
+
+@pytest.fixture
+def default_retention(monkeypatch):
+    monkeypatch.delenv("BROKER_RETENTION_PERIOD", raising=False)
+
+
+def test_no_offsets_resolve_to_now_and_the_default_limit(default_retention):
+    times = cc.resolve_times(_request(), NOW)
+    assert times == cc.ResolvedTimes(valid_at=NOW, known_at=None, limit_s=300, historical=False)
+
+
+def test_as_of_resolves_to_an_earlier_valid_instant(default_retention):
+    times = cc.resolve_times(_request(as_of="10m"), NOW)
+    assert times.valid_at == NOW - timedelta(minutes=10)
+    assert times.known_at is None and times.historical is True
+
+
+def test_known_at_alone_is_historical_with_valid_now(default_retention):
+    times = cc.resolve_times(_request(known_at="1h"), NOW)
+    assert times.valid_at == NOW
+    assert times.known_at == NOW - timedelta(hours=1)
+    assert times.historical is True
+
+
+def test_freshness_can_only_tighten_the_limit(default_retention):
+    assert cc.resolve_times(_request(freshness="1m"), NOW).limit_s == 60
+    assert cc.resolve_times(_request(freshness="5m"), NOW).limit_s == 300
+
+
+def test_freshness_above_the_default_is_a_client_input_error(default_retention):
+    from broker_engine.validation import ClientInputError
+    with pytest.raises(ClientInputError) as refused:
+        cc.resolve_times(_request(freshness="10m"), NOW)
+    assert "10m" not in str(refused.value)
+
+
+def test_an_offset_beyond_retention_is_a_client_input_error(default_retention):
+    from broker_engine.validation import ClientInputError
+    with pytest.raises(ClientInputError, match="^as_of is further back than the retention period$"):
+        cc.resolve_times(_request(as_of="31d"), NOW)
+    with pytest.raises(ClientInputError, match="^known_at is further back than the retention period$"):
+        cc.resolve_times(_request(known_at="31d"), NOW)
+
+
+def test_the_retention_limit_follows_the_environment(monkeypatch):
+    from broker_engine.validation import ClientInputError
+    monkeypatch.setenv("BROKER_RETENTION_PERIOD", "2d")
+    assert cc.resolve_times(_request(as_of="2d"), NOW).valid_at == NOW - timedelta(days=2)
+    with pytest.raises(ClientInputError):
+        cc.resolve_times(_request(as_of="3d"), NOW)
+
+
+def test_a_naive_now_is_refused(default_retention):
+    with pytest.raises(ValueError):
+        cc.resolve_times(_request(), datetime(2026, 11, 5, 12, 0, 0))
+
+
+def test_resolved_times_are_frozen():
+    times = cc.ResolvedTimes(valid_at=NOW, known_at=None, limit_s=300, historical=False)
+    with pytest.raises(Exception):
+        times.limit_s = 1
+
+
+# ---- expiry ----
+
+R = datetime(2026, 11, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _expiry(**changes):
+    args = dict(retrieved_at=R, observation_times=[], configured_evidence=False, limit_s=300, historical=False)
+    return cc.expiry(**{**args, **changes})
+
+
+def test_the_expiry_basis_strings_are_pinned():
+    assert (cc.EXPIRY_HISTORICAL, cc.EXPIRY_OBSERVATION, cc.EXPIRY_CONFIGURED, cc.EXPIRY_NO_EVIDENCE) == (
+        "historical_request", "oldest_observation", "configured_state", "no_evidence")
+
+
+def test_a_historical_request_expires_at_retrieval_whatever_else_is_passed():
+    result = _expiry(historical=True, observation_times=[R - timedelta(seconds=10)], configured_evidence=True)
+    assert result == (R, "historical_request")
+
+
+def test_a_current_request_expires_at_the_oldest_observation_plus_the_limit():
+    result = _expiry(observation_times=[R - timedelta(seconds=40), R - timedelta(seconds=100)])
+    assert result == (R + timedelta(seconds=200), "oldest_observation")
+
+
+def test_an_expiry_already_in_the_past_is_not_clamped():
+    result = _expiry(observation_times=[R - timedelta(seconds=40), R - timedelta(seconds=100)], limit_s=60)
+    assert result == (R - timedelta(seconds=40), "oldest_observation")
+
+
+def test_observations_beat_configured_evidence():
+    result = _expiry(observation_times=[R - timedelta(seconds=10)], configured_evidence=True)
+    assert result == (R + timedelta(seconds=290), "oldest_observation")
+
+
+def test_configured_evidence_alone_expires_a_limit_after_retrieval():
+    assert _expiry(configured_evidence=True, limit_s=120) == (R + timedelta(seconds=120), "configured_state")
+
+
+def test_no_evidence_expires_at_retrieval():
+    assert _expiry() == (R, "no_evidence")

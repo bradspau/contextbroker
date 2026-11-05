@@ -10,10 +10,13 @@ copy equal.
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from broker_engine.validation import freshness_seconds, window_seconds
+from data_contracts.envelope import DEFAULT_MAX_AGE_S
 
 PURPOSES = ("assurance", "diagnosis", "reporting")
 CONTEXT_CLASSES = ("topology", "goals", "observations")
@@ -35,6 +38,12 @@ ENTITY_WILDCARD = "*"
 REFUSED_ENTITY = "outside authority scope: entity"
 REFUSED_PURPOSE = "outside authority scope: purpose"
 REFUSED_CLASS = "outside authority scope: class"
+
+# Why an expiry is what it is (D-13, D-14, D-30).
+EXPIRY_HISTORICAL = "historical_request"
+EXPIRY_OBSERVATION = "oldest_observation"
+EXPIRY_CONFIGURED = "configured_state"
+EXPIRY_NO_EVIDENCE = "no_evidence"
 
 # Bumped if the situation identity construction ever changes (D-11, D-27).
 SITUATION_VERSION = 1
@@ -169,3 +178,52 @@ def situation_id(*, requester: str, purpose: str, device: str, interface: str | 
     }
     raw = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
     return "sit-" + hashlib.sha256(raw).hexdigest()[:32]
+
+
+# ---- times and expiry ----
+
+@dataclass(frozen=True)
+class ResolvedTimes:
+    """A request's offsets as instants: valid time, knowledge time (None is "latest"), the freshness
+    limit in seconds and whether the question is about the past."""
+
+    valid_at: datetime
+    known_at: datetime | None
+    limit_s: int
+    historical: bool
+
+
+def resolve_times(request: ContextRequest, now: datetime) -> ResolvedTimes:
+    """Turn as_of, known_at and freshness into instants and a limit (D-05, D-13).
+
+    Raises ClientInputError (HTTP 400 through the existing handler) for an offset beyond the retention
+    period or a freshness outside 1 s to DEFAULT_MAX_AGE_S, so the limit can only tighten. The handler
+    calls this before any upstream call (D-10). It is not a model validator: a ValueError raised inside
+    a pydantic validator becomes a 422, and these are fixed 400s."""
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    valid_at = now if request.as_of is None else now - timedelta(seconds=window_seconds(request.as_of, "as_of"))
+    known_at = None if request.known_at is None else now - timedelta(seconds=window_seconds(request.known_at, "known_at"))
+    limit_s = DEFAULT_MAX_AGE_S if request.freshness is None else freshness_seconds(request.freshness)
+    historical = request.as_of is not None or request.known_at is not None
+    return ResolvedTimes(valid_at=valid_at, known_at=known_at, limit_s=limit_s, historical=historical)
+
+
+def expiry(*, retrieved_at: datetime, observation_times, configured_evidence: bool, limit_s: int,
+           historical: bool) -> tuple[datetime, str]:
+    """When the answer stops being reusable as current context, and why (CTX-05).
+
+    - historical: the retrieval time, basis "historical_request". A past answer is not reusable (D-14).
+    - a current request with observations: the oldest observation time plus the limit, basis
+      "oldest_observation" (D-13). Never clamped: an expiry already in the past is honest.
+    - a current request with configured evidence only (topology or fluents): the retrieval time plus
+      the limit, basis "configured_state". A configured fact's recordedAt is not its age (D-30).
+    - nothing found: the retrieval time, basis "no_evidence"."""
+    if historical:
+        return retrieved_at, EXPIRY_HISTORICAL
+    observation_times = list(observation_times)
+    if observation_times:
+        return min(observation_times) + timedelta(seconds=limit_s), EXPIRY_OBSERVATION
+    if configured_evidence:
+        return retrieved_at + timedelta(seconds=limit_s), EXPIRY_CONFIGURED
+    return retrieved_at, EXPIRY_NO_EVIDENCE
