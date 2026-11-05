@@ -6,7 +6,7 @@ import pytest
 import investigation_workers
 from artefact_governance.model_registry import ModelRegistry
 from broker_engine.pruner import PrunedContext
-from data_contracts.envelope import ContextEnvelope, Quality, StateCategory
+from data_contracts.envelope import ContextEnvelope, ProvenanceRecord, Quality, StateCategory
 from investigation_workers.model_client import (
     ModelNotApproved,
     RouterStub,
@@ -39,11 +39,10 @@ def lqm(status="approved", threshold=0.0):
 def test_output_is_inferred_with_model_provenance():
     out = lqm().predict([env(value=5.0)])
     assert out.state == StateCategory.INFERRED
-    assert out.provenance["model"] == "lqm-threshold-stub"
-    assert out.provenance["model_version"] == "0.1"
+    model = out.provenance[0]
+    assert model == ProvenanceRecord("lqm-threshold-stub", "lqm-threshold-stub@0.1", NOW, NOW)
     assert out.source == "lqm-threshold-stub"
     assert out.observed_at == NOW
-    assert out.provenance["uncertainty"] is None
 
 
 @pytest.mark.parametrize("status", [None, "candidate", "retired"])
@@ -74,7 +73,7 @@ def test_empty_inputs():
     out = lqm().predict([])
     assert out.entity_id == "unknown"
     assert out.value is None and out.quality.missing
-    assert out.provenance["input_window"] == {"entities": [], "from": None, "to": None}
+    assert out.provenance == [ProvenanceRecord("lqm-threshold-stub", "lqm-threshold-stub@0.1", NOW, NOW)]
 
 
 @pytest.mark.parametrize("val,expected", [(5.1, 1.0), (4.9, 0.0), (5.0, 0.0)])
@@ -88,11 +87,60 @@ def test_stale_missing_and_non_numeric_ignored():
     assert lqm(threshold=5.0).predict(inputs).value == 0.0
 
 
-def test_input_window_contents():
+def test_provenance_is_the_model_then_one_record_per_input_in_order():
     out = lqm().predict([env("a", 1.0, T2), env("b", 1.0, T1)])
     assert out.entity_id == "a"
-    w = out.provenance["input_window"]
-    assert w == {"entities": ["a", "b"], "from": T1.isoformat(), "to": T2.isoformat()}
+    assert out.provenance == [
+        ProvenanceRecord("lqm-threshold-stub", "lqm-threshold-stub@0.1", NOW, NOW),
+        ProvenanceRecord("tsdb", "a", T2, NOW),
+        ProvenanceRecord("tsdb", "b", T1, NOW),
+    ]
+
+
+def test_inputs_without_usable_values_still_leave_a_record_each():
+    out = lqm().predict([env("a", None, None, missing=True)])
+    assert out.provenance[1] == ProvenanceRecord("tsdb", "a", None, NOW)
+
+
+def test_model_clock_is_read_once_per_prediction():
+    ticks = iter([NOW, NOW.replace(hour=14), NOW.replace(hour=15)])
+    stub = ThresholdLqmStub(registry(), now=lambda: next(ticks))
+    out = stub.predict([env("a", 1.0, T1)])
+    assert out.observed_at == NOW
+    assert {r.retrieved_at for r in out.provenance} == {NOW}
+
+
+def test_provenance_serialises_as_a_list_of_four_key_objects():
+    import json
+    d = json.loads(json.dumps(lqm().predict([env("a", 1.0, T1)]).to_dict()))
+    assert [sorted(r) for r in d["provenance"]] == [
+        ["observed_at", "reference", "retrieved_at", "source_system"]] * 2
+
+
+def _tracked_python_files():
+    import subprocess
+    root = Path(__file__).resolve().parent.parent
+    out = subprocess.run(["git", "ls-files", "*.py"], cwd=root,
+                         capture_output=True, text=True, check=True).stdout.split()
+    return root, [f for f in out if not f.startswith(("venv/", "docs/"))]
+
+
+def test_no_module_assigns_a_dict_to_provenance():
+    import ast
+    root, files = _tracked_python_files()
+    assert files
+    bad = []
+    for f in files:
+        for n in ast.walk(ast.parse((root / f).read_text())):
+            if isinstance(n, (ast.Assign, ast.AnnAssign)) and isinstance(n.value, ast.Dict):
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                if any((isinstance(t, ast.Name) and t.id == "provenance")
+                       or (isinstance(t, ast.Attribute) and t.attr == "provenance") for t in targets):
+                    bad.append(f"{f}:{n.lineno}")
+            if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", None)) == "ContextEnvelope":
+                bad += [f"{f}:{n.lineno}" for k in n.keywords
+                        if k.arg == "provenance" and isinstance(k.value, ast.Dict)]
+    assert bad == []
 
 
 def ctx(*kept, dropped=0):

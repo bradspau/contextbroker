@@ -8,7 +8,7 @@ from typing import Callable, Protocol
 
 from artefact_governance.model_registry import ModelRegistry
 from broker_engine.pruner import PrunedContext
-from data_contracts.envelope import ContextEnvelope, Quality, StateCategory
+from data_contracts.envelope import ContextEnvelope, ProvenanceRecord, Quality, StateCategory
 
 
 class ModelNotApproved(PermissionError):
@@ -59,17 +59,9 @@ class ThresholdLqmStub:
     def predict(self, inputs: list[ContextEnvelope]) -> ContextEnvelope:
         ensure_approved(self.registry, self)
         usable = [e for e in inputs if _usable(e)]
-        times = [e.observed_at for e in inputs if e.observed_at is not None]
-        provenance = {
-            "model": self.name,
-            "model_version": self.version,
-            "input_window": {
-                "entities": [e.entity_id for e in inputs],
-                "from": min(times).isoformat() if times else None,
-                "to": max(times).isoformat() if times else None,
-            },
-            "uncertainty": None,
-        }
+        now = self._now()
+        provenance = [ProvenanceRecord(self.name, f"{self.name}@{self.version}", now, now)]
+        provenance += [ProvenanceRecord(e.source, e.entity_id, e.observed_at, now) for e in inputs]
         if usable:
             value = 1.0 if any(e.value > self.threshold for e in usable) else 0.0
             quality = Quality()
@@ -81,7 +73,7 @@ class ThresholdLqmStub:
             state=StateCategory.INFERRED,
             value=value,
             source=self.name,
-            observed_at=self._now(),
+            observed_at=now,
             quality=quality,
             provenance=provenance,
         )

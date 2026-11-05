@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from data_contracts.envelope import (
     DEFAULT_MAX_AGE_S,
     ContextEnvelope,
+    ProvenanceRecord,
     StateCategory,
     build_observed,
 )
@@ -47,12 +48,10 @@ def reconcile(
     env = build_observed(event.device_id, event.message, "syslog", event.event_time, now, max_age_s)
     if event.event_time is None:
         env.quality.missing = True
-    env.provenance = {
-        "raw": event.raw,
-        "severity": event.severity,
-        "reconciler": "system1-event-reconciler-stub",
-        "reconciler_version": "0.1",
-    }
+    # The raw line is device text and does not ride in provenance.
+    env.provenance = [
+        ProvenanceRecord("syslog", "system1-event-reconciler-stub@0.1", event.event_time, now)
+    ]
     conflicts: tuple[str, ...] = ()
     if (
         current is not None

@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from data_contracts.envelope import ContextEnvelope, Quality, StateCategory
+from data_contracts.envelope import ContextEnvelope, ProvenanceRecord, Quality, StateCategory
 from ingestion.syslog_parser import SyslogEvent
 from state_reconciliation.event_reconciler import reconcile
 
@@ -61,10 +61,22 @@ def test_agreeing_config_no_conflict():
 
 def test_provenance():
     r = reconcile(ev(), None, now=NOW)
-    p = r.envelope.provenance
-    assert p["raw"] == "RAW LINE" and p["severity"] == 5
-    assert p["reconciler"] == "system1-event-reconciler-stub"
-    assert p["reconciler_version"] == "0.1"
+    assert r.envelope.provenance == [
+        ProvenanceRecord("syslog", "system1-event-reconciler-stub@0.1", NOW, NOW)]
+
+
+def test_provenance_holds_no_device_text():
+    import json
+    r = reconcile(ev(), None, now=NOW)
+    assert "RAW LINE" not in json.dumps(r.envelope.to_dict()["provenance"])
+    assert set(r.envelope.to_dict()["provenance"][0]) == {
+        "source_system", "reference", "observed_at", "retrieved_at"}
+
+
+def test_provenance_without_event_time_has_no_observation_time():
+    r = reconcile(ev(t=None), None, now=NOW)
+    assert r.envelope.provenance == [
+        ProvenanceRecord("syslog", "system1-event-reconciler-stub@0.1", None, NOW)]
 
 
 def test_never_configured():
