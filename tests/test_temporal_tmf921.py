@@ -96,10 +96,8 @@ def isolate(monkeypatch):
     monkeypatch.setattr("intent_management.tmf921_source.resolve_binding", lambda i, **kw: None)
     from broker_state.process import reset_store
     reset_store()
-    src._MARKS.clear()
     yield
     reset_store()
-    src._MARKS.clear()
 
 
 # ---------- behaviour ----------
@@ -242,7 +240,7 @@ def test_no_observation_is_pushed():
 
 def test_no_mark_is_written():
     run(join=make_join({("latency_ms", "last"): 42.0}))
-    assert src._MARKS == {}
+    assert src.TMF921_STORE.mark_count() == 0
 
 
 def test_fulfilment_not_updated():
@@ -379,7 +377,7 @@ def test_non_active_intent_is_inconclusive_before_telemetry(doc, status):
     assert out["verdict"] == "inconclusive" and out["reasons"] == ["intent not active"]
     assert out["intent_status"] == status
     assert join.calls == []
-    assert client.posts == [] and client.lists == 0 and not src._MARKS
+    assert client.posts == [] and client.lists == 0 and src.TMF921_STORE.mark_count() == 0
     assert "leak" not in str(out) and "script" not in str(out)
 
 
@@ -461,7 +459,7 @@ def graph_run(client=None, join=None, window="5m", **kw):
 
 def assert_untouched(client):
     assert client.gets == 0 and client.lists == 0 and client.posts == []
-    assert src._MARKS == {}
+    assert src.TMF921_STORE.mark_count() == 0
     assert src.TMF921_STORE.last_outcome(IID) is None
 
 

@@ -110,12 +110,9 @@ def no_live_graph(monkeypatch):
 def clean_store():
     from broker_state.process import reset_store
 
-    def reset():
-        reset_store()
-        src._MARKS.clear()
-    reset()
+    reset_store()
     yield
-    reset()
+    reset_store()
 
 
 def test_success_pushes_observed_at_as_obtained_at():
@@ -435,9 +432,59 @@ def test_equal_observation_different_value_rejected_same_value_allowed():
     assert run(c3, make_join(age=10, value=42.0))["verdict"] == "success"
 
 
+def test_marks_survive_a_restart_and_an_older_push_is_still_refused():
+    from broker_state.process import reset_store
+    run(FakeClient(post=[[rep("n", "2026-10-27T12:00:01Z")]]), make_join(age=10, value=42.0))
+    reset_store()  # what an API restart does
+    # same observation time, a different value
+    c = FakeClient(post=[[rep("m", "2026-10-27T12:00:02Z")]])
+    out = run(c, make_join(age=10, value=43.0))
+    assert out["verdict"] == "inconclusive"
+    assert out["reasons"] == ["observation not newer than last pushed: LatencyMetric"]
+    assert c.posts == [] and c.lists == 0
+    assert out["last_outcome"] == "success"
+    # an older observation
+    c2 = FakeClient(post=[[rep("p", "2026-10-27T12:00:02Z")]])
+    out = run(c2, make_join(age=20))
+    assert out["reasons"] == ["observation not newer than last pushed: LatencyMetric"]
+    assert c2.posts == []
+    # the same observation time and value is still pushed
+    c3 = FakeClient(post=[[rep("q", "2026-10-27T12:00:03Z")]])
+    assert run(c3, make_join(age=10, value=42.0))["verdict"] == "success"
+    assert len(c3.posts) == 1
+
+
+def test_a_failed_first_post_leaves_no_mark():
+    run(FakeClient(push_exc=Tmf921Error("x")), make_join(age=10))
+    assert src.TMF921_STORE.mark_count() == 0
+
+
+def test_one_marks_read_covers_all_of_the_intents_metrics(monkeypatch):
+    calls = []
+    real = src.TMF921_STORE.marks
+
+    def spy(intent_id, uris):
+        calls.append((intent_id, list(uris)))
+        return real(intent_id, uris)
+    monkeypatch.setattr(src.TMF921_STORE, "marks", spy)
+    c = FakeClient(intent_doc=intent((URI, 100), (URI2, 10)),
+                   post=[[rep("n", "2026-10-27T12:00:01Z"), rep("m", "2026-10-27T12:00:02Z")]])
+    run(c, bindings=BIND2)
+    assert calls == [(IID, [URI, URI2])]
+
+
+def test_an_unadvanced_mark_is_logged_and_the_assess_continues(monkeypatch, caplog):
+    monkeypatch.setattr(src.TMF921_STORE, "advance_mark", lambda *a, **k: False)
+    c = FakeClient(post=[[rep("n", "2026-10-27T12:00:01Z")]])
+    with caplog.at_level("WARNING"):
+        out = run(c)
+    assert out["verdict"] == "success" and len(c.posts) == 1
+    assert "high-water mark not advanced: LatencyMetric" in caplog.text
+
+
 def test_mark_not_updated_when_push_fails():
     run(FakeClient(push_exc=Tmf921Error("x")), make_join(age=10))
-    assert src._MARKS == {}
+    assert src.TMF921_STORE.mark_count() == 0
 
 
 def test_no_binding_and_invalid_binding_not_recorded(monkeypatch):
@@ -719,7 +766,7 @@ def test_second_push_failure_is_a_partial_push(exc):
     assert out["reasons"] == ["partial push: pushed LatencyMetric; failed JitterMetric"]
     assert len(c.posts) == 1 and c.posts[0][0] == URI  # nothing retried, nothing further
     assert c.lists == 1  # no polling after the failure
-    assert (IID, URI) in src._MARKS and (IID, URI2) not in src._MARKS
+    assert set(src.TMF921_STORE.marks(IID, [URI, URI2])) == {URI}
     assert "SECRET" not in str(out)
     assert src.TMF921_STORE.last_outcome(IID).value == "inconclusive"
 
@@ -741,7 +788,7 @@ def test_gap_reasons_are_fixed_strings_from_the_pinned_metric_names():
 def _nothing_happened(c, join):
     assert (c.gets, c.lists, c.posts) == (0, 0, [])
     assert join.seen == []
-    assert src._MARKS == {}
+    assert src.TMF921_STORE.mark_count() == 0
     assert src.TMF921_STORE.tracked_count() == 0
     assert src.TMF921_STORE.last_outcome(IID) is None
 

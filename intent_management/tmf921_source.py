@@ -9,9 +9,10 @@ never a success, and nothing is pushed unless every bound metric is pushable.
 Server text never reaches the result (fixed reason strings only).
 
 Known limitation: the server exposes no used-observation time, so pushes made
-by other clients (including future-dated ones) cannot be seen. The broker only
-keeps an in-memory per-(intent, metric) high-water mark of what IT pushed and
-refuses to push anything older (or equal with a different value).
+by other clients (including future-dated ones) cannot be seen. The broker keeps a
+durable per-(intent, metric) high-water mark of what IT pushed, in the state
+store. It survives restarts, and the broker refuses to push anything older (or
+equal with a different value). One API worker is the supported setup (D-02).
 """
 import logging
 import math
@@ -54,7 +55,6 @@ FUTURE_SKEW = timedelta(seconds=5)
 TMF921_STORE = IntentStore()
 _STATE_LOCK = threading.Lock()
 _INTENT_LOCKS: dict[str, threading.Lock] = {}
-_MARKS: dict[tuple[str, str], tuple[datetime, float]] = {}
 _TS = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)")
 
 DEFAULT_MAX_ENTITIES = 50
@@ -293,10 +293,10 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
     if problems:  # all-or-nothing: never push a partial set
         return done(Outcome.INCONCLUSIVE, problems, envs=all_envs)
 
-    with _STATE_LOCK:
-        regress = [u for u in uris if (m := _MARKS.get((intent_id, u))) is not None
-                   and not (envs[u].observed_at > m[0]
-                            or (envs[u].observed_at == m[0] and envs[u].value == m[1]))]
+    marks = TMF921_STORE.marks(intent_id, uris)  # one read; a store failure leaves before any post
+    regress = [u for u in uris if (m := marks.get(u)) is not None
+               and not (envs[u].observed_at > m[0]
+                        or (envs[u].observed_at == m[0] and envs[u].value == m[1]))]
     if regress:
         return done(Outcome.INCONCLUSIVE,
                     [f"observation not newer than last pushed: {_short_name(u)}" for u in regress],
@@ -323,8 +323,9 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
                             ["partial push: pushed " + ", ".join(pushed)
                              + "; failed " + _short_name(u)],
                             envs=all_envs)
-            with _STATE_LOCK:
-                _MARKS[(intent_id, u)] = (envs[u].observed_at, envs[u].value)
+            # Only after the post succeeded: a failed post leaves no mark.
+            if not TMF921_STORE.advance_mark(intent_id, u, envs[u].observed_at, envs[u].value):
+                log.warning("high-water mark not advanced: %s", _short_name(u))
             pushed.append(_short_name(u))
         report = None
         waited = 0.0

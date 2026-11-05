@@ -111,7 +111,7 @@ def _upstreams(monkeypatch, graph):
         yield seen
         push.assert_not_called()
         fulfilment.assert_not_called()
-        assert tmf921_source._MARKS == {}
+        assert tmf921_source.TMF921_STORE.mark_count() == 0
 
 
 @pytest.fixture
@@ -567,7 +567,7 @@ def test_a_request_never_pushes_marks_or_records(olt):
         assert assure(body).status_code == 200
     olt.push.assert_not_called()
     olt.fulfilment.assert_not_called()
-    assert tmf921_source._MARKS == {}
+    assert tmf921_source.TMF921_STORE.mark_count() == 0
     assert len(olt.fx.updates()) == 1  # the binding written by the test, nothing after it
 
 
@@ -608,7 +608,7 @@ def test_verdict_success_is_the_read_only_assess_on_the_same_reads_as_the_eligib
     assert len([q for q in olt.queries() if "ServiceBinding" in q]) == 1  # one fluent snapshot
     olt.push.assert_not_called()
     olt.fulfilment.assert_not_called()
-    assert tmf921_source._MARKS == {}
+    assert tmf921_source.TMF921_STORE.mark_count() == 0
 
 
 def test_verdict_of_a_past_request_makes_no_tmf921_call(olt):
