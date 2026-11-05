@@ -15,7 +15,8 @@ The design principle (spec: `docs/Architecture/AI_Ready_Network_Operations_Integ
   or acts.** It joins declared state (an OWL/RDFS graph in Apache Jena Fuseki) with
   observed state (telemetry in VictoriaMetrics) and wraps each result in a
   `ContextEnvelope` that carries quality labels (`stale`, `missing`, `conflicts`) and
-  provenance.
+  provenance (a list of records: source system, reference, observation time and
+  retrieval time).
 - **The LLM is not the judge.** A deterministic assurance layer returns
   `success`, `failure` or `inconclusive`. Stale, missing, conflicted, changed-goal or
   unmappable evidence is never `success`. The LLM only explains the verdict.
@@ -39,7 +40,7 @@ structure below by a strangler migration.
 |---|---|
 | Context envelope, resolvers (SPARQL and PromQL), pruning, freshness handling | Built, unit-tested |
 | Deterministic outcome assurance (`success`/`failure`/`inconclusive`) | Built, unit-tested |
-| REST API (`/context/metric`, `/context/assess` and the three operations queries) | Built, unit-tested. Every `/context/*` route needs a bearer token with a scope (see [Authentication](#authentication)); `GET /health` is public. |
+| REST API (`/context/metric`, `/context/assess`, the three operations queries and `POST /context/request`) | Built, unit-tested. Every `/context/*` route needs a bearer token with a scope (see [Authentication](#authentication)); `GET /health` is public. `POST /context/request` is the context request and response contract (see [Context requests](#context-requests)); it has not yet been run against the live stack. |
 | Operations queries, no intent needed (`metric-history`, `interfaces-nonzero`, `neighbours`; REST, MCP and agent tools) | Built, unit-tested, run live against Fuseki, VictoriaMetrics and LM Studio |
 | Agent harness (Claude tool-calling loop, LM Studio fallback, `broker.py` CLI) | Built, tested with mocks |
 | MCP server | Built and unit-tested, **not mounted** or served by anything |
@@ -49,8 +50,8 @@ structure below by a strangler migration.
 | LQM, System 1 / investigation models, state reconciliation, syslog parsing | Stubs |
 | Redpanda, Qdrant, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 1211 tests passing and 23 skipped (`pytest`): 15 live TMF921 tests, skipped
-unless `TMF921_LIVE=1`, and 8 real-engine Fuseki parity tests, skipped unless
+The test suite has 1642 tests passing and 26 skipped (`pytest`): 15 live TMF921 tests, skipped
+unless `TMF921_LIVE=1`, and 11 real-engine Fuseki parity tests, skipped unless
 `FUSEKI_PARITY_URL` is set (see [Running the tests](#running-the-tests)). The work is on the `fullnetwork` branch
 (pushed to GitHub) and has not been reviewed by anyone else.
 
@@ -545,11 +546,22 @@ Every `/context/*` route needs `Authorization: Bearer <token>`. `/docs`, `/redoc
   (`BROKER_JWT_AUDIENCE`, default `context-broker`), and refuses a token that lives
   longer than 3600 s.
 - Scopes: `context:read` for `GET /context/metric`, `/context/metric-history`,
-  `/context/interfaces-nonzero` and `/context/neighbours`; `context:assess` for
-  `POST /context/assess`, because a current-moment assess pushes observations to the
-  TMF921 server.
+  `/context/interfaces-nonzero`, `/context/neighbours` and `POST /context/request`;
+  `context:assess` for `POST /context/assess`, because a current-moment assess pushes
+  observations to the TMF921 server. A context request that names an `intent_id` needs
+  `context:assess` as well as `context:read`, although it never pushes.
 - `401` means missing or invalid credentials; `403` means a valid token without the
-  scope. Both bodies are fixed strings.
+  scope. Both bodies are fixed strings. A token whose `sub` is empty, longer than 128
+  characters or not printable is `401` on every `/context/*` route: the `sub` is the
+  requester of a context request and part of its identity, so it must name someone.
+- **Authority claim.** `POST /context/request` also needs a signed `authority` claim that
+  says what the caller may ask about: `entities` (device names written exactly, or `*`
+  for all; no patterns), `purposes` (`assurance`, `diagnosis`, `reporting`) and
+  `classes` (`topology`, `goals`, `observations`). The other routes ignore the claim. A
+  token with the scope but no usable claim is `403 {"detail": "authority claims required"}`
+  on that route only, so a token minted before this claim existed keeps working on
+  every other route. The broker stays stateless: it verifies the signature and reads the
+  claim, with no list of its own to maintain.
 - There is no revocation list. Revoke by short expiry or by rotating the key pair.
 - The API holds only the public key. With no key or issuer configured it still starts,
   `/health` answers, and every `/context/*` call is `401`.
@@ -583,6 +595,20 @@ curl -X POST localhost:8080/context/assess -H "Authorization: Bearer $TOKEN" \
 ```
 
 `mint_token.py` refuses a key inside the repository or readable by group or others.
+
+To mint a token that may make context requests, add the authority claim with `--entity`,
+`--purpose` and `--class` (each repeatable). Give all three or none: a partial set is
+refused with exit status 2, and so is an `--entity` that is not `*` or a device name of
+letters, digits, `_`, `-` and `/` (quote the `*` in the shell). The claim is signed with the
+token, so changing it means minting a new token.
+
+```bash
+TOKEN=$(python scripts/mint_token.py --key ~/keys/broker_jwt_private.pem --sub alice \
+  --scope context:read --scope context:assess \
+  --entity edge-sw-1 --purpose assurance --purpose diagnosis \
+  --class topology --class goals --class observations \
+  --issuer "$BROKER_JWT_ISSUER" --ttl 900)
+```
 
 The agent command line (`broker.py`) and the MCP server call broker functions in
 process and present no token; they run with the operator's local trust. A served MCP
@@ -793,6 +819,187 @@ current one.
   sample in the period the result is `inconclusive` ("missing observation"), never `success`.
 - A current assess (neither argument) judges the latest sample in the window. Use
   `mode: "within"` for an operator-aware worst case over the whole window.
+
+## Context requests
+
+`POST /context/request` is the route for a caller that can say why it wants context and
+under what authority. The caller names a purpose, a scope (a device, optionally one of
+its interfaces), the context classes it wants and, for assurance questions, an intent.
+The broker answers with a situation identity, an eligibility result per class, an expiry,
+the applicable goal, placement and link values, observation envelopes with provenance
+records, and a Context Graph of the nearby devices and interfaces. It resolves, joins and
+delivers; it never decides or acts. The five older routes, the MCP server and the agent
+tool are unchanged and still work as before; what becomes of the older routes is not
+decided here.
+
+### The request
+
+The body is strict: an unknown field is refused, and so is a field of the wrong type
+(`"max_depth": "2"` is not a number). There is no `requester` field. The requester is the
+token's `sub`.
+
+| Field | Meaning |
+|---|---|
+| `purpose` | One of `assurance`, `diagnosis`, `reporting`. |
+| `scope` | `{"device": ..., "interface": ...}`; `interface` is optional. Letters, digits, `_`, `-` and `/`, at most 128 characters each. |
+| `classes` | One or more of `topology`, `goals`, `observations`, each at most once. |
+| `intent_id` | The TMF921 intent whose goals and placements are wanted. Needed with `goals` and refused without it. |
+| `max_depth`, `relationship_types` | The traversal. `max_depth` is 0 to 3; `relationship_types` is a non-empty set of `has_interface` and `connected_to`. Both are needed with `topology` and refused without it. |
+| `as_of`, `known_at` | Optional offsets such as `10m`, as in [Asking about the past](#asking-about-the-past), limited by the same retention period. |
+| `freshness` | Optional, `1s` to `300s`. It can only tighten the 300 s default, never loosen it. |
+
+The coherence rules, in one place: `topology` goes with `max_depth` and
+`relationship_types` and nothing else does; `goals` goes with `intent_id` and nothing else
+does; `observations` is only valid together with `goals`, because the series to read come
+from the intent's placements. A request that breaks a rule is refused before any
+upstream call.
+
+The example below is a made-up device and intent. Mint a token as in
+[Authentication](#authentication) (the example token covers this device, purpose and
+classes), then send it:
+
+<!-- example: POST /context/request -->
+```json
+{
+  "purpose": "assurance",
+  "scope": {"device": "edge-sw-1", "interface": "uplink0"},
+  "intent_id": "example-intent-1",
+  "classes": ["topology", "goals", "observations"],
+  "max_depth": 2,
+  "relationship_types": ["has_interface", "connected_to"],
+  "freshness": "2m"
+}
+```
+
+```bash
+curl -X POST localhost:8080/context/request -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"purpose":"assurance",
+  "scope":{"device":"edge-sw-1","interface":"uplink0"},"intent_id":"example-intent-1",
+  "classes":["topology","goals","observations"],"max_depth":2,
+  "relationship_types":["has_interface","connected_to"],"freshness":"2m"}'
+```
+
+### Refusals
+
+Every refusal below happens before the first call to Fuseki, VictoriaMetrics or the TMF921
+server. The bodies are fixed strings.
+
+| Status | Detail | When |
+|---|---|---|
+| 401 | `authentication required` | No token, an invalid token, or a `sub` that is empty, overlong or not printable. |
+| 403 | `insufficient scope` | No `context:read`, or an `intent_id` without `context:assess`. |
+| 403 | `authority claims required` | A read token without a usable `authority` claim. |
+| 403 | `outside authority scope: entity` | The scope device is not in the token's `entities`. |
+| 403 | `outside authority scope: purpose` | The purpose is not in the token's `purposes`. |
+| 403 | `outside authority scope: class` | A requested class is not in the token's `classes`. |
+| 422 | the validation body | Unknown field, wrong type, unknown purpose, class or relationship type, `max_depth` above 3, an incoherent combination, or any query parameter. |
+| 400 | `as_of is further back than the retention period` (or the `known_at` form) | An offset beyond `BROKER_RETENTION_PERIOD`. |
+| 400 | `freshness must be from 1 s to 300 s` | A freshness above the default limit (or `0s`). A value that is not digits and one of `s`, `m`, `h`, `d` is a 422. |
+| 502 | `upstream data store unavailable` | Fuseki or VictoriaMetrics could not be reached after the checks passed. |
+
+The scope and the authority claim are checked before the body is validated, so a caller
+without them learns nothing about the body. Authority is checked in this order: entity,
+purpose, class.
+
+### The response
+
+An abridged answer to the request above (times shortened, one metric shown):
+
+```json
+{
+  "situation": {"id": "sit-<32 hex characters>", "requester": "alice", "purpose": "assurance",
+                "scope": {"device": "edge-sw-1", "interface": "uplink0"},
+                "intent_id": "example-intent-1", "classes": ["goals", "observations", "topology"],
+                "max_depth": 2, "relationship_types": ["connected_to", "has_interface"],
+                "valid_at": "2026-11-06T12:00:00+00:00", "known_at": null,
+                "retrieved_at": "2026-11-06T12:00:00+00:00", "historical": false},
+  "eligibility": {"result": "eligible", "reasons": [],
+                  "classes": {"topology": {"result": "eligible", "reasons": []},
+                              "goals": {"result": "eligible", "reasons": []},
+                              "observations": {"result": "eligible", "reasons": []}}},
+  "expires_at": "2026-11-06T12:01:30+00:00", "expiry_basis": "oldest_observation",
+  "fluent_values": [{"class": "goals", "kind": "goal", "subject": "LatencyMetric", "value": 100.0,
+                     "in_force": true, "valid_from": "...", "valid_to": null, "recorded_at": "...",
+                     "superseded_at": null,
+                     "provenance": {"source_system": "fuseki", "reference": "<fluent IRI>",
+                                    "observed_at": "...", "retrieved_at": "..."}}],
+  "envelopes": [{"metric": "LatencyMetric", "node": "edge-sw-1/uplink0", "value": 50.0,
+                 "observed_at": "2026-11-06T11:59:30+00:00",
+                 "quality": {"stale": false, "missing": false, "conflicts": []},
+                 "provenance": [{"source_system": "victoriametrics",
+                                 "reference": "interface_metrics_latency_ms",
+                                 "observed_at": "2026-11-06T11:59:30+00:00",
+                                 "retrieved_at": "2026-11-06T12:00:00+00:00"}]}],
+  "graph": {"nodes": [{"id": "edge-sw-1/uplink0", "type": "interface", "graph_ref": "...", "depth": 0}],
+            "edges": [], "limits": {"requested_depth": 2, "max_depth": 3, "node_cap": 50,
+                                    "relationship_types": ["connected_to", "has_interface"],
+                                    "cut_by": []}},
+  "verdict": {"verdict": "success", "reasons": ["..."]}
+}
+```
+
+- **Situation.** `situation.id` identifies the question. It is `sit-` followed by 32 hex
+  characters of a version-1 hash over the requester, purpose, scope, intent, the valid
+  instant (to the second), the knowledge instant, the sorted classes, `max_depth` and the
+  sorted relationship types. The same question asked at the same instant gets the same id.
+  A different instant is a different situation, so a repeat call that uses an offset
+  such as `10m` gets a new id each second. `valid_at` and `known_at` are those resolved
+  instants; `historical` is true when `as_of` or `known_at` was given.
+- **Eligibility.** One result per requested class (`topology`, `goals`, `observations`),
+  each `eligible`, `ineligible` or `gap`, with fixed-string reasons that name only pinned
+  metric names. `gap` means the evidence is absent (no goal, placement or observation to
+  judge); `ineligible` means evidence is present but unfit (stale, conflicting, a goal
+  that changed inside the window, ambiguous or malformed); `eligible` means every item
+  asked for is fresh, finite, single-valued and unchanged. Any single problem beats
+  `eligible`, and a class that was not requested is not judged, so a topology-only request
+  is not made ineligible by a stale metric. The overall result is the worst of the
+  requested classes. A sample that is not a finite number is a gap, never eligible.
+  Eligibility is a fitness label for the evidence. **It grants no execution authority**:
+  the action-readiness check is a separate component, and nothing here lets a caller act.
+  It is also kept apart from the verdict: it never feeds it, and the two can disagree
+  (for example a goal that changed since it was pinned: the goals class can be eligible
+  while the verdict is `inconclusive`).
+- **Expiry.** `expires_at` is when the answer stops being reusable as current context,
+  and `expiry_basis` says why: `oldest_observation` (the oldest sample time plus the
+  freshness limit), `configured_state` (only topology or fluent values were found; the
+  retrieval time plus the limit, because the time a fact was recorded is not its age),
+  `no_evidence` (nothing was found; it expires at retrieval) and `historical_request`
+  (`as_of` or `known_at` was given; a past answer is not reusable as current context, so
+  it expires at retrieval). An expiry that is already in the past is reported as it is.
+- **Fluent values.** The goals, placements and links applicable to the question, each
+  with its valid interval (`valid_from`, `valid_to`) and recorded interval (`recorded_at`,
+  `superseded_at`), whether it is `in_force` at the valid instant, and one provenance
+  record (source `fuseki`, the fluent IRI as reference). A placement is a node id; a link
+  is the two node ids it joins.
+- **Envelopes.** One observation envelope per placed metric on a device the token covers,
+  with the metric name, the Context Graph node id and the usual quality labels. The
+  series is read over the last 10 minutes so that a sample that is too old shows as stale (ineligible) rather than as
+  missing (a gap). Each envelope carries a list of provenance records: source system,
+  reference (a pinned series name, never server text), observation time and retrieval
+  time.
+- **Context Graph.** Nodes and edges, not a wire format: JSON-LD and NGSI-LD views are
+  later work. A device node id is the device name (`edge-sw-1`) and an interface node id
+  is `device/interface` (`edge-sw-1/uplink0`); an interface node also carries `graph_ref`,
+  the local name of its graph IRI. Edges are `has_interface` (device to interface) and
+  `connected_to` (interface to interface, naming the link and its fluent). Depth counts
+  hops from the scope: from a device, its interface is 1, the peer interface 2 and the
+  peer device 3. `limits` shows the depth asked for, the hard maximum (3), the node cap
+  (50) and `cut_by`, the list of limits that actually cut the result: `depth`,
+  `relationship_types`, `node_cap` or `authority`. Devices that the token's `entities`
+  do not cover are left out of the graph, their placements are not delivered, no
+  telemetry is read for them, and `cut_by` says `authority`. Envelopes for every
+  returned node are kept; unhealthy ones are never dropped in favour of healthy ones.
+  Two interfaces that would get the same node id, an ambiguous scope, two conflicting
+  link records or a malformed topology record make the topology class ineligible; a
+  scope that is not in the topology is a gap.
+- **Verdict.** Present only when the request names an `intent_id` with both `goals` and
+  `observations`; otherwise it is `null`. It comes from the read-only TMF921 assess
+  (`success`, `failure` or `inconclusive`), judged on the same goal snapshot and the same
+  telemetry reads as the eligibility. It is `null` also when a placement of the intent
+  lies on a device the token does not cover. A current request makes one read-only `GET` to
+  the TMF921 server (the intent's status and live goal); a past request makes none.
+  A context request never pushes an observation, writes a high-water mark or records an
+  outcome.
 
 ## Using an external TMF921 intent server
 
