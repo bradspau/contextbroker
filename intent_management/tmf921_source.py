@@ -48,10 +48,9 @@ from outcome_assurance.tmf921_report import _short_name, interpret_report
 
 log = logging.getLogger(__name__)
 
-MAX_TRACKED_OUTCOMES = 1024
 FUTURE_SKEW = timedelta(seconds=5)
 
-# Last outcome the broker reported per TMF921 intent (in memory).
+# Last outcome the broker reported per TMF921 intent (durable, in the state store).
 TMF921_STORE = IntentStore()
 _STATE_LOCK = threading.Lock()
 _INTENT_LOCKS: dict[str, threading.Lock] = {}
@@ -71,11 +70,8 @@ def _intent_lock(intent_id: str) -> threading.Lock:
 
 
 def _record(intent_id: str, outcome: Outcome) -> None:
-    with _STATE_LOCK:
-        if (TMF921_STORE.last_outcome(intent_id) is None
-                and TMF921_STORE.tracked_count() >= MAX_TRACKED_OUTCOMES):
-            return
-        TMF921_STORE.fulfilment_update(intent_id, outcome)
+    # The cap and its eviction signal live in the state store (D-11, D-12).
+    TMF921_STORE.fulfilment_update(intent_id, outcome)
 
 
 def _parse_ts(value) -> datetime | None:

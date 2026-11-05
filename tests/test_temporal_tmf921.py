@@ -94,10 +94,11 @@ def run(client=None, join=None, bindings=B_LAT, mmap=MMAP, as_of="10m", mode=Non
 @pytest.fixture(autouse=True)
 def isolate(monkeypatch):
     monkeypatch.setattr("intent_management.tmf921_source.resolve_binding", lambda i, **kw: None)
-    src.TMF921_STORE._outcomes.clear()
+    from broker_state.process import reset_store
+    reset_store()
     src._MARKS.clear()
     yield
-    src.TMF921_STORE._outcomes.clear()
+    reset_store()
     src._MARKS.clear()
 
 

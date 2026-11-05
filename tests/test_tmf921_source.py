@@ -108,8 +108,10 @@ def no_live_graph(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def clean_store():
+    from broker_state.process import reset_store
+
     def reset():
-        src.TMF921_STORE._outcomes.clear()
+        reset_store()
         src._MARKS.clear()
     reset()
     yield
@@ -447,12 +449,34 @@ def test_no_binding_and_invalid_binding_not_recorded(monkeypatch):
     assert src.TMF921_STORE.tracked_count() == 0
 
 
-def test_tracked_outcomes_are_capped(monkeypatch):
+def test_full_outcome_table_evicts_the_oldest_and_says_so(monkeypatch, caplog):
+    from broker_state.process import reset_store
+    from outcome_assurance.evaluate import Outcome
+    monkeypatch.setenv("BROKER_OUTCOME_CAP", "1")
+    reset_store()
     run(FakeClient(post=[[rep("n", "2026-10-27T12:00:01Z")]]))
-    monkeypatch.setattr(src, "MAX_TRACKED_OUTCOMES", 1)
+    assert src.TMF921_STORE.last_outcome(IID) is Outcome.SUCCESS
     b = {"other": IntentBinding("other", {URI: ("olt1", "pon0/1")}, {URI: 100.0})}
-    run(FakeClient(), bindings=b, iid="other")
+    with caplog.at_level("INFO"):
+        run(FakeClient(), bindings=b, iid="other")
     assert src.TMF921_STORE.tracked_count() == 1
+    assert src.TMF921_STORE.last_outcome("other") is not None
+    assert src.TMF921_STORE.last_outcome(IID) is None
+    lines = [r.getMessage() for r in caplog.records if "state eviction" in r.getMessage()]
+    assert lines == ["state eviction: table=outcomes evicted=1"]
+    assert "other" not in lines[0] and IID not in lines[0]
+
+
+def test_last_outcome_is_reported_after_the_store_is_reopened():
+    from broker_state.process import reset_store
+    from outcome_assurance.evaluate import Outcome
+    run(FakeClient(post=[[rep("n", "2026-10-27T12:00:01Z")]]), make_join(age=10))
+    assert src.TMF921_STORE.last_outcome(IID) is Outcome.SUCCESS
+    reset_store()  # what an API restart does
+    c = FakeClient(post=[[rep("m", "2026-10-27T12:00:02Z")]])
+    out = run(c, make_join(age=5))
+    assert out["last_outcome"] == "success"
+    assert out["verdict"] == "success"
 
 
 def test_unknown_status_for_no_binding_and_drift():
