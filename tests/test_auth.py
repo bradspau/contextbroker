@@ -70,6 +70,9 @@ GET_ROUTES = {
     "/context/interfaces-nonzero": {"device": "r1", "metric_type": "input_drops", "time_window": "1h"},
     "/context/neighbours": NEIGHBOURS,
 }
+# A route with a path parameter is called at a concrete, well-formed path.
+SITUATION_ROUTE = "/context/situation/{situation_id}"
+PATH_ROUTES = {SITUATION_ROUTE: "/context/situation/sit-" + "0" * 32}
 
 
 def _context_routes():
@@ -85,6 +88,8 @@ def _context_routes():
 def _call(method, path, headers=None, c=client):
     if method == "POST":
         return c.post(path, json=POST_BODIES[path], headers=headers)
+    if path in PATH_ROUTES:
+        return c.get(PATH_ROUTES[path], headers=headers)
     return c.get(path, params=GET_ROUTES[path], headers=headers)
 
 
@@ -142,6 +147,7 @@ def _patched_handlers():
         patch("broker_engine.main.operations.interface_neighbours", return_value={"ok": 1}),
         patch("broker_engine.main.assess", return_value={"verdict": "success"}),
         patch("broker_engine.main.context_request.handle", return_value=_minimal_response()),
+        patch("broker_engine.main.context_request.fetch_situation", return_value=None),
     )
 
 
@@ -170,9 +176,10 @@ def _assert_denied(r):
 
 # --- route inventory: no route is reachable without a token ---
 
-def test_route_inventory_covers_the_six_context_routes():
+def test_route_inventory_covers_the_seven_context_routes():
     assert sorted(_context_routes()) == sorted(
-        [("GET", p) for p in GET_ROUTES] + [("POST", p) for p in POST_BODIES])
+        [("GET", p) for p in GET_ROUTES] + [("GET", SITUATION_ROUTE)]
+        + [("POST", p) for p in POST_BODIES])
 
 
 @pytest.mark.parametrize("method,path", _context_routes())
@@ -372,6 +379,20 @@ def test_read_token_without_authority_is_403_with_no_upstream_call(handlers, no_
 
 def test_assess_only_token_with_authority_cannot_request_context(handlers, no_upstream):
     r = _call("POST", "/context/request", _with_authority("context:assess"))
+    assert r.status_code == 403 and r.json() == SCOPE_DENIED
+    for mocked in no_upstream:
+        mocked.assert_not_called()
+
+
+def test_situation_fetch_without_authority_is_403_with_no_upstream_call(handlers, no_upstream):
+    r = _call("GET", SITUATION_ROUTE, auth_headers("context:read"))
+    assert r.status_code == 403 and r.json() == {"detail": "authority claims required"}
+    for mocked in no_upstream:
+        mocked.assert_not_called()
+
+
+def test_situation_fetch_with_an_assess_only_token_is_403_with_no_upstream_call(handlers, no_upstream):
+    r = _call("GET", SITUATION_ROUTE, _with_authority("context:assess"))
     assert r.status_code == 403 and r.json() == SCOPE_DENIED
     for mocked in no_upstream:
         mocked.assert_not_called()

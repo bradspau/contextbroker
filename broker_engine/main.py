@@ -19,8 +19,10 @@ from broker_engine.health import probe_upstreams
 from broker_engine import context_request, operations
 from broker_engine.pruner import prune  # noqa: F401
 from broker_engine.validation import ClientInputError, max_as_of_seconds
+from broker_state.store import STATE_UNAVAILABLE, StateUnavailable
 from broker_engine.tsdb_joiner import join_observed_metric
 from data_contracts.context_contract import ContextRequest, ContextResponse
+from data_contracts.situation_record import SituationRecord
 from outcome_assurance.evaluate import evaluate_intent  # noqa: F401
 
 log = logging.getLogger(__name__)
@@ -127,6 +129,12 @@ async def _refused(request: Request, exc: context_request.Refused):
     return JSONResponse(status_code=403, content={"detail": str(exc)})
 
 
+@app.exception_handler(StateUnavailable)
+async def _state_unavailable(request: Request, exc: StateUnavailable):
+    # The store has already logged the exception class. The body is fixed text, never the cause.
+    return JSONResponse(status_code=503, content={"detail": STATE_UNAVAILABLE})
+
+
 @app.get("/health", dependencies=[_allow_only()])
 def get_health() -> JSONResponse:
     """Public: whether each upstream answers, as fixed strings. Outside /context/, so no token."""
@@ -174,6 +182,20 @@ def post_context_request(body: ContextRequest, request: Request) -> ContextRespo
     if request.query_params:
         raise HTTPException(422, "Undeclared query parameter(s)")
     return context_request.handle(body, request.state.caller)
+
+
+@app.get("/context/situation/{situation_id}", response_model=SituationRecord,
+         dependencies=[need(SCOPE_READ), need_authority_claims(), _allow_only()])
+def get_situation(situation_id: str, request: Request) -> SituationRecord:
+    """Fetch a recorded situation for the caller who asked for it: the request parameters, the evidence
+    references, the eligibility and the expiry. It needs context:read and authority claims covering the
+    stored scope, and context:assess when the situation names an intent. `expired` is true from
+    `expires_at` on and the record is never current after that. An unknown, malformed or someone else's
+    id is the same 404. It reads only the state store and never refreshes the record."""
+    found = context_request.fetch_situation(situation_id, request.state.caller)
+    if found is None:
+        raise HTTPException(404, context_request.SITUATION_NOT_FOUND)
+    return found
 
 
 @app.get("/context/metric-history",

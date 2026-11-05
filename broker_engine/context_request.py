@@ -43,7 +43,14 @@ from data_contracts.context_contract import (
     resolve_times,
     situation_id,
 )
+from broker_state.process import get_store
 from data_contracts.metric_map import load_metric_map
+from data_contracts.situation_record import (
+    SITUATION_ID_PATTERN,
+    SituationRecord,
+    StoredSituation,
+    stored_situation,
+)
 from intent_management.tmf921_source import assess_tmf921_as_of
 from outcome_assurance.tmf921_report import _short_name
 
@@ -53,6 +60,7 @@ OBSERVATION_LOOKBACK = "10m"
 
 AUTHORITY_REQUIRED = "authority claims required"
 INSUFFICIENT_SCOPE = "insufficient scope"
+SITUATION_NOT_FOUND = "situation not found"
 
 
 class Refused(Exception):
@@ -244,7 +252,7 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
         configured_evidence=bool((graph is not None and graph.nodes) or fluent_values),
         limit_s=times.limit_s, historical=times.historical)
     fluent_values.sort(key=lambda v: (v.context_class, v.kind, v.subject, v.valid_from or ""))
-    return ContextResponse(
+    response = ContextResponse(
         situation=Situation(
             id=identity, requester=caller.requester, purpose=body.purpose, scope=body.scope,
             intent_id=body.intent_id, classes=classes, max_depth=body.max_depth,
@@ -254,3 +262,28 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
                              if name in eligibility}),
         expires_at=_iso(expires_at), expiry_basis=basis, fluent_values=fluent_values,
         envelopes=envelopes, graph=graph, verdict=verdict)
+    # One row per answered request, written before the answer leaves (D-05). Every refusal and every
+    # upstream failure happened above this line, so none of them records anything.
+    get_store().record_situation(
+        identity, stored_situation(response).model_dump_json(), expires_at=expires_at, recorded_at=now)
+    return response
+
+
+def fetch_situation(situation_id: str, caller: Caller, *, now: datetime | None = None
+                    ) -> SituationRecord | None:
+    """A recorded situation for its original requester, or None (the route answers 404).
+
+    A malformed id, an unknown id, an id past its retention and an id someone else recorded are all
+    None, so none of them can be told from another. It reads only the state store and writes nothing."""
+    if SITUATION_ID_PATTERN.match(situation_id) is None:
+        return None
+    now = (now if now is not None else _utcnow()).astimezone(timezone.utc)
+    row = get_store().get_situation(situation_id, now=now)
+    if row is None:
+        return None
+    stored = StoredSituation.model_validate_json(row.body)
+    if stored.situation.requester != caller.requester:
+        return None
+    return SituationRecord(
+        **stored.model_dump(), expired=now >= row.expires_at, first_recorded_at=_iso(row.first_recorded_at),
+        last_recorded_at=_iso(row.last_recorded_at), repeat_count=row.repeat_count)
