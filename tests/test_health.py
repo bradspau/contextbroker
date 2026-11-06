@@ -1,4 +1,4 @@
-"""OPS-01: GET /health reports Fuseki, VictoriaMetrics, TMF921 and the state store with fixed strings, no credentials."""
+"""OPS-01: GET /health reports Fuseki, VictoriaMetrics, TMF921, Qdrant and the state store with fixed strings, no credentials."""
 import logging
 import time
 from datetime import datetime, timezone
@@ -15,7 +15,7 @@ from broker_state.store import NewEvent, StateStore, StateUnavailable
 ZERO_EVENTS = {"duplicates": 0, "unmapped": 0,
                "quarantined": {"no priority": 0, "not text": 0, "too long": 0, "unparsable header": 0}}
 OK_BODY = {"status": "ok", "fuseki": "answering", "victoriametrics": "answering", "tmf921": "answering",
-           "state": "answering",
+           "qdrant": "answering", "state": "answering",
            "evictions": {"outcomes": 0, "marks": 0, "situations": 0, "events": 0},
            "events": ZERO_EVENTS}
 CANARY = "CANARY http://10.9.9.9:3030"
@@ -37,6 +37,8 @@ def _resp(status=200):
 
 
 def _which(url):
+    if url.endswith("/readyz"):
+        return "qdrant"
     if "/$/ping" in url:
         return "fuseki"
     if ":8428" in url:
@@ -59,15 +61,15 @@ def _dispatch(overrides=None, calls=None):
     return get
 
 
-def test_all_answering_is_200_with_exactly_seven_keys():
+def test_all_answering_is_200_with_exactly_eight_keys():
     with patch("broker_engine.health.requests.get", side_effect=_dispatch()):
         r = client.get("/health")
     assert r.status_code == 200
     assert r.json() == OK_BODY
-    assert len(r.json()) == 7
+    assert len(r.json()) == 8
 
 
-@pytest.mark.parametrize("name", ["fuseki", "victoriametrics", "tmf921"])
+@pytest.mark.parametrize("name", ["fuseki", "victoriametrics", "tmf921", "qdrant"])
 @pytest.mark.parametrize("fault", [
     requests.ConnectionError(CANARY),
     requests.Timeout(CANARY),
@@ -88,12 +90,13 @@ def test_probe_urls_timeout_and_redirects():
     calls = []
     with patch("broker_engine.health.requests.get", side_effect=_dispatch(calls=calls)):
         client.get("/health")
-    assert len(calls) == 3
+    assert len(calls) == 4
     by_name = {_which(url): (url, kw) for url, kw in calls}
-    assert set(by_name) == {"fuseki", "victoriametrics", "tmf921"}
+    assert set(by_name) == {"fuseki", "victoriametrics", "tmf921", "qdrant"}
     assert by_name["fuseki"][0].endswith("/$/ping")
     assert by_name["victoriametrics"][0].endswith("/health")
     assert by_name["tmf921"][0].endswith("/health")
+    assert by_name["qdrant"][0].endswith("/readyz")
     for _, kw in by_name.values():
         assert kw["timeout"] == 2
         assert kw["allow_redirects"] is False
@@ -101,6 +104,38 @@ def test_probe_urls_timeout_and_redirects():
     assert "/query" not in by_name["fuseki"][0]
     assert "/api/v1" not in by_name["victoriametrics"][0]
     assert "/tmf-api" not in by_name["tmf921"][0]
+
+
+def test_qdrant_probe_is_the_origin_plus_readyz_with_no_credential(monkeypatch):
+    monkeypatch.setenv("BROKER_QDRANT_URL", "http://10.9.9.9:6333/some/path")
+    monkeypatch.setenv("QDRANT_API_KEY", "keycanary123")
+    calls = []
+    with patch("broker_engine.health.requests.get", side_effect=_dispatch(calls=calls)):
+        client.get("/health")
+    qdrant = [(url, kw) for url, kw in calls if _which(url) == "qdrant"]
+    assert len(qdrant) == 1
+    url, kw = qdrant[0]
+    assert url == "http://10.9.9.9:6333/readyz"
+    assert kw.get("auth") is None
+    assert kw["timeout"] == 2 and kw["allow_redirects"] is False
+    assert "keycanary123" not in repr(kw)
+
+
+@pytest.mark.parametrize("bad", ["ftp://x", "http://u:p@h:6333", "http://h:6333?x=1", "http://", "not a url"])
+def test_a_malformed_qdrant_url_is_not_answering_never_a_crash(bad, monkeypatch, caplog):
+    monkeypatch.setenv("BROKER_QDRANT_URL", bad)
+    calls = []
+    with caplog.at_level(logging.WARNING), \
+            patch("broker_engine.health.requests.get", side_effect=_dispatch(calls=calls)):
+        r = client.get("/health")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["qdrant"] == "not answering" and body["status"] == "degraded"
+    assert {k: v for k, v in body.items() if k not in ("status", "qdrant")} == \
+        {k: v for k, v in OK_BODY.items() if k not in ("status", "qdrant")}
+    assert len(calls) == 3
+    assert "health probe failed: qdrant: ValueError" in caplog.text
+    assert bad not in r.text and bad not in caplog.text
 
 
 def test_fuseki_probe_carries_the_credential_only_when_set(monkeypatch):
@@ -139,11 +174,11 @@ def test_repeated_requests_within_the_window_share_one_set_of_probes():
     with patch("broker_engine.health.requests.get", side_effect=_dispatch(calls=calls)):
         for _ in range(20):
             client.get("/health")
-        assert len(calls) == 3
-        # after the window, three more
+        assert len(calls) == 4
+        # after the window, four more
         with patch("broker_engine.health.time.monotonic", return_value=time.monotonic() + 6):
             client.get("/health")
-    assert len(calls) == 6
+    assert len(calls) == 8
 
 
 def test_undeclared_query_parameter_is_422():
@@ -248,7 +283,7 @@ def test_events_are_null_when_the_state_store_does_not_answer(target):
     body = r.json()
     assert body["state"] == "not answering" and body["status"] == "degraded"
     assert body["evictions"] is None and body["events"] is None
-    assert len(body) == 7
+    assert len(body) == 8
 
 
 def test_events_counters_are_read_once_per_window():

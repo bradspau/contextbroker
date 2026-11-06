@@ -1,8 +1,9 @@
 """Upstream health for GET /health (OPS-01): is each store answering, in fixed strings only.
 
-The result holds seven keys with fixed values: "status" ("ok" or "degraded") and "fuseki",
-"victoriametrics", "tmf921" and "state", each "answering" or "not answering". "state" is the durable
-state store (D-04). "evictions" is {"outcomes": n, "marks": n, "situations": n, "events": n} with
+The result holds eight keys with fixed values: "status" ("ok" or "degraded") and "fuseki",
+"victoriametrics", "tmf921", "qdrant" and "state", each "answering" or "not answering". "qdrant" is the
+knowledge store (D-35), probed at the origin of BROKER_QDRANT_URL plus /readyz with no credential. "state"
+is the durable state store (D-04). "evictions" is {"outcomes": n, "marks": n, "situations": n, "events": n} with
 whole-number counts of the entries each state table has evicted (D-12). "events" is {"duplicates": n,
 "unmapped": n, "quarantined": {"no priority": n, "not text": n, "too long": n, "unparsable header": n}}:
 whole-number counts of event lines dropped as repeats, events stored without a device, and lines
@@ -10,7 +11,7 @@ quarantined for each of four fixed reasons (D-22). "evictions" and "events" are 
 store does not answer. They are the same public exposure class as the eviction counters: whole numbers
 and fixed keys only, never a host, device, line text, path or server text. The body never carries a
 URL, hostname, port, version, path or response text, because the route is public. Results are cached for
-a short window so that a flood of unauthenticated requests makes at most three upstream probes and one
+a short window so that a flood of unauthenticated requests makes at most four upstream probes and one
 state ping, one eviction read and one event counter read per window.
 """
 import logging
@@ -26,6 +27,7 @@ from broker_engine.faults import log_fault
 from broker_state.process import get_store
 from broker_state.store import EVICTION_TABLES, QUARANTINE_REASONS
 from intent_management import tmf921_client
+from okf_retrieval import config as okf_config
 
 log = logging.getLogger(__name__)
 
@@ -43,16 +45,29 @@ def _origin(url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}"
 
 
-def _targets() -> list[tuple[str, str, tuple[str, str] | None]]:
-    """(name, probe URL, auth) built per call from the current endpoint constants."""
+def _qdrant_probe_url() -> "str | ValueError":
+    """The Qdrant probe URL from the current setting, or the ValueError of a malformed setting (the
+    probe then reports "not answering" and logs the class, so /health itself never crashes)."""
+    try:
+        return _origin(okf_config.qdrant_url()) + "/readyz"
+    except ValueError as exc:
+        return exc
+
+
+def _targets() -> list[tuple[str, "str | ValueError", tuple[str, str] | None]]:
+    """(name, probe URL, auth) built per call from the current endpoint constants and settings."""
     return [
         ("fuseki", _origin(sparql_resolver.FUSEKI_QUERY_ENDPOINT) + "/$/ping", sparql_resolver.fuseki_auth()),
         ("victoriametrics", _origin(tsdb_joiner.VM_QUERY_ENDPOINT) + "/health", None),
         ("tmf921", _origin(tmf921_client.TMF921_BASE_URL) + "/health", None),
+        ("qdrant", _qdrant_probe_url(), None),
     ]
 
 
-def _probe(name: str, url: str, auth) -> str:
+def _probe(name: str, url: "str | ValueError", auth) -> str:
+    if isinstance(url, ValueError):
+        log_fault(log, url, f"health probe failed: {name}")
+        return NOT_ANSWERING
     try:
         response = requests.get(url, timeout=PROBE_TIMEOUT_S, allow_redirects=False, auth=auth)
     except Exception as exc:  # noqa: BLE001 - any fault means "not answering"

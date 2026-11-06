@@ -125,12 +125,12 @@ def test_a_store_that_does_not_answer_makes_the_health_degraded_and_503(caplog):
     body = r.json()
     assert body["status"] == "degraded"
     assert body["state"] == "not answering"
-    assert [body[k] for k in ("fuseki", "victoriametrics", "tmf921")] == ["answering"] * 3
+    assert [body[k] for k in ("fuseki", "victoriametrics", "tmf921", "qdrant")] == ["answering"] * 4
     assert "health probe failed: state: StateUnavailable" in caplog.text
     assert load_settings().path not in r.text
 
 
-def test_twenty_health_requests_in_a_window_make_three_probes_and_one_ping():
+def test_twenty_health_requests_in_a_window_make_four_probes_and_one_ping():
     real_ping = StateStore.ping
     pings = []
 
@@ -149,7 +149,7 @@ def test_twenty_health_requests_in_a_window_make_three_probes_and_one_ping():
             patch("broker_engine.health.requests.get", side_effect=get):
         for _ in range(20):
             assert client.get("/health").status_code == 200
-    assert len(http) == 3
+    assert len(http) == 4
     assert len(pings) == 1
 
 

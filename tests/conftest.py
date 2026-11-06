@@ -15,6 +15,8 @@ def _per_test_state_files(tmp_path, monkeypatch):
 
     monkeypatch.setenv("BROKER_STATE_PATH", str(tmp_path / "broker-state.sqlite3"))
     monkeypatch.setenv("BROKER_DECISION_RECORDS_PATH", str(tmp_path / "decision-records.sqlite3"))
+    # No test can probe or write a real Qdrant: the URL points at a closed loopback port.
+    monkeypatch.setenv("BROKER_QDRANT_URL", "http://127.0.0.1:1")
     reset_store()
     yield
     reset_store()
