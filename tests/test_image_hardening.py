@@ -15,7 +15,16 @@ def _lines(name):
 
 
 def _instructions():
-    return [(l.split(None, 1)[0].upper(), l) for l in _lines("Dockerfile")]
+    """(keyword, text) per Dockerfile instruction, with backslash continuation lines joined."""
+    out, pending = [], ""
+    for line in _lines("Dockerfile"):
+        pending = f"{pending} {line}".strip() if pending else line
+        if pending.endswith("\\"):
+            pending = pending[:-1].rstrip()
+            continue
+        out.append((pending.split(None, 1)[0].upper(), pending))
+        pending = ""
+    return out
 
 
 def test_dockerfile_has_exactly_one_user_instruction():
@@ -71,3 +80,33 @@ def test_data_dir_is_created_and_owned_by_the_container_user_before_user():
     assert len(runs) == 1, runs
     assert "chown {} /data".format(uid_gid) in runs[0][1]
     assert uid_gid == "10001:10001"
+
+
+def test_models_are_downloaded_by_commit_at_build_time_and_the_image_runs_offline():
+    # The two embedding models enter the image once, by commit, and the running container never
+    # fetches one (D-36). The revisions and directories are the ones the embedder loads (config).
+    from okf_retrieval import config
+
+    insts = _instructions()
+    kws = [kw for kw, _ in insts]
+    pip_at = next(i for i, (kw, l) in enumerate(insts) if kw == "RUN" and "pip install" in l)
+    first_copy_after_pip = next(i for i, kw in enumerate(kws) if kw == "COPY" and i > pip_at)
+    runs = [(i, l) for i, (kw, l) in enumerate(insts) if kw == "RUN" and "snapshot_download" in l]
+    assert len(runs) == 1, runs
+    at, run = runs[0]
+    assert pip_at < at < first_copy_after_pip
+    for literal in (config.DENSE_SOURCE, config.DENSE_REVISION, config.SPARSE_MODEL, config.SPARSE_REVISION,
+                    f"{config.DEFAULT_MODEL_DIR}/{config.DENSE_SUBDIR}",
+                    f"{config.DEFAULT_MODEL_DIR}/{config.SPARSE_SUBDIR}"):
+        assert run.count(literal) == 1, literal
+    assert "chmod -R a+rX " + config.DEFAULT_MODEL_DIR in run
+    offline = [i for i, (kw, l) in enumerate(insts) if kw == "ENV" and "HF_HUB_OFFLINE=1" in l]
+    assert len(offline) == 1
+    assert at < offline[0] < kws.index("USER")
+
+
+def test_model_revisions_are_full_commit_hashes():
+    from okf_retrieval import config
+
+    for revision in (config.DENSE_REVISION, config.SPARSE_REVISION):
+        assert len(revision) == 40 and all(c in "0123456789abcdef" for c in revision)
