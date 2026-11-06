@@ -59,6 +59,21 @@ services:
       - lodlive-proxy
     restart: unless-stopped
 
+  # The knowledge store (D-35): the retrieval index over the reviewed files in knowledge/. It holds
+  # only data rebuilt from those files, so losing qdrant-data loses nothing. Published on loopback,
+  # HTTP port only (the gRPC port is not used and not published). The key is required, with no default.
+  qdrant:
+    image: qdrant/qdrant:v1.19.2-unprivileged
+    container_name: qdrant
+    ports:
+      - "127.0.0.1:6333:6333"
+    environment:
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:?set QDRANT_API_KEY in .env (letters and digits only)}
+      - QDRANT__TELEMETRY_DISABLED=true
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+
   contextbroker-api:
     build: .
     container_name: contextbroker-api
@@ -83,6 +98,9 @@ services:
       - BROKER_EVENT_RETENTION=${BROKER_EVENT_RETENTION:-7d}
       - BROKER_EVENT_WINDOW_DEFAULT=${BROKER_EVENT_WINDOW_DEFAULT:-15m}
       - BROKER_EVENT_WINDOW_MAX=${BROKER_EVENT_WINDOW_MAX:-24h}
+      - BROKER_QDRANT_URL=http://qdrant:6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY:?set QDRANT_API_KEY in .env (letters and digits only)}
+      - BROKER_KNOWLEDGE_PATH=/knowledge
     # The API verifies bearer tokens with a public key only. An unset HOST_BROKER_JWT_PUBLIC_KEY
     # mounts an empty file: the API starts and refuses every /context/* call (no key configured).
     volumes:
@@ -90,7 +108,9 @@ services:
       # Holds the broker's durable state (outcomes, high-water marks, situation records, the event
       # store, decision records). Never remove it: never run `docker compose down -v`.
       - broker-state:/data
-    # /health answers 503 when Fuseki, VictoriaMetrics or the TMF921 server does not answer, and
+      # The reviewed knowledge files, read-only: git is the source of truth (D-38).
+      - ./knowledge:/knowledge:ro
+    # /health answers 503 when Fuseki, VictoriaMetrics, the TMF921 server or Qdrant does not answer, and
     # urlopen raises on 503, so a degraded broker reports unhealthy. The image has no curl.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
@@ -98,9 +118,12 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    # qdrant is listed for start order only, with no health condition: a Qdrant outage
+    # must not stop the API (/health reports it and the other context classes keep answering).
     depends_on:
       - fuseki
       - victoriametrics
+      - qdrant
     restart: unless-stopped
 
   # TMF921 intent server (BBF_921_java). Opt-in: docker compose --profile tmf921 up -d --build tmf921-server
@@ -136,3 +159,4 @@ volumes:
   fuseki-data:
   tdb2-tmf921:
   broker-state:
+  qdrant-data:

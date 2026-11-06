@@ -70,7 +70,7 @@ def test_docker_compose_defines_contextbroker_api():
 
 def test_fuseki_and_lodlive_proxy_are_bound_to_localhost():
     services = yaml.safe_load(COMPOSE_PATH.read_text())["services"]
-    for name in ("fuseki", "lodlive-proxy", "victoriametrics"):
+    for name in ("fuseki", "lodlive-proxy", "victoriametrics", "qdrant"):
         for port in services[name]["ports"]:
             assert port.startswith("127.0.0.1:"), (name, port)
 
@@ -279,3 +279,90 @@ def test_env_example_documents_each_event_setting_with_a_limit_line_and_no_live_
         i = next(i for i, line in enumerate(lines) if line.startswith(f"# {key}="))
         assert block_start < i < block_end, key
     assert "events" in "\n".join(lines[block_start:block_start + 6])
+
+
+# ---- Qdrant, the knowledge store (D-35, D-38) ----
+
+def test_qdrant_is_its_own_unprivileged_container_on_loopback_without_grpc():
+    content = yaml.safe_load(COMPOSE_PATH.read_text())
+    qdrant = content["services"]["qdrant"]
+    assert qdrant["image"] == "qdrant/qdrant:v1.19.2-unprivileged"
+    assert qdrant["container_name"] == "qdrant"
+    assert qdrant["ports"] == ["127.0.0.1:6333:6333"]
+    assert qdrant["volumes"] == ["qdrant-data:/qdrant/storage"]
+    assert qdrant["restart"] == "unless-stopped"
+    assert "depends_on" not in qdrant
+    assert "6334" not in COMPOSE_PATH.read_text()  # the gRPC port is never published or named
+    assert "qdrant-data" in content["volumes"]
+
+
+def test_qdrant_requires_a_key_with_no_default_and_runs_without_telemetry():
+    qdrant = yaml.safe_load(COMPOSE_PATH.read_text())["services"]["qdrant"]
+    env = _env_as_dict(qdrant["environment"])
+    assert env["QDRANT__SERVICE__API_KEY"].startswith("${QDRANT_API_KEY:?")
+    assert ":-" not in env["QDRANT__SERVICE__API_KEY"]
+    assert env["QDRANT__TELEMETRY_DISABLED"] == "true"
+
+
+def test_only_qdrant_and_the_api_receive_the_key_and_the_index_volume_is_on_qdrant_only():
+    content = yaml.safe_load(COMPOSE_PATH.read_text())
+    for name, svc in content["services"].items():
+        if name in ("qdrant", "contextbroker-api"):
+            continue
+        assert "QDRANT" not in repr(svc).upper().replace("QDRANT-DATA", ""), name
+        assert "qdrant-data" not in repr(svc), name
+    api = content["services"]["contextbroker-api"]
+    assert "qdrant-data" not in repr(api)
+    env = _env_as_dict(api["environment"])
+    assert env["QDRANT_API_KEY"].startswith("${QDRANT_API_KEY:?")
+    assert ":-" not in env["QDRANT_API_KEY"]
+    text = COMPOSE_PATH.read_text()
+    assert len(re.findall(r"\$\{QDRANT_API_KEY:\?", text)) == 2
+    # the compose file holds no literal key value
+    for line in text.splitlines():
+        if "QDRANT" in line and "API_KEY" in line and not line.lstrip().startswith("#"):
+            assert "${QDRANT_API_KEY:?" in line, line
+
+
+def test_the_api_gets_the_qdrant_url_and_the_knowledge_directory_read_only():
+    api = yaml.safe_load(COMPOSE_PATH.read_text())["services"]["contextbroker-api"]
+    env = _env_as_dict(api["environment"])
+    assert env["BROKER_QDRANT_URL"] == "http://qdrant:6333"
+    assert env["BROKER_KNOWLEDGE_PATH"] == "/knowledge"
+    assert api["volumes"].count("./knowledge:/knowledge:ro") == 1
+    assert len([v for v in api["volumes"] if "/knowledge" in v]) == 1
+
+
+def test_the_api_does_not_wait_for_qdrant_to_be_healthy():
+    # A Qdrant outage must never stop the API: /health reports it and the other classes keep answering.
+    api = yaml.safe_load(COMPOSE_PATH.read_text())["services"]["contextbroker-api"]
+    assert isinstance(api["depends_on"], list)
+    assert {"fuseki", "victoriametrics", "qdrant"} <= set(api["depends_on"])
+    assert "service_healthy" not in COMPOSE_PATH.read_text()
+    assert "condition" not in repr(api["depends_on"])
+
+
+def test_qdrant_url_and_key_settings_equal_what_the_code_reads():
+    from okf_retrieval import config
+
+    env = _env_as_dict(yaml.safe_load(COMPOSE_PATH.read_text())["services"]["contextbroker-api"]["environment"])
+    assert config.ENV_QDRANT_URL in env and config.ENV_QDRANT_API_KEY in env
+    assert config.ENV_KNOWLEDGE_PATH in env
+    assert config.qdrant_url({config.ENV_QDRANT_URL: env[config.ENV_QDRANT_URL]}) == "http://qdrant:6333"
+
+
+def test_env_example_requires_the_qdrant_key_with_no_default():
+    lines = ENV_EXAMPLE_PATH.read_text().splitlines()
+    assert lines.count("QDRANT_API_KEY=") == 1
+    i = lines.index("QDRANT_API_KEY=")
+    comment = "\n".join(lines[max(0, i - 6):i])
+    assert "required" in comment.lower() and "letters and digits only" in comment
+    assert "no default" in comment and "openssl rand -hex 24" in comment
+    assert "# BROKER_QDRANT_URL=http://localhost:6333" in lines
+    assert not any(line.startswith("BROKER_QDRANT_URL=") for line in lines)
+
+
+def test_dockerignore_keeps_the_knowledge_directory_out_of_the_image():
+    # The read-only mount is the only copy of the knowledge files the API reads.
+    lines = [l.strip() for l in (COMPOSE_PATH.parent / ".dockerignore").read_text().splitlines()]
+    assert lines.count("knowledge/") == 1

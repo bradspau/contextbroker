@@ -9,7 +9,7 @@ COMPOSE_PATH = ROOT / "docker-compose.yml"
 PREFLIGHT = ROOT / "scripts" / "tmf921_preflight.sh"
 
 DEFAULT_SERVICES = {
-    "victoriametrics", "fuseki", "lodlive-proxy", "lodlive", "contextbroker-api",
+    "victoriametrics", "fuseki", "lodlive-proxy", "lodlive", "contextbroker-api", "qdrant",
 }
 
 
