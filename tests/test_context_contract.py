@@ -91,7 +91,7 @@ REFUSED_BODIES = {
     "missing classes": _body(TOPOLOGY_BODY, classes=_DROP),
     "empty classes": _body(TOPOLOGY_BODY, classes=[]),
     "unknown purpose": _body(TOPOLOGY_BODY, purpose="admin"),
-    "unknown class": _body(TOPOLOGY_BODY, classes=["knowledge"]),
+    "unknown class": _body(TOPOLOGY_BODY, classes=["inventory"]),
     "device with a space": _body(TOPOLOGY_BODY, scope=_scope(device="Router A")),
     "empty device": _body(TOPOLOGY_BODY, scope=_scope(device="")),
     "device with a trailing newline": _body(TOPOLOGY_BODY, scope=_scope(device="R\n")),
@@ -583,7 +583,7 @@ def test_a_response_with_a_verdict_and_no_graph_round_trips():
 def test_the_response_json_carries_the_expected_top_level_keys():
     dumped = _full_response().model_dump(by_alias=True)
     assert set(dumped) == {"situation", "eligibility", "expires_at", "expiry_basis", "fluent_values",
-                           "envelopes", "graph", "events", "verdict"}
+                           "envelopes", "graph", "events", "knowledge", "verdict"}
     assert set(dumped["situation"]) == {"id", "requester", "purpose", "scope", "intent_id", "classes",
                                         "max_depth", "relationship_types", "valid_at", "known_at",
                                         "retrieved_at", "historical", "window_seconds"}

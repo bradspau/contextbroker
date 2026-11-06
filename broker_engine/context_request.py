@@ -32,6 +32,7 @@ from broker_engine.context_eligibility import (
     binding_problem,
     events_eligibility,
     goals_eligibility,
+    knowledge_eligibility,
     observations_eligibility,
     overall,
     overlapping,
@@ -47,6 +48,7 @@ from data_contracts.context_contract import (
     EVENT_SOURCE,
     ContextRequest,
     ConfiguredOut,
+    ActionRef,
     ConflictOut,
     ContextResponse,
     EnvelopeOut,
@@ -55,6 +57,9 @@ from data_contracts.context_contract import (
     EventsResult,
     EventWindow,
     FluentValue,
+    KnowledgeRef,
+    KnowledgeResult,
+    MatchedScope,
     Provenance,
     Situation,
     authorize,
@@ -64,6 +69,7 @@ from data_contracts.context_contract import (
     situation_id,
 )
 from broker_state.process import event_window_limits, get_store
+from data_contracts.knowledge import KNOWLEDGE_RESULT_CAP, KNOWLEDGE_SOURCE
 from data_contracts.metric_map import load_metric_map
 from data_contracts.syslog_events import EVENT_KINDS
 from data_contracts.situation_record import (
@@ -73,6 +79,7 @@ from data_contracts.situation_record import (
     stored_situation,
 )
 from intent_management.tmf921_source import assess_tmf921_as_of
+from okf_retrieval.service import ApplicableRef, get_service
 from outcome_assurance.tmf921_report import _short_name
 from state_reconciliation.event_reconciler import (
     CONFIGURED_LINK_IN_FORCE,
@@ -142,6 +149,24 @@ def _event_out(row, retrieved_at: datetime, covers) -> EventOut:
         ingest_time=_iso(row.ingest_time), kind=row.kind, flags=sorted(flags),
         provenance=Provenance(source_system=EVENT_SOURCE, reference=row.event_id,
                               observed_at=_iso(row.event_time), retrieved_at=_iso(retrieved_at)))
+
+
+def _knowledge_ref(ref: ApplicableRef, retrieved_at: datetime) -> KnowledgeRef:
+    """One applicable bundle as a reference: identity, version, status, title, content hash, the scope
+    patterns that matched, the source references, the rank and the approved actions by id and version.
+    The bundle body and its embedding text are never read here (D-45, D-46)."""
+    bundle = ref.bundle
+    return KnowledgeRef(
+        identifier=bundle.identifier, version=bundle.version, status=bundle.status, title=bundle.title,
+        content_hash=bundle.content_hash,
+        matched_scope=MatchedScope(entities=list(ref.match.entities), purpose=ref.match.purpose,
+                                   ontology_class=ref.match.ontology_class),
+        source_references=list(bundle.source_references), retrieval_rank=ref.rank,
+        linked_actions=[ActionRef(template_id=a.template_id, version=a.version, approved=True)
+                        for a in ref.actions],
+        unresolved_actions=ref.unresolved_actions,
+        provenance=Provenance(source_system=KNOWLEDGE_SOURCE, reference=f"{bundle.identifier}@{bundle.version}",
+                              observed_at=None, retrieved_at=_iso(retrieved_at)))
 
 
 def _fluent_value(metric, kind, fluent, device_interface, valid_at, retrieved_at) -> FluentValue:
@@ -357,6 +382,20 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
             count=len(returned), ambiguous=sum(e.mapping == "ambiguous" for e in returned),
             beyond_retention=start < now - timedelta(seconds=get_store().event_retention_s))
 
+    knowledge = None
+    if "knowledge" in body.classes:
+        # Reached only after every refusal above. The service never raises: a fault is the outcome
+        # `unavailable`, answered with a fixed gap while every other class answers as usual (D-37). The
+        # verdict was computed above and never sees this branch.
+        found = get_service().retrieve(
+            device=body.scope.device, interface=body.scope.interface, purpose=body.purpose, topic=None,
+            token_entities=authority.entities)
+        knowledge = KnowledgeResult(
+            retrieval=found.outcome, cap=KNOWLEDGE_RESULT_CAP, truncated=found.truncated,
+            references=[_knowledge_ref(ref, now) for ref in found.references], withheld=found.withheld)
+        eligibility["knowledge"] = knowledge_eligibility(
+            outcome=found.outcome, applicable=len(knowledge.references))
+
     expires_at, basis = expiry(
         retrieved_at=now, observation_times=observation_times,
         configured_evidence=bool((graph is not None and graph.nodes) or fluent_values),
@@ -372,7 +411,7 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
             window_seconds=window_s),
         eligibility=overall({name: eligibility[name] for name in CONTEXT_CLASSES if name in eligibility}),
         expires_at=_iso(expires_at), expiry_basis=basis, fluent_values=fluent_values,
-        envelopes=envelopes, graph=graph, events=events, verdict=verdict)
+        envelopes=envelopes, graph=graph, events=events, knowledge=knowledge, verdict=verdict)
     # One row per answered request, written before the answer leaves (D-05). Every refusal and every
     # upstream failure happened above this line, so none of them records anything.
     get_store().record_situation(

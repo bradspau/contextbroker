@@ -2,7 +2,7 @@
 
 Pure functions: no network, no clock reads (times come in as arguments), no verdict.
 
-Four classes are judged: topology, goals, observations and events. Three outcomes (D-15). A gap is absent evidence (no goal, placement or observation to judge).
+Five classes are judged: topology, goals, observations, events and knowledge. Three outcomes (D-15). A gap is absent evidence (no goal, placement or observation to judge).
 Ineligible is present but unfit evidence (stale, conflicted, changed-goal, duplicated, unmapped,
 outside the caller's authority, or ambiguous identity). Eligible means every applicable item is
 fresh, finite, single-valued and unchanged. Any single failure beats eligible, so the goals class
@@ -40,6 +40,9 @@ LINK_CONFLICT = "conflicting link records"
 NO_EVENTS = "no events in window"
 WINDOW_BEYOND_RETENTION = "window reaches beyond event retention"
 EVENT_AMBIGUOUS = "ambiguous identity: event source"
+NO_KNOWLEDGE = "no applicable knowledge"
+KNOWLEDGE_UNAVAILABLE = "knowledge retrieval unavailable"
+KNOWLEDGE_CURRENT_ONLY = "knowledge is current only"
 TOPOLOGY_INVALID = "invalid topology record"
 
 # Reason prefixes; the metric short name follows ": ".
@@ -168,6 +171,21 @@ def events_eligibility(*, count: int, ambiguous: int, beyond_retention: bool) ->
         gaps.append(WINDOW_BEYOND_RETENTION)
     problems = [EVENT_AMBIGUOUS] if ambiguous > 0 else []
     return classify(gaps, problems)
+
+
+def knowledge_eligibility(*, outcome: str, applicable: int) -> ClassEligibility:
+    """Judge the knowledge answer. Every case that returns nothing is a gap with its own fixed reason:
+    retrieval could not answer, the request asked about the past (the files hold no history), or the
+    files hold no applicable artefact (D-42). One or more references is eligible: an artefact's draft
+    status is shown on each reference, and a cut by the result cap or a count of withheld artefacts is a
+    quality note the result shows, not a reason here (D-44)."""
+    if outcome == "unavailable":
+        return classify([KNOWLEDGE_UNAVAILABLE], [])
+    if outcome == "not_current":
+        return classify([KNOWLEDGE_CURRENT_ONLY], [])
+    if outcome != "answered":
+        raise ValueError("unknown retrieval outcome")
+    return classify([NO_KNOWLEDGE] if applicable == 0 else [], [])
 
 
 def binding_problem(reason: str) -> ClassEligibility:

@@ -1,8 +1,8 @@
 """The logical context request and response contract, independent of its wire format (D-06).
 
 This module is pure: no FastAPI, no I/O. It is the one tracked place for the closed sets a request is
-expressed in (the purposes it can name, the four context classes it can ask for (topology, goals,
-observations and events), the relationship types a traversal follows) and for the request model, the authority check, the situation identity, the time
+expressed in (the purposes it can name, the five context classes it can ask for (topology, goals,
+observations, events and knowledge), the relationship types a traversal follows) and for the request model, the authority check, the situation identity, the time
 and expiry rules and the response models. The HTTP layer only wires it.
 scripts/mint_token.py is standalone and keeps a copy of PURPOSES and CONTEXT_CLASSES; a test pins the
 copy equal.
@@ -17,10 +17,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from broker_engine.validation import freshness_seconds, window_seconds
 from data_contracts.envelope import DEFAULT_MAX_AGE_S
+from data_contracts.knowledge import KNOWLEDGE_SOURCE, ONTOLOGY_CLASSES, RETRIEVAL_OUTCOMES, RETURNED_STATUSES
 from data_contracts.syslog_events import EVENT_FORMATS, EVENT_KINDS, EVENT_SOURCE
 
 PURPOSES = ("assurance", "diagnosis", "reporting")
-CONTEXT_CLASSES = ("topology", "goals", "observations", "events")
+CONTEXT_CLASSES = ("topology", "goals", "observations", "events", "knowledge")
 RELATIONSHIP_TYPES = ("has_interface", "connected_to")
 
 # Traversal limits (D-23). The hard maximum depth is refused at validation, so it is never a cut
@@ -474,6 +475,53 @@ class EventsResult(_Out):
     conflicts: list[ConflictOut] = Field(default_factory=list)
 
 
+class ActionRef(_Out):
+    """A reference to one approved action template: its identity and version, nothing else. The broker
+    never runs, schedules or records the action it names (D-46)."""
+
+    template_id: str
+    version: str
+    approved: Literal[True] = Field(description="Always true: only an approved template is referenced.")
+
+
+class MatchedScope(_Out):
+    """Which of the artefact's own scope patterns matched this request, so a caller can see why it applies."""
+
+    entities: list[str] = Field(description="The artefact's entity patterns that matched the request's device.")
+    purpose: Literal[PURPOSES]
+    ontology_class: Literal[ONTOLOGY_CLASSES] | None = Field(
+        description="The node class that matched, or null when the artefact names no class.")
+
+
+class KnowledgeRef(_Out):
+    """One governed artefact as a reference: exact identity and version, never its body, an excerpt or a
+    ranking value (D-45). The retrieval rank is the position in the answer, not a score."""
+
+    identifier: str
+    version: str
+    status: Literal[RETURNED_STATUSES]
+    title: str
+    content_hash: str = Field(description="sha256 of the artefact file, so a caller can tell the version it saw.")
+    matched_scope: MatchedScope
+    source_references: list[str]
+    retrieval_rank: int = Field(ge=1, description="1 for the first reference returned.")
+    linked_actions: list[ActionRef]
+    unresolved_actions: int = Field(ge=0, description="How many linked actions are not approved references "
+                                                      "for this request. They are counted, never named.")
+    provenance: Provenance
+
+
+class KnowledgeResult(_Out):
+    """The knowledge class: the applicable artefacts as references, at most `cap` of them."""
+
+    retrieval: Literal[RETRIEVAL_OUTCOMES]
+    cap: int
+    truncated: bool = Field(description="True when the cap cut the result.")
+    references: list[KnowledgeRef]
+    withheld: int = Field(ge=0, description="How many artefacts apply to entities the caller's authority does "
+                                            "not cover. They are counted, never named.")
+
+
 class Situation(_Out):
     """The identity and resolved inputs of the question (CTX-03). `requester` is the token's sub."""
 
@@ -505,6 +553,8 @@ class ContextResponse(_Out):
     graph: ContextGraph | None = Field(description="Present only when the topology class was requested.")
     events: EventsResult | None = Field(
         default=None, description="Present only when the events class was requested.")
+    knowledge: KnowledgeResult | None = Field(
+        default=None, description="Present only when the knowledge class was requested.")
     verdict: dict | None = Field(
         description="Present only when an intent is named with the goals and observations classes. It comes "
                     "from the read-only TMF921 assess, never reads eligibility and can disagree with it.")
