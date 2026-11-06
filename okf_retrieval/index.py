@@ -7,6 +7,7 @@ what applies (plan 06-05), the index only orders what might.
 import hashlib
 import json
 import uuid
+import warnings
 from dataclasses import dataclass
 
 from qdrant_client import QdrantClient, models
@@ -48,8 +49,16 @@ def point_id(identifier: str, version: str) -> str:
 
 
 def make_client(url: str, api_key: str | None, timeout: int) -> QdrantClient:
-    """A client that makes no call at construction."""
-    return QdrantClient(url=url, api_key=api_key, timeout=timeout, prefer_grpc=False, check_compatibility=False)
+    """A client that makes no call at construction.
+
+    The hop to Qdrant is plain HTTP on the compose network, so the one insecure-connection warning about the
+    key is dropped; no other warning is. The key and the URL are never logged or formatted here.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Api key is used with an insecure connection",
+                                category=UserWarning)
+        return QdrantClient(url=url, api_key=api_key, timeout=timeout, prefer_grpc=False,
+                            check_compatibility=False)
 
 
 def _sparse(vector) -> models.SparseVector:
@@ -62,9 +71,31 @@ class QdrantIndex:
         self._embedder = embedder
 
     def ensure(self, entries) -> str:
-        """Build the collection for these entries and return its name."""
+        """Return the name of a collection built from these entries, building it when it is absent.
+
+        The name encodes the content, so an existing collection is current by construction. A build that
+        fails after the create deletes the collection and re-raises the original exception, so a half-built
+        collection is never taken as current. After a successful build every other `knowledge-` collection
+        is deleted and no other collection is touched.
+        """
         entries = list(entries)
         name = collection_name(self._embedder.fingerprint, self._embedder.dim, entries)
+        if self._client.collection_exists(name):
+            return name
+        try:
+            self._build(name, entries)
+        except BaseException:
+            try:
+                self._client.delete_collection(name)
+            except Exception:
+                pass
+            raise
+        for existing in self._client.get_collections().collections:
+            if existing.name.startswith(COLLECTION_PREFIX) and existing.name != name:
+                self._client.delete_collection(existing.name)
+        return name
+
+    def _build(self, name: str, entries) -> None:
         self._client.create_collection(
             collection_name=name,
             vectors_config={DENSE_VECTOR: models.VectorParams(size=self._embedder.dim,
@@ -78,7 +109,6 @@ class QdrantIndex:
                 payload={"identifier": e.identifier, "version": e.version, "content_hash": e.content_hash})
             for e, (dense, sparse) in zip(entries, vectors)]
         self._client.upsert(collection_name=name, points=points, wait=True)
-        return name
 
     def search(self, name: str, text: str, limit: int) -> list[Candidate]:
         """Hybrid query: dense and sparse prefetches fused by RRF. Never filtered."""
