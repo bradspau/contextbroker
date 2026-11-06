@@ -105,3 +105,16 @@ def test_loading_the_api_and_the_service_loads_no_execution_module():
             "print(sorted(m for m in sys.modules if m.split('.')[0] in %r))" % (EXECUTION,))
     out = subprocess.run([sys.executable, "-c", code, str(ROOT)], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "[]"
+
+
+def test_the_knowledge_models_carry_identity_only():
+    from data_contracts.context_contract import ActionRef, KnowledgeRef, KnowledgeResult, MatchedScope
+    assert set(KnowledgeRef.model_fields) == {
+        "identifier", "version", "status", "title", "content_hash", "matched_scope", "source_references",
+        "retrieval_rank", "linked_actions", "unresolved_actions", "provenance"}
+    assert set(ActionRef.model_fields) == {"template_id", "version", "approved"}
+    assert set(MatchedScope.model_fields) == {"entities", "purpose", "ontology_class"}
+    assert set(KnowledgeResult.model_fields) == {"retrieval", "cap", "truncated", "references", "withheld"}
+    banned = {"score", "similarity", "body", "excerpt", "content"}
+    for model in (ActionRef, KnowledgeRef, KnowledgeResult, MatchedScope):
+        assert banned & set(model.model_fields) == set()

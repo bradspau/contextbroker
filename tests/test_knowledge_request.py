@@ -11,8 +11,10 @@ import pytest
 
 from broker_state.process import get_store
 from okf_retrieval.service import KnowledgeService, set_service
-from tests.okf_helpers import FakeEmbedder, closed_client, local_client
-from tests.test_context_request import NOW, Upstreams, post, rig, token  # noqa: F401
+from tests.fluent_helpers import IF0, LAT, T0, bind
+from tests.okf_helpers import FakeEmbedder, closed_client, local_client, write_bundle, write_catalogue
+from tests.test_context_request import (  # noqa: F401
+    ASK, BOTH, NOW, OLT_PON0, SCOPES, TOPOLOGY, client, live_goal, olt, post, rig, sample, token)
 from tests.test_knowledge_bundles import KNOWLEDGE_ROOT
 
 WIDE = {"entities": ["*"], "purposes": ["diagnosis"], "classes": ["knowledge"]}
@@ -131,3 +133,163 @@ def test_no_bundle_text_and_no_ranking_value_reaches_the_response(rig, served):
                 yield from keys(item)
 
     assert not {"score", "similarity", "body", "excerpt", "content"} & set(keys(json.loads(text)))
+
+
+# ---- retrieval cannot answer: an honest gap, and nothing else changes ----
+
+UNAVAILABLE_GAP = {"result": "gap", "reasons": ["knowledge retrieval unavailable"]}
+TOPOLOGY_KNOWLEDGE = {**TOPOLOGY, "classes": ["topology", "knowledge"]}
+BOTH_CLASSES = {"entities": ["*"], "purposes": ["diagnosis"], "classes": ["topology", "knowledge"]}
+
+
+def test_an_unavailable_store_is_a_200_with_a_gap_and_no_references(rig):
+    serve(client_factory=closed_client)
+    r = ask()
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["knowledge"]["retrieval"] == "unavailable" and out["knowledge"]["references"] == []
+    assert out["knowledge"]["withheld"] == 0 and out["knowledge"]["truncated"] is False
+    assert out["eligibility"]["classes"]["knowledge"] == UNAVAILABLE_GAP
+    assert out["expiry_basis"] == "no_evidence"
+
+
+def test_an_unavailable_store_leaves_the_topology_answer_as_it_was(rig):
+    topology = post(TOPOLOGY, headers=token({**BOTH_CLASSES, "classes": ["topology"]})).json()
+    serve(client_factory=closed_client)
+    both = ask(TOPOLOGY_KNOWLEDGE, BOTH_CLASSES).json()
+    assert both["graph"] == topology["graph"]
+    assert both["fluent_values"] == topology["fluent_values"]
+    assert both["eligibility"]["classes"]["topology"] == topology["eligibility"]["classes"]["topology"]
+    assert both["eligibility"]["classes"]["knowledge"] == UNAVAILABLE_GAP
+    assert both["eligibility"]["result"] == "gap"
+
+
+def test_a_failing_embedder_is_the_same_unavailable_answer(rig):
+    def broken():
+        raise RuntimeError("model missing")
+    serve(embedder_factory=broken)
+    assert ask().json()["eligibility"]["classes"]["knowledge"] == UNAVAILABLE_GAP
+
+
+# ---- the verdict never reads the knowledge class ----
+
+OLT_TREE_ID = "olt-interface-check"
+ASSURE_KNOWLEDGE = {"entities": ["*"], "purposes": ["assurance"],
+                    "classes": ["topology", "goals", "observations", "knowledge"]}
+
+
+def olt_tree(tmp_path):
+    write_bundle(tmp_path, OLT_TREE_ID, entities=("olt1",), purposes=("assurance",),
+                 ontology_classes=("Interface",))
+    write_catalogue(tmp_path, [])
+    return tmp_path
+
+
+def assess(olt, body):
+    return post(body, headers=token(ASSURE_KNOWLEDGE, scopes=SCOPES))
+
+
+@pytest.mark.parametrize("mode", ["unavailable", "answering"])
+def test_the_verdict_is_identical_with_and_without_the_knowledge_class(mode, olt, tmp_path):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt)
+    live_goal(olt)
+    if mode == "unavailable":
+        serve(client_factory=closed_client)
+    else:
+        serve(root=olt_tree(tmp_path))
+    plain = assess(olt, ASK).json()
+    with_knowledge = assess(olt, {**ASK, "classes": ["goals", "observations", "knowledge"]}).json()
+    assert plain["verdict"]["verdict"] == "success"
+    assert with_knowledge["verdict"] == plain["verdict"]
+    assert with_knowledge["fluent_values"] == plain["fluent_values"]
+    assert with_knowledge["envelopes"] == plain["envelopes"]
+    for name in ("goals", "observations"):
+        assert with_knowledge["eligibility"]["classes"][name] == plain["eligibility"]["classes"][name]
+    wanted = {"unavailable": "unavailable", "answering": "answered"}[mode]
+    assert with_knowledge["knowledge"]["retrieval"] == wanted
+    if mode == "answering":
+        assert [r["identifier"] for r in with_knowledge["knowledge"]["references"]] == [OLT_TREE_ID]
+
+
+# ---- a question about the past is a gap and retrieves nothing ----
+
+@pytest.mark.parametrize("past", [{"as_of": "10m"}, {"known_at": "10m"}])
+def test_a_past_request_is_a_current_only_gap_without_retrieval(past, rig, served):
+    with patch.object(KnowledgeService, "retrieve") as retrieve:
+        r = ask({**INTERFACE, **past})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    retrieve.assert_not_called()
+    assert out["situation"]["historical"] is True
+    assert out["knowledge"] == {"retrieval": "not_current", "cap": 10, "truncated": False,
+                                "references": [], "withheld": 0}
+    assert out["eligibility"]["classes"]["knowledge"] == {
+        "result": "gap", "reasons": ["knowledge is current only"]}
+
+
+def test_a_request_without_a_token_is_401_and_retrieves_nothing(rig, served):
+    with patch.object(KnowledgeService, "retrieve") as retrieve:
+        r = client.post("/context/request", json=INTERFACE)
+    assert r.status_code == 401
+    retrieve.assert_not_called()
+
+
+# ---- authority over entities: withheld is a count ----
+
+def test_a_token_for_router_a_only_sees_a_withheld_count_and_no_decoy_name(rig, served):
+    r = ask(DEVICE, {**WIDE, "entities": ["Router-A"]})
+    out = r.json()
+    assert r.status_code == 200
+    assert out["knowledge"]["withheld"] == 1
+    assert "Switch-Decoy-9" not in r.text and "out-of-scope-decoy" not in r.text
+    wide = ask(DEVICE).json()
+    assert wide["knowledge"]["withheld"] == 0
+
+
+# ---- the cap ----
+
+def test_twelve_applicable_bundles_give_ten_references_and_stay_eligible(rig, tmp_path):
+    for n in range(12):
+        write_bundle(tmp_path, f"router-note-{n:02d}", purposes=("diagnosis",))
+    write_catalogue(tmp_path, [])
+    serve(root=tmp_path)
+    out = ask(DEVICE).json()
+    assert len(out["knowledge"]["references"]) == 10
+    assert out["knowledge"]["truncated"] is True
+    assert [r["retrieval_rank"] for r in out["knowledge"]["references"]] == list(range(1, 11))
+    assert out["eligibility"]["classes"]["knowledge"] == {"result": "eligible", "reasons": []}
+
+
+def test_no_applicable_artefact_is_a_gap(rig, served):
+    out = ask({**DEVICE, "scope": {"device": "Switch-Z"}}).json()
+    assert out["knowledge"]["retrieval"] == "answered" and out["knowledge"]["references"] == []
+    assert out["eligibility"]["classes"]["knowledge"] == {
+        "result": "gap", "reasons": ["no applicable knowledge"]}
+
+
+# ---- every coherent combination keeps one result per requested class ----
+
+ALL_CLASSES = {"entities": ["*"], "purposes": ["assurance"],
+               "classes": ["topology", "goals", "observations", "events", "knowledge"]}
+COMBINATIONS = {
+    "knowledge": {"classes": ["knowledge"]},
+    "knowledge_topology": {"classes": ["knowledge", "topology"], "max_depth": 1, "relationship_types": BOTH},
+    "knowledge_events": {"classes": ["knowledge", "events"]},
+    "knowledge_goals_observations": {"classes": ["knowledge", "goals", "observations"], "intent_id": "i1"},
+}
+
+
+@pytest.mark.parametrize("name", sorted(COMBINATIONS))
+def test_the_eligibility_has_one_entry_per_requested_class(name, olt, tmp_path):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt)
+    live_goal(olt)
+    serve(root=olt_tree(tmp_path))
+    body = {"purpose": "assurance", "scope": OLT_PON0, **COMBINATIONS[name]}
+    r = post(body, headers=token(ALL_CLASSES, scopes=SCOPES))
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert set(out["eligibility"]["classes"]) == set(body["classes"])
+    assert out["eligibility"]["classes"]["knowledge"] == {"result": "eligible", "reasons": []}
+    assert out["knowledge"]["references"][0]["identifier"] == OLT_TREE_ID

@@ -550,3 +550,27 @@ def test_no_broker_engine_module_imports_the_syslog_parser_or_ingest():
 def test_the_contract_module_imports_nothing_from_ingestion():
     from data_contracts import context_contract
     assert [m for m, _ in imported(context_contract.__file__) if m and m.startswith("ingestion")] == []
+
+
+# ---- knowledge ----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("outcome,applicable,result,reasons", [
+    ("unavailable", 0, "gap", ["knowledge retrieval unavailable"]),
+    ("not_current", 0, "gap", ["knowledge is current only"]),
+    ("answered", 0, "gap", ["no applicable knowledge"]),
+    ("answered", 2, "eligible", []),
+])
+def test_knowledge_eligibility_rows(outcome, applicable, result, reasons):
+    assert ce.knowledge_eligibility(outcome=outcome, applicable=applicable) == ClassEligibility(
+        result=result, reasons=reasons)
+
+
+def test_an_unknown_retrieval_outcome_is_refused():
+    with pytest.raises(ValueError):
+        ce.knowledge_eligibility(outcome="probably", applicable=1)
+
+
+def test_knowledge_eligibility_takes_only_the_outcome_and_the_count():
+    import inspect
+    assert sorted(inspect.signature(ce.knowledge_eligibility).parameters) == ["applicable", "outcome"]

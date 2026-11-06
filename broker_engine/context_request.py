@@ -384,17 +384,23 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
 
     knowledge = None
     if "knowledge" in body.classes:
-        # Reached only after every refusal above. The service never raises: a fault is the outcome
-        # `unavailable`, answered with a fixed gap while every other class answers as usual (D-37). The
-        # verdict was computed above and never sees this branch.
-        found = get_service().retrieve(
-            device=body.scope.device, interface=body.scope.interface, purpose=body.purpose, topic=None,
-            token_entities=authority.entities)
-        knowledge = KnowledgeResult(
-            retrieval=found.outcome, cap=KNOWLEDGE_RESULT_CAP, truncated=found.truncated,
-            references=[_knowledge_ref(ref, now) for ref in found.references], withheld=found.withheld)
+        # Reached only after every refusal above. The files hold no history, so a question about the past
+        # is answered as "not_current" without a retrieval and nothing is invented about it (D-37). For a
+        # current question the service never raises: a fault is the outcome `unavailable`, answered with a
+        # fixed gap while every other class answers as usual. The verdict was computed above and never
+        # sees this branch.
+        if times.historical:
+            knowledge = KnowledgeResult(retrieval="not_current", cap=KNOWLEDGE_RESULT_CAP, truncated=False,
+                                        references=[], withheld=0)
+        else:
+            found = get_service().retrieve(
+                device=body.scope.device, interface=body.scope.interface, purpose=body.purpose, topic=None,
+                token_entities=authority.entities)
+            knowledge = KnowledgeResult(
+                retrieval=found.outcome, cap=KNOWLEDGE_RESULT_CAP, truncated=found.truncated,
+                references=[_knowledge_ref(ref, now) for ref in found.references], withheld=found.withheld)
         eligibility["knowledge"] = knowledge_eligibility(
-            outcome=found.outcome, applicable=len(knowledge.references))
+            outcome=knowledge.retrieval, applicable=len(knowledge.references))
 
     expires_at, basis = expiry(
         retrieved_at=now, observation_times=observation_times,
