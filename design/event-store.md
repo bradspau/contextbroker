@@ -206,7 +206,8 @@ before any read. `scripts/mint_token.py` takes `--class events`.
   the verdict and takes no conflict as input.
 - **Expiry.** A current answer with at least one event expires at the retrieval time plus the
   freshness limit, with the basis `event_window`. Precedence among the bases: `historical_request`,
-  `oldest_observation`, `event_window`, `configured_state`, `no_evidence`.
+  `oldest_observation`, `event_window`, `knowledge_set` (added in Phase 6, see `design/knowledge.md`),
+  `configured_state`, `no_evidence`.
 - **Situation id.** The window enters the id only for an events request, as a conditional key
   (D-33). `SITUATION_VERSION` stays 1 and every earlier id is unchanged. The default is applied
   before it is hashed, so a request without `window_seconds` and one that names the default are the

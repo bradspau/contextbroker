@@ -12,8 +12,10 @@ response grants authority to act. Verdicts stay `success`, `failure` or `inconcl
 Code: `data_contracts/context_contract.py` (the contract, no I/O, no web framework),
 `broker_engine/context_request.py` (the one handler that reads the sources),
 `broker_engine/context_eligibility.py`, `broker_engine/context_graph.py`,
-`broker_engine/auth.py` and `scripts/mint_token.py` (authority). Phase 4 stores situations and
-Phase 7 adds exchange profiles; both build on the decisions below.
+`broker_engine/auth.py` and `scripts/mint_token.py` (authority), and `okf_retrieval/service.py` (the
+knowledge class). Phase 4 stores situations and Phase 7 adds exchange profiles; both build on the
+decisions below. The events class (Phase 5) and the knowledge class (Phase 6) were added to this
+contract without changing any earlier situation id.
 
 ## The request
 
@@ -25,11 +27,12 @@ not decided here.
 | `purpose` | One of `assurance`, `diagnosis`, `reporting` (a closed set kept in `context_contract.PURPOSES`). |
 | `scope` | A device and optionally an interface; letters, digits, `_`, `-`, `/`, at most 128 characters each. |
 | `intent_id` | Optional text in the TMF921 client's grammar; the intent whose goals and placements are wanted. |
-| `classes` | One to four of `topology`, `goals`, `observations`, `events`, no repeats. |
+| `classes` | One to five of `topology`, `goals`, `observations`, `events`, `knowledge`, no repeats. |
 | `max_depth`, `relationship_types` | The traversal. Depth 0 to 3; types from `has_interface`, `connected_to`. |
 | `as_of`, `known_at` | Offsets such as `10m`, resolved against the single clock read of the request; limited by the retention period (400 beyond it). |
 | `freshness` | `1s` to `300s`; it can only tighten the default, a larger value is a 400, not a clamp. |
 | `window_seconds` | Optional, a whole number from 1 to 604800, only with the `events` class (422 without it). The window ends at the resolved instant. Above `BROKER_EVENT_WINDOW_MAX` it is a 400 `window_seconds above the event window maximum`, refused before any read. The default is `BROKER_EVENT_WINDOW_DEFAULT`. |
+| `topic` | Optional text of 1 to 200 characters (letters, digits, space and `_ . , : / -`), strict about type, only with the `knowledge` class (422 `topic needs the knowledge class` without it). It is the query text of the knowledge retrieval; with none, the query is derived from the purpose and the node type. |
 
 There is no requester field. The requester is the token's `sub`, so a body cannot claim to be
 someone else. The model is strict: unknown fields and values of the wrong type are refused (422).
@@ -39,6 +42,10 @@ device's events) with quality flags, a recognised kind and, for a recognised lin
 with the configured link state. It can be asked alone or with the other classes and adds no coherence
 rule of its own (an events-only request names no intent and no traversal fields). The rules for events
 are in `design/event-store.md`.
+
+The `knowledge` class returns references to governed knowledge artefacts (see "The knowledge class"
+below and `design/knowledge.md`). Like `events`, it can be asked alone or with the other classes and
+adds no coherence rule of its own.
 
 Coherence rules, all refused by shape before any I/O: `topology` exactly when both `max_depth` and
 `relationship_types` are given; `intent_id` exactly when `goals` is asked for; `observations` only
@@ -57,9 +64,10 @@ its own):
 ```
 
 - Entities are exact device names or the single string `*`. There is no pattern matching of any
-  kind. Purposes and classes come from the closed sets. `events` is one of the four classes, so it is
-  part of the signed claim: a token without it is refused with `outside authority scope: class` for an
-  events request only (D-12).
+  kind. Purposes and classes come from the closed sets. `events` and `knowledge` are two of the five
+  classes, so each is part of the signed claim: a token without one is refused with `outside authority
+  scope: class` for a request that names it only (D-12, D-42), and a knowledge request is refused this
+  way before any retrieval.
 - `scripts/mint_token.py` takes `--entity`, `--purpose` and `--class`, all three or none, and
   refuses an entity that is not `*` or a safe device name. The broker parses the claim totally:
   a malformed list, a wrong type or a list left empty after filtering makes the whole claim
@@ -92,7 +100,7 @@ already says something lies beyond, so this was accepted.
 `situation.id` lets Phase 4 store outcomes and decisions against a question. The inputs are the
 requester, purpose, scope device and interface, intent id, the valid instant, the knowledge
 instant, the sorted classes, `max_depth`, the sorted relationship types and, for an events request
-only, the window in seconds.
+only, the window in seconds and, for a knowledge request that names a topic, the topic.
 
 Construction (`situation_id`, `SITUATION_VERSION = 1`): build a JSON object with the keys `v`,
 `requester`, `purpose`, `scope`, `intent`, `valid`, `known`, `classes`, `max_depth` and
@@ -111,6 +119,12 @@ the id is `sit-` followed by the first 32 hex characters (128 bits).
   `SITUATION_VERSION` stays 1. A second known answer pins an events id: requester `alice`, purpose
   `diagnosis`, device `Router-A`, valid `2026-11-05T12:00:07Z`, classes `["events"]`, window 900 gives
   `sit-cbb90b643cb87083175cc9640008817a`.
+- The topic key `topic` is added to the canonical body **only when a topic is set** (D-47), the same
+  way as `window`. A request without the knowledge class, and a knowledge request without a topic, hash
+  as before, and `SITUATION_VERSION` stays 1. Each topic is its own situation. Two more known answers pin
+  knowledge ids: requester `alice`, purpose `diagnosis`, device `Router-A`, valid
+  `2026-11-05T12:00:07Z`, classes `["knowledge"]` gives `sit-bb260446e080cfec31f5fe1ebe6afb3d` without
+  a topic and `sit-5d99dd6640b6fd47a02597c2f0264328` with the topic `interface errors`.
 - A known-answer test pins one id against hand-written canonical JSON (not against the function
   that produces it): requester `alice`, purpose `diagnosis`, device `Router-A`, valid
   `2026-11-05T12:00:07Z`, classes `["topology"]`, depth 2, types `["connected_to",
@@ -138,6 +152,7 @@ fixed strings; the only variable part is a pinned metric short name.
 | observations | ineligible | `conflicting observation: <M>`; `stale observation: <M>`; `future-dated observation: <M>` |
 | events | gap | `no events in window`; `window reaches beyond event retention` |
 | events | ineligible | `ambiguous identity: event source` |
+| knowledge | gap | `no applicable knowledge`; `knowledge retrieval unavailable`; `knowledge is current only` |
 
 - The evidence window for goals is the freshness limit before the valid instant. Changed goal means
   more than one distinct goal fluent in force over that window (for placements likewise). It needs
@@ -153,6 +168,8 @@ fixed strings; the only variable part is a pinned metric short name.
 - The events reasons are fixed strings with no variable part. `time_unknown`, `future_dated` and
   truncation are flags on the events, never reasons, and a conflict with configured state is never an
   input to eligibility (D-15, D-31, D-32).
+- The knowledge reasons are fixed strings with no variable part. Draft status, truncation and the
+  withheld count are never reasons, and the class has no `ineligible` result (D-37, D-42).
 - Eligibility grants no execution authority. The action-readiness check is a separate component and
   nothing in this response feeds it.
 
@@ -176,14 +193,29 @@ and is `inconclusive` ("goal changed: LatencyMetric pinned 100, now 150"). A cal
 | `configured_state` | current, only topology or fluent values found | retrieval time plus the limit |
 | `no_evidence` | current, nothing found | retrieval time |
 | `event_window` | current, an events request that returned at least one event | retrieval time plus the limit |
+| `knowledge_set` | current, a knowledge request that returned at least one reference | retrieval time plus the limit |
 | `historical_request` | `as_of` or `known_at` given | retrieval time |
 
-Precedence among the bases: `historical_request`, `oldest_observation`, `event_window`,
-`configured_state`, `no_evidence`. The limit is the 300 s default or the tightened freshness. It is never clamped to the future: an
+Precedence among the six bases: `historical_request`, `oldest_observation`, `event_window`,
+`knowledge_set`, `configured_state`, `no_evidence`. The limit is the 300 s default or the tightened freshness. It is never clamped to the future: an
 oldest observation that is already stale gives an expiry in the past, which is the honest answer.
 Configured evidence is anchored to the retrieval time because a fact's `recordedAt` says when the
 broker learned it, not how old the fact is. A past answer expires at retrieval because a historical
 answer is not current context, and the response says so through the basis.
+
+## The knowledge class
+
+`knowledge` returns the governed artefacts that apply to the request, as references: identifier,
+version, status, title, content hash, the scope that matched, source references, a retrieval rank (a
+position, not a score), the approved actions linked to the artefact and a count of linked actions that
+did not resolve. The result also holds `retrieval` (`answered`, `unavailable` or `not_current`), the
+cap of 10, `truncated` and `withheld` (a count of artefacts for entities the token does not cover, never
+named). No body, excerpt or similarity value is returned. Knowledge is current only: a request with
+`as_of` or `known_at` is answered `not_current`, a gap, without a retrieval. When retrieval cannot
+answer, the class is a gap with `knowledge retrieval unavailable` and every other class and the verdict
+are unchanged. Each reference carries one provenance record (source system `okf`, reference
+`<identifier>@<version>`, no observation time, the retrieval time). Applicability, approval, the action
+references and the operating rules are in `design/knowledge.md`.
 
 ## Provenance records
 
@@ -285,3 +317,5 @@ outcome or records an outcome; tests spy on each.
   OpenAPI document, which now describes the new route, holds no claim value, token or secret.
 - Events are built (Phase 5): see `design/event-store.md` for the store, the events class and
   reconciliation, and for what Phase 5 itself deferred.
+- Knowledge is built (Phase 6): see `design/knowledge.md`, including what Phase 6 itself deferred (a
+  body-fetch route, applicability from live facts, signed approval fields).

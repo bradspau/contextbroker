@@ -194,7 +194,7 @@ def post_assess(body: AssessRequest, request: Request) -> dict:
           dependencies=[need(SCOPE_READ), need_authority_claims()])
 def post_context_request(body: ContextRequest, request: Request) -> ContextResponse:
     """Ask for context: why (purpose), about what (a device, optionally an interface), when (now, or
-    as_of and known_at offsets) and which classes (topology, goals, observations, events).
+    as_of and known_at offsets) and which classes (topology, goals, observations, events, knowledge).
 
     The token needs the context:read scope and the authority claims (entities, purposes, classes). The
     requester is the token subject, never a field of the body. Naming an intent_id also needs
@@ -203,6 +203,9 @@ def post_context_request(body: ContextRequest, request: Request) -> ContextRespo
     Graph with the limits that cut it. The events class takes an optional window_seconds and reads stored
     syslog events from the state file; only for a recognised link event does it also read the device's
     link fluents from Fuseki, to show a conflict. It never returns the raw line or message text.
+    The knowledge class takes an optional topic and returns references to governed knowledge (identity,
+    version, status, title, content hash, matched scope and approved action references) with no body
+    text, excerpt or ranking value; it is current only and carries no execution authority.
     Eligibility describes the fitness of the evidence and grants no execution authority. A verdict is
     present only for an intent with the goals and observations
     classes; it is kept apart from eligibility and the two can disagree."""

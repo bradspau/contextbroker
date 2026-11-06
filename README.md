@@ -49,9 +49,10 @@ structure below by a strangler migration.
 | Outcomes, high-water marks, situation records, events and decision records | Durable. Outcomes, high-water marks, situation records and syslog events are in one SQLite file on the `broker-state` volume; decision records are a file by default; the reservation book and the action catalogue stay in memory (see [Situation records](#situation-records) and [design/durable-state.md](design/durable-state.md)) |
 | Syslog events (strict RFC 5424 and RFC 3164 parser, durable event store, `events` context class, recognised link events reconciled against configured links) | Built, unit-tested; lines enter through a command, there is no listener (see [Events](#events) and [design/event-store.md](design/event-store.md)) |
 | LQM, System 1 / investigation models | Stubs |
-| Redpanda, Qdrant, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
+| Governed knowledge (tracked OKF bundles in `knowledge/`, Qdrant hybrid index, `knowledge` context class, approved-action references) | Built, unit-tested; the four bundles are drafts, approval is a reviewed commit, and a response carries references only, never a body (see [Knowledge](#knowledge) and [design/knowledge.md](design/knowledge.md)). The suite uses a fake embedder: the real models and a live Qdrant were not part of the test run |
+| Redpanda, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 2249 tests passing and 26 skipped (`pytest`): 15 live TMF921 tests, skipped
+The test suite has 2546 tests passing and 26 skipped (`pytest`): 15 live TMF921 tests, skipped
 unless `TMF921_LIVE=1`, and 11 real-engine Fuseki parity tests, skipped unless
 `FUSEKI_PARITY_URL` is set (see [Running the tests](#running-the-tests)). The work is on the `fullnetwork` branch
 (pushed to GitHub) and has not been reviewed by anyone else.
@@ -282,6 +283,8 @@ under [`ingestion/load_ontologies.py`](#ingestionload_ontologiespy).
 | `action_lifecycle` | Executor: proposal snapshot, readiness check, recheck; the executor fails closed | Action lifecycle |
 | `investigation_workers` | `model_client` protocol with threshold/router stubs; unapproved models rejected | Investigation workers |
 | `state_reconciliation` | Event reconciler: compares a recognised link event with the configured link state and reports a conflict naming both sides; writes nothing | State reconciliation |
+| `okf_retrieval` | Governed knowledge: strict bundle and catalogue loader, the two embedding models, the Qdrant index and the retrieval service (see [design/knowledge.md](design/knowledge.md)) | Ontology / knowledge layer |
+| `knowledge` (data, not a package) | Tracked draft bundles and the example action catalogue, mounted read-only into the API | Ontology / knowledge layer |
 | `source_federation`, `platform_services` | Placeholders | Not implemented |
 
 ### Data flow
@@ -322,7 +325,7 @@ under [`ingestion/load_ontologies.py`](#ingestionload_ontologiespy).
 ### Not implemented
 
 The spec lists these as candidates needing validation; none are built here:
-Redpanda transport, Qdrant retrieval, OPA/Rego policy (the policy is Python),
+Redpanda transport, OPA/Rego policy (the policy is Python),
 Temporal durable execution, real LQM / System 1 / investigation models (only
 stubs), and real controllers (Nornir, OpenDaylight). There is no live syslog
 listener (events enter through a command, see [Events](#events)), and the action
@@ -496,6 +499,16 @@ refuses to run without it). Use letters and digits only, for example the output 
 FUSEKI_ADMIN_PASSWORD=<generated value>
 ```
 
+Set the Qdrant key in `.env` as well. It is also required, with no default; use letters and
+digits only (for example `openssl rand -hex 24`), and never print or commit it:
+
+```
+QDRANT_API_KEY=<generated value>
+```
+
+Compose reads `.env` for the whole file, so with either value missing every `docker compose`
+command fails (`docker start` of containers that already exist is unaffected).
+
 ```bash
 docker compose up -d
 ```
@@ -505,6 +518,9 @@ This starts:
 - **contextbroker-api** on port `8080` (broker engine; OpenAPI docs at
   `/docs`; endpoints preset for the compose network, override with
   `FUSEKI_QUERY_ENDPOINT` / `VM_QUERY_ENDPOINT` — see `.env.example`)
+- **Qdrant** on `127.0.0.1:6333` (the index for governed knowledge; loopback only, API key
+  required, telemetry off, data in the `qdrant-data` volume). The index is derived from the
+  `knowledge/` files and rebuilt from them, so losing the volume loses nothing.
 - **Fuseki** on `127.0.0.1:3030`, dataset `network-dataset` (topology graph and
   bindings). Both images are multi-arch (amd64/arm64), so this works on Apple Silicon
   and other ARM hosts without emulation.
@@ -529,13 +545,15 @@ the API is not built.
 
 ### Exposure and the image
 
-- VictoriaMetrics (`127.0.0.1:8428`), Fuseki (`127.0.0.1:3030`) and lodlive-proxy
-  (`127.0.0.1:8081`) are bound to loopback. The host-side telemetry simulator still
+- VictoriaMetrics (`127.0.0.1:8428`), Qdrant (`127.0.0.1:6333`), Fuseki (`127.0.0.1:3030`) and
+  lodlive-proxy (`127.0.0.1:8081`) are published on loopback only. The host-side telemetry simulator still
   reaches VictoriaMetrics there.
 - The API on `8080` is published on all interfaces and sits behind the bearer-token
   check below.
 - The API image runs as uid 10001, not root, and excludes `.beads/`, `.planning/`,
-  `scripts/`, `design/` and key files (`*.pem`, `*.key`).
+  `scripts/`, `design/`, `knowledge/` (compose mounts it read-only instead) and key files
+  (`*.pem`, `*.key`). The two embedding models are downloaded at image build, pinned by commit, and the
+  image runs with `HF_HUB_OFFLINE=1`, so nothing is fetched at run time.
 - To apply a compose change to an existing container run `docker compose up -d <service>`.
   Never `docker compose down -v`: it deletes the Fuseki, TMF921 and VictoriaMetrics data and the `broker-state` volume (outcomes, high-water marks, situation records and decision records).
 
@@ -562,7 +580,7 @@ Every `/context/*` route needs `Authorization: Bearer <token>`. `/docs`, `/redoc
 - **Authority claim.** `POST /context/request` and `GET /context/situation/{id}` also need a signed `authority` claim that
   says what the caller may ask about: `entities` (device names written exactly, or `*`
   for all; no patterns), `purposes` (`assurance`, `diagnosis`, `reporting`) and
-  `classes` (`topology`, `goals`, `observations`, `events`). The other routes ignore the claim. A
+  `classes` (`topology`, `goals`, `observations`, `events`, `knowledge`). The other routes ignore the claim. A
   token with the scope but no usable claim is `403 {"detail": "authority claims required"}`
   on those routes only, so a token minted before this claim existed keeps working on
   every other route. The broker keeps no list of tokens or claims: it verifies the signature and reads the
@@ -622,18 +640,19 @@ server must authenticate (Phase 7).
 ## Health
 
 `GET /health` needs no token and takes no parameters. It probes Fuseki (`/$/ping`, with
-the Fuseki credential), VictoriaMetrics (`/health`) and the TMF921 server (`/health`)
-in parallel, pings the state file, and answers with exactly seven fixed keys:
+the Fuseki credential), VictoriaMetrics (`/health`), the TMF921 server (`/health`) and
+Qdrant (`/readyz`, no credential) in parallel, pings the state file, and answers with exactly
+eight fixed keys:
 
 ```json
 {"status": "ok", "fuseki": "answering", "victoriametrics": "answering", "tmf921": "answering",
- "state": "answering",
+ "qdrant": "answering", "state": "answering",
  "evictions": {"outcomes": 0, "marks": 0, "situations": 0, "events": 0},
  "events": {"duplicates": 0, "unmapped": 0,
             "quarantined": {"no priority": 0, "not text": 0, "too long": 0, "unparsable header": 0}}}
 ```
 
-The status is `200` when all four answer and `503` with `"status": "degraded"` when
+The status is `200` when all five answer and `503` with `"status": "degraded"` when
 any one does not (that row reads `"not answering"`). The state store counts toward
 `degraded`, and then `evictions` and `events` are `null`. `evictions` counts, per table, the entries
 removed to make room under the cap since the file was created (whole numbers, kept across
@@ -641,7 +660,7 @@ restarts); see [Situation records](#situation-records). `events` counts the sysl
 ingest command dropped as duplicates, stored without a device (`unmapped`) and refused as
 unreadable, per fixed reason; see [Events](#events). The body never carries a
 hostname, URL, path or server text; the cause goes to the server log as an exception class or
-an HTTP status. Results are cached for 5 s, so a flood of requests makes at most three
+an HTTP status. Results are cached for 5 s, so a flood of requests makes at most four
 upstream probes, one state ping and one read of each counter set per window.
 
 The TMF921 server counts toward `degraded`, so without the `tmf921` compose profile the
@@ -856,12 +875,13 @@ token's `sub`.
 |---|---|
 | `purpose` | One of `assurance`, `diagnosis`, `reporting`. |
 | `scope` | `{"device": ..., "interface": ...}`; `interface` is optional. Letters, digits, `_`, `-` and `/`, at most 128 characters each. |
-| `classes` | One or more of `topology`, `goals`, `observations`, `events`, each at most once. |
+| `classes` | One or more of `topology`, `goals`, `observations`, `events`, `knowledge`, each at most once. |
 | `intent_id` | The TMF921 intent whose goals and placements are wanted. Needed with `goals` and refused without it. |
 | `max_depth`, `relationship_types` | The traversal. `max_depth` is 0 to 3; `relationship_types` is a non-empty set of `has_interface` and `connected_to`. Both are needed with `topology` and refused without it. |
 | `as_of`, `known_at` | Optional offsets such as `10m`, as in [Asking about the past](#asking-about-the-past), limited by the same retention period. |
 | `freshness` | Optional, `1s` to `300s`. It can only tighten the 300 s default, never loosen it. |
 | `window_seconds` | Optional, 1 to 604800, only with the `events` class. How far back from the resolved instant to look for events; the default is `BROKER_EVENT_WINDOW_DEFAULT` (15 minutes). |
+| `topic` | Optional text, 1 to 200 characters (letters, digits, space and `_ . , : / -`), only with the `knowledge` class. What to look for; with none, the search is derived from the purpose and the scope. |
 
 The coherence rules, in one place: `topology` goes with `max_depth` and
 `relationship_types` and nothing else does; `goals` goes with `intent_id` and nothing else
@@ -907,7 +927,7 @@ server. The bodies are fixed strings.
 | 403 | `outside authority scope: entity` | The scope device is not in the token's `entities`. |
 | 403 | `outside authority scope: purpose` | The purpose is not in the token's `purposes`. |
 | 403 | `outside authority scope: class` | A requested class is not in the token's `classes`. |
-| 422 | the validation body | Unknown field, wrong type, unknown purpose, class or relationship type, `max_depth` above 3, an incoherent combination, `window_seconds` without the `events` class, or any query parameter. |
+| 422 | the validation body | Unknown field, wrong type, unknown purpose, class or relationship type, `max_depth` above 3, an incoherent combination, `window_seconds` without the `events` class, `topic` without the `knowledge` class, or any query parameter. |
 | 400 | `as_of is further back than the retention period` (or the `known_at` form) | An offset beyond `BROKER_RETENTION_PERIOD`. |
 | 400 | `window_seconds above the event window maximum` | A `window_seconds` above `BROKER_EVENT_WINDOW_MAX` (24 hours by default). |
 | 400 | `freshness must be from 1 s to 300 s` | A freshness above the default limit (or `0s`). A value that is not digits and one of `s`, `m`, `h`, `d` is a 422. |
@@ -957,11 +977,13 @@ An abridged answer to the request above (times shortened, one metric shown):
 - **Situation.** `situation.id` identifies the question. It is `sit-` followed by 32 hex
   characters of a version-1 hash over the requester, purpose, scope, intent, the valid
   instant (to the second), the knowledge instant, the sorted classes, `max_depth`, the
-  sorted relationship types and, for an events request only, the window. The same question asked at the same instant gets the same id.
+  sorted relationship types and, for an events request only, the window and, for a knowledge
+  request that names a topic, the topic. The same question asked at the same instant gets the same id.
   A different instant is a different situation, so a repeat call that uses an offset
   such as `10m` gets a new id each second. `valid_at` and `known_at` are those resolved
   instants; `historical` is true when `as_of` or `known_at` was given.
-- **Eligibility.** One result per requested class (`topology`, `goals`, `observations`, `events`),
+- **Eligibility.** One result per requested class (`topology`, `goals`, `observations`, `events`,
+  `knowledge`),
   each `eligible`, `ineligible` or `gap`, with fixed-string reasons that name only pinned
   metric names. `gap` means the evidence is absent (no goal, placement or observation to
   judge); `ineligible` means evidence is present but unfit (stale, conflicting, a goal
@@ -972,7 +994,9 @@ An abridged answer to the request above (times shortened, one metric shown):
   requested classes. A sample that is not a finite number is a gap, never eligible. For
   `events`, no event in the window and a window reaching back past the event retention are gaps,
   and an ambiguous event (one host name that matches two devices) is ineligible; a conflict with
-  configured state is never an eligibility reason.
+  configured state is never an eligibility reason. For `knowledge`, no applicable artefact
+  (`no applicable knowledge`), a retrieval that could not run (`knowledge retrieval unavailable`) and a
+  past-time request (`knowledge is current only`) are gaps; draft status is never a reason.
   Eligibility is a fitness label for the evidence. **It grants no execution authority**:
   the action-readiness check is a separate component, and nothing here lets a caller act.
   It is also kept apart from the verdict: it never feeds it, and the two can disagree
@@ -983,6 +1007,8 @@ An abridged answer to the request above (times shortened, one metric shown):
   freshness limit), `configured_state` (only topology or fluent values were found; the
   retrieval time plus the limit, because the time a fact was recorded is not its age),
   `event_window` (an events request that returned events; the retrieval time plus the limit),
+  `knowledge_set` (a knowledge request that returned at least one reference; the retrieval time
+  plus the limit),
   `no_evidence` (nothing was found; it expires at retrieval) and `historical_request`
   (`as_of` or `known_at` was given; a past answer is not reusable as current context, so
   it expires at retrieval). An expiry that is already in the past is reported as it is.
@@ -1013,6 +1039,8 @@ An abridged answer to the request above (times shortened, one metric shown):
   link records or a malformed topology record make the topology class ineligible; a
   scope that is not in the topology is a gap.
 - **Events.** Present only when `events` was asked for, else `null`; see [Events](#events).
+- **Knowledge.** Present only when `knowledge` was asked for, else `null`; see
+  [Knowledge](#knowledge).
 - **Verdict.** Present only when the request names an `intent_id` with both `goals` and
   `observations`; otherwise it is `null`. It comes from the read-only TMF921 assess
   (`success`, `failure` or `inconclusive`), judged on the same goal snapshot and the same
@@ -1125,6 +1153,75 @@ The `events` part of the answer holds:
 
 It never returns the raw line or the message text. The stored situation keeps references to the
 events it rested on, not their content.
+
+### Knowledge
+
+The `knowledge` class returns the governed artefacts that apply to a question, as references. The
+artefacts are Markdown files with YAML front matter in the tracked `knowledge/` directory (four
+draft examples ship, written for this project). Approval is a person changing a file's `status` in a
+reviewed commit; the broker only reads it, never writes it, and a change takes effect when the API
+restarts. The full rules, including why Qdrant was chosen, are in
+[design/knowledge.md](design/knowledge.md).
+
+Mint a token whose authority claim includes the class (add `--class knowledge`), then ask:
+
+```json
+{"purpose": "diagnosis", "scope": {"device": "Router-A", "interface": "GigabitEthernet0/0/0"},
+ "classes": ["knowledge"], "topic": "interface errors"}
+```
+
+An abridged answer built from the tracked drafts, with one reference shown (the `topic` is
+optional; the position in the list depends on the index; the eligibility and expiry parts are as for
+any class):
+
+```json
+"knowledge": {
+  "retrieval": "answered", "cap": 10, "truncated": false, "withheld": 0,
+  "references": [
+    {"identifier": "interface-error-handling", "version": "1.0", "status": "draft",
+     "title": "Reading rising interface errors on a router interface",
+     "content_hash": "sha256:879251cf9c7d91816b2feab28a4a00dceae910bf4f4ad07279791266a5f41e59",
+     "matched_scope": {"entities": ["Router-*"], "purpose": "diagnosis", "ontology_class": "Interface"},
+     "source_references": ["repo:design/event-store.md", "metric:packet_loss_percent"],
+     "retrieval_rank": 1,
+     "linked_actions": [{"template_id": "example-collect-interface-counters", "version": "1.0",
+                         "approved": true}],
+     "unresolved_actions": 0,
+     "provenance": {"source_system": "okf", "reference": "interface-error-handling@1.0",
+                    "observed_at": null, "retrieved_at": "2026-11-06T12:00:00+00:00"}}
+  ]
+}
+```
+
+- **A reference, not the text.** Each reference gives the identifier, version, status, title, content
+  hash, the part of the artefact's declared scope that matched, its source references, a position
+  in the list (`retrieval_rank`, not a score) and the approved actions it links to. There is no body,
+  no excerpt and no similarity value; read the Markdown from the repository, and compare the content
+  hash. The status is shown as it is: a draft is not an approval, and the broker never adds statuses
+  up into one.
+- **How an artefact applies.** By its declared scope only: an entity pattern (`*`, an exact name or a
+  prefix ending in `*`) that matches the device or the node, the purpose, and the node class when it
+  declares one. Only the latest version of an identifier is considered, and a withdrawn latest
+  version removes the identifier. The Qdrant index (dense and BM25 vectors fused by rank) only
+  orders candidates; the loaded files decide each one.
+- **Withheld, cap.** `withheld` counts artefacts for entities the token does not cover, without
+  naming them. At most 10 references are returned and `truncated` says when more applied.
+- **Three outcomes.** `retrieval` is `answered`, `unavailable` (the knowledge index or the models
+  could not be used) or `not_current` (the request has `as_of` or `known_at`; the files hold no
+  history). The last two and an answer with no reference are gaps with the fixed reasons
+  `knowledge retrieval unavailable`, `knowledge is current only` and `no applicable knowledge`. The
+  other classes and the verdict are not affected, and the API starts without Qdrant.
+- **Action references.** A linked action appears only when the catalogue file
+  (`knowledge/action-catalogue.yaml`) holds an approved version of it that matches the scope. It is
+  a template id and version. Nothing in the broker executes or schedules an action.
+- **Refusals.** A token without the `knowledge` class is refused with `outside authority scope: class`
+  before any retrieval.
+- **Situation record.** The stored record keeps one provenance record per reference and the topic, and
+  no title, hash or text.
+
+Operator notes: `QDRANT_API_KEY` must be in `.env` (see [Start the data stores](#3-start-the-data-stores)),
+`/health` reports `qdrant`, and the state file gets no new table. The image's rollback caveat for
+situation rows is in [design/knowledge.md](design/knowledge.md).
 
 ## Using an external TMF921 intent server
 
@@ -1256,7 +1353,7 @@ Docker required to run the suite:
 pytest tests/ -v
 ```
 
-The full suite is 2249 passed and 26 skipped (the 15 live TMF921 tests and the 11 real-engine
+The full suite is 2546 passed and 26 skipped (the 15 live TMF921 tests and the 11 real-engine
 parity tests are skipped unless their variables are set).
 
 Every test gets its own state file and decision-record file from `tests/conftest.py`, so no test
