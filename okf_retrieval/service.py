@@ -183,9 +183,13 @@ class KnowledgeService:
         if dropped:
             log.warning(CANDIDATE_DROPPED)
 
-        references = tuple(
-            ApplicableRef(bundle=bundle, match=match, rank=rank, actions=(), unresolved_actions=0)
-            for rank, (bundle, match) in enumerate(kept[:KNOWLEDGE_RESULT_CAP], start=1))
+        references = []
+        for rank, (bundle, match) in enumerate(kept[:KNOWLEDGE_RESULT_CAP], start=1):
+            actions, unresolved = resolve_actions(files.catalogue, bundle.linked_actions,
+                                                  device=device, node_id=node_id)
+            references.append(ApplicableRef(bundle=bundle, match=match, rank=rank, actions=actions,
+                                            unresolved_actions=unresolved))
+        references = tuple(references)
         return Retrieval("answered", references, withheld, len(kept) > KNOWLEDGE_RESULT_CAP)
 
     def close(self) -> None:
