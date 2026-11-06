@@ -10,6 +10,7 @@ import logging
 import os
 import stat
 from collections.abc import Mapping
+from itertools import islice
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
@@ -153,11 +154,22 @@ def _split(text: str) -> tuple[str, str]:
 
 
 def parse_bundle(path: Path, raw: bytes) -> Bundle:
-    """The bundle in `raw`, the bytes of the file at `path`, or a LoadError with a fixed reason."""
+    """The bundle in `raw`, the bytes of the file at `path`, or a LoadError with a fixed reason.
+
+    The checks run in this order: size, UTF-8, byte order mark, carriage return, front matter split, YAML,
+    the strict model, the path against the front matter, the version, the body. The bytes are hashed as
+    read, so a portable hash needs LF line endings and no byte order mark.
+    """
+    if len(raw) > MAX_FILE_BYTES:
+        raise LoadError("too large")
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         raise LoadError("not utf-8") from None
+    if text.startswith("\ufeff"):
+        raise LoadError("byte order mark")
+    if "\r" in text:
+        raise LoadError("carriage return")
     front_text, body = _split(text)
     data = _load_yaml(front_text)
     try:
@@ -172,6 +184,10 @@ def parse_bundle(path: Path, raw: bytes) -> Bundle:
     except ValueError:
         raise LoadError("invalid version") from None
     body = body.strip()
+    if not body:
+        raise LoadError("no body")
+    if len(body) > MAX_BODY_CHARS:
+        raise LoadError("body too long")
     return Bundle(
         identifier=front.identifier,
         version=front.version,
@@ -189,27 +205,69 @@ def parse_bundle(path: Path, raw: bytes) -> Bundle:
 
 
 def _read(path: Path) -> bytes:
+    """The bytes of a regular `.md` file that is not a symlink, read no further than the size cap."""
     st = os.lstat(path)
-    if not stat.S_ISREG(st.st_mode):
+    if stat.S_ISLNK(st.st_mode):
+        raise LoadError("symlink")
+    if not stat.S_ISREG(st.st_mode) or path.suffix != ".md":
         raise LoadError("not a bundle file")
-    with open(path, "rb") as handle:
-        return handle.read()
+    if st.st_size > MAX_FILE_BYTES:
+        raise LoadError("too large")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        raise LoadError("not a bundle file") from None
+    with os.fdopen(descriptor, "rb") as handle:
+        return handle.read(MAX_FILE_BYTES + 1)
+
+
+def _entries(path: Path, budget: int) -> list[os.DirEntry]:
+    """The entries of a directory by name, at most `budget` of them, else LoadError("too many files")."""
+    try:
+        with os.scandir(path) as found:
+            entries = list(islice(found, budget + 1))
+    except OSError:
+        raise LoadError("no bundles directory") from None
+    if len(entries) > budget:
+        raise LoadError("too many files")
+    return sorted(entries, key=lambda entry: entry.name)
+
+
+def _walk(base: Path) -> dict[str, list[Path]]:
+    """The files of each identifier directory under `base`, every entry walked counted against
+    MAX_FILES before any file is read. A symlink, a stray file or a name that is not an identifier is
+    skipped with a fixed line that does not name it."""
+    budget = MAX_FILES
+    walked: dict[str, list[Path]] = {}
+    top = _entries(base, budget)
+    budget -= len(top)
+    for entry in top:
+        if entry.is_symlink():
+            log.warning("knowledge entry skipped: symlink")
+        elif not entry.is_dir(follow_symlinks=False):
+            log.warning("knowledge entry skipped: not a bundle directory")
+        elif not IDENTIFIER_RE.fullmatch(entry.name):
+            log.warning("knowledge entry skipped: name is not an identifier")
+        else:
+            children = _entries(Path(entry.path), budget)
+            budget -= len(children)
+            walked[entry.name] = [Path(child.path) for child in children]
+    return walked
 
 
 def load_bundles(root: Path) -> BundleSet:
     """Read every `<root>/bundles/<identifier>/<version>.md` and keep the latest servable version of
-    each identifier. A refused file blocks its identifier; withdrawn latest removes it without blocking."""
+    each identifier. A refused file blocks its identifier; a withdrawn latest version removes it without
+    blocking. Raises LoadError for a missing bundles directory or more entries than MAX_FILES."""
     base = Path(root) / "bundles"
-    if not base.is_dir():
+    if base.is_symlink() or not base.is_dir():
         raise LoadError("no bundles directory")
+    walked = _walk(base)
     parsed: dict[str, list[Bundle]] = {}
     blocked: set[str] = set()
-    for directory in sorted(p for p in base.iterdir() if p.is_dir()):
-        identifier = directory.name
-        if not IDENTIFIER_RE.fullmatch(identifier):
-            continue
+    for identifier, paths in walked.items():
         parsed[identifier] = []
-        for path in sorted(directory.iterdir()):
+        for path in paths:
             try:
                 parsed[identifier].append(parse_bundle(path, _read(path)))
             except LoadError as exc:
