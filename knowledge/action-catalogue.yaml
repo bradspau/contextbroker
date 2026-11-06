@@ -1,0 +1,17 @@
+templates:
+  - template_id: example-collect-interface-counters
+    version: "1.0"
+    scope_pattern: "Router-*"
+    preconditions:
+      - "interface exists in the topology"
+    expected_outcome: "interface counters are read and recorded"
+    recovery: "none needed; the action only reads"
+    approved: true
+  - template_id: example-restart-interface
+    version: "1.0"
+    scope_pattern: "Router-*"
+    preconditions:
+      - "interface exists in the topology"
+    expected_outcome: "interface returns to forwarding"
+    recovery: "restore the previous interface state"
+    approved: false
