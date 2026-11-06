@@ -24,6 +24,10 @@ def _version_key(version: str) -> tuple[int, ...]:
     return tuple(int(p) for p in version.split("."))
 
 
+# The public name other packages import; the private name stays for this module's own use.
+version_key = _version_key
+
+
 class ActionCatalogue:
     def __init__(self, templates: Iterable[ActionTemplate] = ()):
         self._templates: list[ActionTemplate] = []
