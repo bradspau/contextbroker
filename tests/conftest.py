@@ -17,6 +17,12 @@ def _per_test_state_files(tmp_path, monkeypatch):
     monkeypatch.setenv("BROKER_DECISION_RECORDS_PATH", str(tmp_path / "decision-records.sqlite3"))
     # No test can probe or write a real Qdrant: the URL points at a closed loopback port.
     monkeypatch.setenv("BROKER_QDRANT_URL", "http://127.0.0.1:1")
+    # The real embedder always refuses in tests: the model directory does not exist (D-36).
+    monkeypatch.setenv("BROKER_EMBED_MODEL_DIR", str(tmp_path / "no-models"))
+    from okf_retrieval.service import reset_service
+
     reset_store()
+    reset_service()
     yield
+    reset_service()
     reset_store()
