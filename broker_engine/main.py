@@ -22,6 +22,7 @@ from broker_engine.pruner import prune  # noqa: F401
 from broker_engine.validation import ClientInputError, max_as_of_seconds
 from broker_state.process import load_settings, open_process_store, reset_store
 from broker_state.store import STATE_UNAVAILABLE, StateUnavailable
+from okf_retrieval.service import get_service, reset_service
 from broker_engine.tsdb_joiner import join_observed_metric
 from data_contracts.context_contract import ContextRequest, ContextResponse
 from data_contracts.situation_record import SituationRecord
@@ -105,12 +106,18 @@ async def _lifespan(_app: FastAPI):
 
     A malformed state variable raises ValueError (it names the variable, never the value) and an
     unusable file raises StateUnavailable; either stops the start-up, so the API never serves without
-    its state and never falls back to memory. The open is one blocking call before any request."""
+    its state and never falls back to memory. The open is one blocking call before any request.
+
+    The knowledge files are then loaded and the index synced on a best-effort basis: a missing Qdrant or
+    model directory is logged by the service and never stops the start-up (a changed or wiped index heals
+    on the next request)."""
     load_settings()
     open_process_store()
     try:
+        get_service().startup()
         yield
     finally:
+        reset_service()
         reset_store()
 
 
