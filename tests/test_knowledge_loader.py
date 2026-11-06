@@ -292,3 +292,121 @@ def test_file_text_reaches_neither_a_log_line_nor_an_exception(tmp_path, caplog,
 def test_the_loader_never_logs_a_traceback():
     source = (loader.__file__ and open(loader.__file__).read())
     assert "exc_info=" not in source and ".exception(" not in source
+
+
+# ---- the action catalogue file (Task 3) ----
+
+from artefact_governance.action_catalogue import ActionCatalogue  # noqa: E402
+from okf_retrieval.loader import CATALOGUE_FILE, MAX_TEMPLATES, load_catalogue  # noqa: E402
+from tests.okf_helpers import TEMPLATE, write_catalogue  # noqa: E402
+
+UNAPPROVED = {**TEMPLATE, "template_id": "example-restart-interface", "approved": False,
+              "expected_outcome": "interface returns to forwarding"}
+
+
+def test_the_catalogue_file_seeds_the_catalogue_with_approved_latest_semantics(tmp_path):
+    write_catalogue(tmp_path, [TEMPLATE, UNAPPROVED])
+    catalogue = load_catalogue(tmp_path)
+    assert isinstance(catalogue, ActionCatalogue)
+    template = catalogue.get("example-collect-interface-counters")
+    assert template.version == "1.0" and template.scope_pattern == "Router-*"
+    assert template.preconditions == ("interface exists in the topology",)
+    assert template.expected_outcome == "interface counters are read and recorded"
+    assert template.recovery == "none needed; the action only reads"
+    assert template.approved is True
+    assert catalogue.get("example-restart-interface") is None
+
+
+def test_a_newer_unapproved_version_does_not_hide_the_older_approved_one(tmp_path):
+    write_catalogue(tmp_path, [TEMPLATE, {**TEMPLATE, "version": "2.0", "approved": False}])
+    assert load_catalogue(tmp_path).get("example-collect-interface-counters").version == "1.0"
+
+
+def test_a_missing_catalogue_file_is_an_empty_catalogue_and_one_fixed_line(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING):
+        catalogue = load_catalogue(tmp_path)
+    assert catalogue.get("example-collect-interface-counters") is None
+    assert caplog.text.count("knowledge action catalogue missing") == 1
+
+
+def _catalogue_cases():
+    good = None
+    many = [{**TEMPLATE, "version": f"1.{n}"} for n in range(MAX_TEMPLATES + 1)]
+    return [
+        ("duplicate key", b"templates: []\ntemplates: []\n"),
+        ("not yaml", b"templates: [unclosed\n"),
+        ("not a mapping", b"- a\n- b\n"),
+        ("no templates key", b"other: []\n"),
+        ("unknown top key", b"templates: []\nextra: 1\n"),
+        ("unknown field", ("add", {**TEMPLATE, "extra": 1})),
+        ("missing field", ("add", {k: v for k, v in TEMPLATE.items() if k != "recovery"})),
+        ("string approved", ("add", {**TEMPLATE, "approved": "true"})),
+        ("equal versions", ("many", [TEMPLATE, {**TEMPLATE, "version": "1.00"}])),
+        ("bad scope pattern", ("add", {**TEMPLATE, "scope_pattern": "Router-?"})),
+        ("bad template id", ("add", {**TEMPLATE, "template_id": "Bad_ID"})),
+        ("bad version", ("add", {**TEMPLATE, "version": "one"})),
+        ("too many templates", ("many", many)),
+        ("too many preconditions", ("add", {**TEMPLATE, "preconditions": ["x"] * 11})),
+        ("non-ascii text", ("add", {**TEMPLATE, "recovery": "café"})),
+        ("byte order mark", ("bytes", b"\xef\xbb\xbf" + b"templates: []\n")),
+        ("carriage return", ("bytes", b"templates: []\r\n")),
+        ("not utf-8", ("bytes", b"templates: []\n\xff")),
+        ("too large", ("bytes", b"templates: []\n# " + b"a" * MAX_FILE_BYTES)),
+    ]
+
+
+def _catalogue_bytes(tmp_path, spec):
+    if isinstance(spec, bytes):
+        return spec
+    kind, value = spec
+    if kind == "bytes":
+        return value
+    write_catalogue(tmp_path, value if kind == "many" else [value])
+    return (tmp_path / CATALOGUE_FILE).read_bytes()
+
+
+@pytest.mark.parametrize("name", [c[0] for c in _catalogue_cases()])
+def test_a_bad_catalogue_file_is_refused_with_the_fixed_reason(tmp_path, name):
+    spec = dict(_catalogue_cases())[name]
+    (tmp_path / CATALOGUE_FILE).write_bytes(_catalogue_bytes(tmp_path, spec))
+    with pytest.raises(LoadError) as raised:
+        load_catalogue(tmp_path)
+    assert raised.value.reason == "invalid catalogue" and str(raised.value) == "invalid catalogue"
+    assert raised.value.__cause__ is None
+
+
+def test_an_unquoted_catalogue_version_is_refused(tmp_path):
+    write_catalogue(tmp_path, [TEMPLATE])
+    path = tmp_path / CATALOGUE_FILE
+    path.write_bytes(path.read_bytes().replace(b'"1.0"', b"1.0"))
+    with pytest.raises(LoadError) as raised:
+        load_catalogue(tmp_path)
+    assert raised.value.reason == "invalid catalogue"
+
+
+def test_a_symlinked_catalogue_file_is_refused(tmp_path):
+    real = tmp_path / "elsewhere.yaml"
+    real.write_bytes(b"templates: []\n")
+    (tmp_path / CATALOGUE_FILE).symlink_to(real)
+    with pytest.raises(LoadError) as raised:
+        load_catalogue(tmp_path)
+    assert raised.value.reason == "invalid catalogue"
+
+
+def test_catalogue_file_text_is_not_in_the_exception(tmp_path):
+    write_catalogue(tmp_path, [{**TEMPLATE, "recovery": SENTINEL + "é"}])
+    with pytest.raises(LoadError) as raised:
+        load_catalogue(tmp_path)
+    assert SENTINEL not in str(raised.value) and SENTINEL not in repr(raised.value)
+
+
+def test_the_loader_imports_no_action_execution_package():
+    import ast
+    tree = ast.parse(open(loader.__file__).read())
+    names = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names.append(node.module or "")
+        elif isinstance(node, ast.Import):
+            names += [a.name for a in node.names]
+    assert not [n for n in names if n.split(".")[0] in {"action_lifecycle", "governance_gate", "loop_coordination"}]

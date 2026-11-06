@@ -18,7 +18,7 @@ from typing import Annotated, Literal
 import yaml
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError
 
-from artefact_governance.action_catalogue import version_key
+from artefact_governance.action_catalogue import ActionCatalogue, ActionTemplate, version_key
 from data_contracts.context_contract import PURPOSES
 from data_contracts.knowledge import (
     ENTITY_PATTERN_RE,
@@ -131,6 +131,24 @@ class _FrontMatter(BaseModel):
     scope: _Scope
     source_references: list[_Source] = Field(min_length=1, max_length=_MAX_LIST)
     linked_actions: list[_Identifier] = Field(default_factory=list, max_length=_MAX_LIST)
+
+
+class _Template(BaseModel):
+    """One action template: exactly the seven ActionTemplate fields, all required."""
+
+    model_config = _STRICT
+    template_id: _Identifier
+    version: str
+    scope_pattern: _Entity
+    preconditions: list[_Title] = Field(max_length=10)
+    expected_outcome: _Title
+    recovery: _Title
+    approved: bool
+
+
+class _CatalogueFile(BaseModel):
+    model_config = _STRICT
+    templates: list[_Template] = Field(max_length=MAX_TEMPLATES)
 
 
 def _load_yaml(text: str):
@@ -283,3 +301,54 @@ def load_bundles(root: Path) -> BundleSet:
             log.warning("knowledge bundle refused: %s: %s", identifier, "duplicate version")
             blocked.add(identifier)
     return BundleSet(latest=latest, blocked=frozenset(blocked))
+
+
+def _catalogue_front(raw: bytes):
+    """The parsed catalogue file, or LoadError("invalid catalogue") for any failure."""
+    if len(raw) > MAX_FILE_BYTES:
+        raise LoadError("invalid catalogue")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise LoadError("invalid catalogue") from None
+    if text.startswith("\ufeff") or "\r" in text:
+        raise LoadError("invalid catalogue")
+    try:
+        return _CatalogueFile.model_validate(_load_yaml(text))
+    except (LoadError, ValidationError):
+        raise LoadError("invalid catalogue") from None
+
+
+def load_catalogue(root: Path) -> ActionCatalogue:
+    """The action catalogue in `<root>/action-catalogue.yaml`, read-only (D-46).
+
+    A missing file is an empty catalogue and one fixed log line. Anything else wrong with the file raises
+    LoadError("invalid catalogue"). The file is read, never written; `ActionCatalogue.get` keeps its
+    approved-latest meaning, and nothing here executes or schedules an action.
+    """
+    path = Path(root) / CATALOGUE_FILE
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        log.warning("knowledge action catalogue missing")
+        return ActionCatalogue()
+    except OSError:
+        raise LoadError("invalid catalogue") from None
+    if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_FILE_BYTES:
+        raise LoadError("invalid catalogue")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as handle:
+            raw = handle.read(MAX_FILE_BYTES + 1)
+    except OSError:
+        raise LoadError("invalid catalogue") from None
+    front = _catalogue_front(raw)
+    try:
+        return ActionCatalogue(
+            ActionTemplate(
+                template_id=t.template_id, version=t.version, scope_pattern=t.scope_pattern,
+                preconditions=tuple(t.preconditions), expected_outcome=t.expected_outcome,
+                recovery=t.recovery, approved=t.approved)
+            for t in front.templates)
+    except ValueError:
+        raise LoadError("invalid catalogue") from None
