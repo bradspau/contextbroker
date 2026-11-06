@@ -74,3 +74,65 @@ def write_catalogue(root: Path, templates) -> Path:
         for t in templates)
     path.write_bytes(text.encode("utf-8"))
     return path
+
+
+# --- Retrieval test doubles (plan 06-02): a fake embedder and Qdrant clients that need no model or network.
+import hashlib
+import math
+import re
+
+_WORD = re.compile(r"[a-z0-9]+")
+
+
+def _word_hash(word: str) -> int:
+    return int.from_bytes(hashlib.sha256(word.encode("utf-8")).digest()[:4], "big")
+
+
+class FakeEmbedder:
+    """A deterministic embedder: dense is an L2-normalised hashed bag of lower-cased words, sparse is word-hash counts.
+
+    `documents` counts the texts embedded by embed_documents, so a test can show a call was or was not made.
+    """
+
+    dim = 16
+    fingerprint = "fake:16"
+
+    def __init__(self) -> None:
+        self.documents = 0
+
+    @staticmethod
+    def _dense(text: str) -> list[float]:
+        vector = [0.0] * FakeEmbedder.dim
+        for word in _WORD.findall(text.lower()):
+            vector[_word_hash(word) % FakeEmbedder.dim] += 1.0
+        norm = math.sqrt(sum(x * x for x in vector))
+        return [x / norm for x in vector] if norm else vector
+
+    @staticmethod
+    def _sparse(text: str):
+        from okf_retrieval.embedder import Sparse
+        counts: dict[int, float] = {}
+        for word in _WORD.findall(text.lower()):
+            key = _word_hash(word)
+            counts[key] = counts.get(key, 0.0) + 1.0
+        keys = sorted(counts)
+        return Sparse(indices=tuple(keys), values=tuple(counts[k] for k in keys))
+
+    def embed_documents(self, texts):
+        self.documents += len(texts)
+        return [(self._dense(t), self._sparse(t)) for t in texts]
+
+    def embed_query(self, text):
+        return self._dense(text), self._sparse(text)
+
+
+def local_client():
+    """An in-process Qdrant client: the production query code runs unmodified, with no server."""
+    from qdrant_client import QdrantClient
+    return QdrantClient(":memory:")
+
+
+def closed_client():
+    """A real client pointed at a closed port: constructed without a call, raises when used."""
+    from okf_retrieval.index import make_client
+    return make_client("http://127.0.0.1:1", None, 1)
