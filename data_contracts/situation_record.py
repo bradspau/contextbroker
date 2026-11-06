@@ -7,6 +7,9 @@ metric value, no envelope and no fluent value: those are fetched again from thei
 stored situation can never be read as the data itself (D-07).
 
 When the events class was answered, the evidence also lists one provenance record per returned event.
+When the knowledge class was answered, it lists one provenance record per returned reference (the
+artefact's identifier and version): a fetched situation points at the artefacts it rested on and holds
+no title and no body.
 
 It reuses the Phase 3 response models. The module is pure: no FastAPI and no I/O.
 """
@@ -19,6 +22,7 @@ from data_contracts.context_contract import (
     EXPIRY_CONFIGURED,
     EXPIRY_EVENT_WINDOW,
     EXPIRY_HISTORICAL,
+    EXPIRY_KNOWLEDGE,
     EXPIRY_NO_EVIDENCE,
     EXPIRY_OBSERVATION,
     ContextResponse,
@@ -51,8 +55,8 @@ class StoredSituation(_Record):
     situation: Situation
     eligibility: Eligibility
     expires_at: str
-    expiry_basis: Literal[EXPIRY_HISTORICAL, EXPIRY_OBSERVATION, EXPIRY_EVENT_WINDOW, EXPIRY_CONFIGURED,
-                          EXPIRY_NO_EVIDENCE]
+    expiry_basis: Literal[EXPIRY_HISTORICAL, EXPIRY_OBSERVATION, EXPIRY_EVENT_WINDOW, EXPIRY_KNOWLEDGE,
+                          EXPIRY_CONFIGURED, EXPIRY_NO_EVIDENCE]
     evidence: Evidence
     verdict: Literal[_VERDICTS] | None
 
@@ -84,6 +88,10 @@ def stored_situation(response: ContextResponse) -> StoredSituation:
         # events it rested on and holds none of them (D-07).
         for event in response.events.events:
             seen.setdefault(_key(event.provenance), event.provenance)
+    if response.knowledge is not None:
+        # A reference per returned artefact, never the artefact: no title, hash or text is kept (D-45).
+        for reference in response.knowledge.references:
+            seen.setdefault(_key(reference.provenance), reference.provenance)
     nodes = sorted(node.id for node in response.graph.nodes) if response.graph is not None else []
     label = response.verdict.get("verdict") if response.verdict is not None else None
     return StoredSituation(

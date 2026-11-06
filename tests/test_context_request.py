@@ -150,7 +150,8 @@ def test_topology_request_returns_situation_graph_eligibility_and_expiry(rig):
         "id": expected_id, "requester": "test-caller", "purpose": "diagnosis",
         "scope": {"device": "Router-A", "interface": None}, "intent_id": None, "classes": ["topology"],
         "max_depth": 3, "relationship_types": sorted(BOTH), "valid_at": NOW.isoformat(),
-        "known_at": None, "retrieved_at": NOW.isoformat(), "historical": False, "window_seconds": None}
+        "known_at": None, "retrieved_at": NOW.isoformat(), "historical": False, "window_seconds": None,
+        "topic": None}
     assert out["eligibility"] == {
         "result": "eligible", "classes": {"topology": {"result": "eligible", "reasons": []}},
         "reasons": []}
@@ -1394,3 +1395,21 @@ def test_a_conflict_never_reaches_the_verdict_or_the_assess_call(olt):
     assert shape(with_events[1]) == shape(without[1])
     assert with_events[0]["verdict"] == without[0]["verdict"] == {"verdict": "success", "reasons": []}
     assert with_events[0]["eligibility"]["classes"]["goals"] == without[0]["eligibility"]["classes"]["goals"]
+
+
+def test_the_openapi_document_lists_knowledge_and_the_topic_without_names(rig):
+    spec = client.get("/openapi.json").json()
+    schemas = spec["components"]["schemas"]
+    assert "knowledge" in schemas["ContextRequest"]["properties"]["classes"]["items"]["enum"]
+    assert "topic" in schemas["ContextRequest"]["properties"]
+    assert "topic" in schemas["Situation"]["properties"]
+    assert "knowledge" in schemas["ContextResponse"]["properties"]
+    for name in ("KnowledgeResult", "KnowledgeRef", "MatchedScope", "ActionRef"):
+        assert name in schemas
+    assert "never" in schemas["KnowledgeRef"]["description"]
+    text = str(spec)
+    for banned in ("Router-A", "olt1", "interface-error-handling", "latency-goal-investigation",
+                   "topology-change-check", "out-of-scope-decoy", "Switch-Decoy-9",
+                   "example-collect-interface-counters", "test-caller"):
+        assert banned not in text
+    rig.untouched()

@@ -6,6 +6,12 @@ recognised event on a mapped device is returned it also reads the device's link 
 (SELECT only) and publishes a contradiction as a conflict naming both sides; the configured side is
 never written and the conflict never reaches the eligibility or the verdict.
 
+The knowledge class reads reviewed files, ranked by a retrieval index (the index orders, the files decide
+which apply), and is judged on its own. It returns references only: the identifier, version, status,
+title, content hash, matched scope, source references and the approved actions by id and version, never
+the body of an artefact or a ranking value. It never executes or schedules an action, and it never feeds
+the verdict or the eligibility of another class.
+
 It composes the pure modules (the request contract, eligibility, the Context Graph, the binding
 selection) over the sources: one Fuseki read for the intent's fluents, the Context Graph reads, one
 VictoriaMetrics read per placed metric, and for the events class one read of the state file. It
@@ -214,7 +220,7 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
         requester=caller.requester, purpose=body.purpose, device=body.scope.device,
         interface=body.scope.interface, intent_id=body.intent_id, valid_at=times.valid_at,
         known_at=times.known_at, classes=classes, max_depth=body.max_depth,
-        relationship_types=relationship_types, window_seconds=window_s)
+        relationship_types=relationship_types, window_seconds=window_s, topic=body.topic)
 
     eligibility = {}
     fluent_values: list[FluentValue] = []
@@ -394,7 +400,7 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
                                         references=[], withheld=0)
         else:
             found = get_service().retrieve(
-                device=body.scope.device, interface=body.scope.interface, purpose=body.purpose, topic=None,
+                device=body.scope.device, interface=body.scope.interface, purpose=body.purpose, topic=body.topic,
                 token_entities=authority.entities)
             knowledge = KnowledgeResult(
                 retrieval=found.outcome, cap=KNOWLEDGE_RESULT_CAP, truncated=found.truncated,
@@ -406,7 +412,8 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
         retrieved_at=now, observation_times=observation_times,
         configured_evidence=bool((graph is not None and graph.nodes) or fluent_values),
         limit_s=times.limit_s, historical=times.historical,
-        event_evidence=events is not None and bool(events.events))
+        event_evidence=events is not None and bool(events.events),
+        knowledge_evidence=knowledge is not None and bool(knowledge.references))
     fluent_values.sort(key=lambda v: (v.context_class, v.kind, v.subject, v.valid_from or ""))
     response = ContextResponse(
         situation=Situation(
@@ -414,7 +421,7 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
             intent_id=body.intent_id, classes=classes, max_depth=body.max_depth,
             relationship_types=relationship_types, valid_at=_iso(times.valid_at),
             known_at=_iso(times.known_at), retrieved_at=_iso(now), historical=times.historical,
-            window_seconds=window_s),
+            window_seconds=window_s, topic=body.topic),
         eligibility=overall({name: eligibility[name] for name in CONTEXT_CLASSES if name in eligibility}),
         expires_at=_iso(expires_at), expiry_basis=basis, fluent_values=fluent_values,
         envelopes=envelopes, graph=graph, events=events, knowledge=knowledge, verdict=verdict)

@@ -4,6 +4,7 @@ The tracked `knowledge/` directory, an in-memory Qdrant and the fake embedder st
 service. The route, the token and the situation store are the real ones.
 """
 import json
+from datetime import timedelta
 import re
 from unittest.mock import patch
 
@@ -293,3 +294,84 @@ def test_the_eligibility_has_one_entry_per_requested_class(name, olt, tmp_path):
     assert set(out["eligibility"]["classes"]) == set(body["classes"])
     assert out["eligibility"]["classes"]["knowledge"] == {"result": "eligible", "reasons": []}
     assert out["knowledge"]["references"][0]["identifier"] == OLT_TREE_ID
+
+
+# ---- the topic steers retrieval and is its own situation ----
+
+class SpyEmbedder(FakeEmbedder):
+    queries = []
+
+    def embed_query(self, text):
+        SpyEmbedder.queries.append(text)
+        return super().embed_query(text)
+
+
+def test_the_topic_is_the_retrieval_query_and_is_shown_in_the_situation(rig):
+    SpyEmbedder.queries = []
+    serve(embedder_factory=SpyEmbedder)
+    topic = "interface errors on the router interface"
+    out = ask({**INTERFACE, "topic": topic}).json()
+    assert SpyEmbedder.queries == [topic]
+    assert out["situation"]["topic"] == topic
+    assert {ref["identifier"] for ref in out["knowledge"]["references"]} == REAL
+    assert ask().json()["situation"]["topic"] is None
+    assert SpyEmbedder.queries[-1] == "diagnosis interface"
+
+
+def test_each_topic_is_its_own_situation(rig, served):
+    plain = ask().json()["situation"]["id"]
+    first = ask({**INTERFACE, "topic": "interface errors"}).json()["situation"]["id"]
+    second = ask({**INTERFACE, "topic": "latency goal"}).json()["situation"]["id"]
+    assert len({plain, first, second}) == 3
+    assert ask({**INTERFACE, "topic": "interface errors"}).json()["situation"]["id"] == first
+    assert get_store().situation_count() == 3
+
+
+def test_a_topic_without_the_knowledge_class_is_422(rig, served):
+    topology = {"purpose": "diagnosis", "scope": {"device": "Router-A"}, "classes": ["topology"],
+                "max_depth": 1, "relationship_types": ["has_interface"], "topic": "interface errors"}
+    r = ask(topology, {**WIDE, "classes": ["topology"]})
+    assert r.status_code == 422 and "topic needs the knowledge class" in r.text
+
+
+@pytest.mark.parametrize("topic", ["", "a" * 201, "a;b", "a\nb", 5, True])
+def test_a_hostile_topic_is_422_and_retrieves_nothing(topic, rig, served):
+    with patch.object(KnowledgeService, "retrieve") as retrieve:
+        r = ask({**INTERFACE, "topic": topic})
+    assert r.status_code == 422
+    retrieve.assert_not_called()
+    assert get_store().situation_count() == 0
+
+
+# ---- expiry ----
+
+def test_a_current_answer_with_references_expires_a_limit_after_retrieval(rig, served):
+    out = ask().json()
+    assert out["expiry_basis"] == "knowledge_set"
+    assert out["expires_at"] == (NOW + timedelta(seconds=300)).isoformat()
+    short = ask({**INTERFACE, "freshness": "1m"}).json()
+    assert short["expires_at"] == (NOW + timedelta(seconds=60)).isoformat()
+
+
+def test_an_empty_answer_has_no_evidence_expiry(rig, served):
+    out = ask({**DEVICE, "scope": {"device": "Switch-Z"}}).json()
+    assert out["expiry_basis"] == "no_evidence" and out["expires_at"] == NOW.isoformat()
+
+
+def test_an_answer_with_an_observation_expires_at_the_oldest_observation(olt, tmp_path):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt, age_s=30)
+    live_goal(olt)
+    serve(root=olt_tree(tmp_path))
+    body = {**ASK, "classes": ["goals", "observations", "knowledge"]}
+    out = post(body, headers=token(ASSURE_KNOWLEDGE, scopes=SCOPES)).json()
+    assert out["expiry_basis"] == "oldest_observation"
+
+
+def test_an_answer_with_events_keeps_the_event_window_basis(rig, served):
+    from tests.test_context_request import event, put
+    put(event(1))
+    body = {"purpose": "diagnosis", "scope": {"device": "Router-A"}, "classes": ["events", "knowledge"]}
+    out = ask(body, {**WIDE, "classes": ["events", "knowledge"]}).json()
+    assert out["knowledge"]["references"] and out["events"]["events"]
+    assert out["expiry_basis"] == "event_window"

@@ -303,6 +303,60 @@ def test_the_identity_of_an_events_request_matches_its_pinned_known_answer():
     assert situation_id(**EVENT_IDENTITY) == "sit-cbb90b643cb87083175cc9640008817a"
 
 
+KNOWLEDGE_IDENTITY = dict(requester="alice", purpose="diagnosis", device="Router-A", interface=None,
+                          intent_id=None, valid_at=T0, known_at=None, classes=["knowledge"], max_depth=None,
+                          relationship_types=None)
+KNOWLEDGE_NO_TOPIC = "sit-bb260446e080cfec31f5fe1ebe6afb3d"
+KNOWLEDGE_TOPIC = "sit-5d99dd6640b6fd47a02597c2f0264328"
+
+
+def _known_answer(topic_key):
+    text = ('{"classes":["knowledge"],"intent":null,"known":null,"max_depth":null,"purpose":"diagnosis",'
+            '"relationship_types":null,"requester":"alice","scope":["Router-A",null],' + topic_key +
+            '"v":1,"valid":"2026-11-05T12:00:07Z"}')
+    return "sit-" + hashlib.sha256(text.encode("ascii")).hexdigest()[:32]
+
+
+def test_the_identity_of_a_knowledge_request_matches_its_pinned_known_answers():
+    # PINNED (D-47): the key "topic" exists only for a request that names one. Both literals are the
+    # sha256 of hand-written canonical JSON, not a call of situation_id.
+    assert _known_answer("") == KNOWLEDGE_NO_TOPIC
+    assert _known_answer('"topic":"interface errors",') == KNOWLEDGE_TOPIC
+    assert situation_id(**KNOWLEDGE_IDENTITY) == KNOWLEDGE_NO_TOPIC
+    assert situation_id(**KNOWLEDGE_IDENTITY, topic=None) == KNOWLEDGE_NO_TOPIC
+    assert situation_id(**KNOWLEDGE_IDENTITY, topic="interface errors") == KNOWLEDGE_TOPIC
+
+
+def test_two_topics_are_two_situations_and_no_topic_leaves_every_earlier_id_alone():
+    assert situation_id(**KNOWLEDGE_IDENTITY, topic="a") != situation_id(**KNOWLEDGE_IDENTITY, topic="b")
+    assert situation_id(**KNOWLEDGE_IDENTITY, topic="a") != situation_id(**KNOWLEDGE_IDENTITY)
+    # The two pinned known answers above are computed with no topic and cover the bytes.
+    assert situation_id(**{**IDENTITY, "topic": None}) == _id()
+    assert situation_id(**{**EVENT_IDENTITY, "topic": None}) == situation_id(**EVENT_IDENTITY)
+
+
+KNOWLEDGE_BODY = {"purpose": "diagnosis", "scope": {"device": "Router-A"}, "classes": ["knowledge"]}
+
+
+def test_a_topic_is_accepted_only_with_the_knowledge_class():
+    assert ContextRequest.model_validate({**KNOWLEDGE_BODY, "topic": "interface errors"}).topic == "interface errors"
+    assert ContextRequest.model_validate(KNOWLEDGE_BODY).topic is None
+    with pytest.raises(ValueError, match="topic needs the knowledge class"):
+        ContextRequest.model_validate({**TOPOLOGY_BODY, "topic": "interface errors"})
+
+
+@pytest.mark.parametrize("topic", ["", "a" * 201, "a;b", "a\nb", "a\n", 5, True, ["a"]])
+def test_a_hostile_topic_is_refused_by_shape(topic):
+    with pytest.raises(ValueError):
+        ContextRequest.model_validate({**KNOWLEDGE_BODY, "topic": topic})
+
+
+def test_the_longest_topic_and_the_whole_alphabet_are_accepted():
+    assert cc.TOPIC_MAX_LENGTH == 200
+    ContextRequest.model_validate({**KNOWLEDGE_BODY, "topic": "a" * 200})
+    ContextRequest.model_validate({**KNOWLEDGE_BODY, "topic": "Ab 09_.,:/-"})
+
+
 def test_two_windows_are_two_situations_and_no_window_adds_no_key():
     assert situation_id(**EVENT_IDENTITY) != situation_id(**{**EVENT_IDENTITY, "window_seconds": 60})
     # An absent window leaves every earlier id as it was (the pinned known answer above covers the bytes).
@@ -441,10 +495,24 @@ def _expiry(**changes):
 
 def test_the_expiry_basis_strings_are_pinned():
     assert (cc.EXPIRY_HISTORICAL, cc.EXPIRY_OBSERVATION, cc.EXPIRY_CONFIGURED, cc.EXPIRY_NO_EVIDENCE,
-            cc.EXPIRY_EVENT_WINDOW) == (
-        "historical_request", "oldest_observation", "configured_state", "no_evidence", "event_window")
+            cc.EXPIRY_EVENT_WINDOW, cc.EXPIRY_KNOWLEDGE) == (
+        "historical_request", "oldest_observation", "configured_state", "no_evidence", "event_window",
+        "knowledge_set")
     assert set(cc._EXPIRY_BASES) == {
-        "historical_request", "oldest_observation", "event_window", "configured_state", "no_evidence"}
+        "historical_request", "oldest_observation", "event_window", "configured_state", "no_evidence",
+        "knowledge_set"}
+    assert len(cc._EXPIRY_BASES) == 6
+
+
+def test_knowledge_evidence_expires_a_limit_after_retrieval_below_events_and_above_configured_state():
+    assert _expiry(knowledge_evidence=True, limit_s=120) == (R + timedelta(seconds=120), "knowledge_set")
+    assert _expiry(knowledge_evidence=True, configured_evidence=True) == (R + timedelta(seconds=300),
+                                                                         "knowledge_set")
+    assert _expiry(knowledge_evidence=True, event_evidence=True) == (R + timedelta(seconds=300), "event_window")
+    assert _expiry(knowledge_evidence=True, historical=True) == (R, "historical_request")
+    result = _expiry(knowledge_evidence=True, observation_times=[R - timedelta(seconds=10)])
+    assert result == (R + timedelta(seconds=290), "oldest_observation")
+    assert _expiry(knowledge_evidence=False) == (R, "no_evidence")
 
 
 def test_event_evidence_expires_a_limit_after_retrieval_and_ranks_between_observations_and_configured():
@@ -586,7 +654,7 @@ def test_the_response_json_carries_the_expected_top_level_keys():
                            "envelopes", "graph", "events", "knowledge", "verdict"}
     assert set(dumped["situation"]) == {"id", "requester", "purpose", "scope", "intent_id", "classes",
                                         "max_depth", "relationship_types", "valid_at", "known_at",
-                                        "retrieved_at", "historical", "window_seconds"}
+                                        "retrieved_at", "historical", "window_seconds", "topic"}
     assert set(dumped["graph"]) == {"nodes", "edges", "limits"}
     assert set(dumped["graph"]["limits"]) == {"requested_depth", "max_depth", "node_cap",
                                               "relationship_types", "cut_by"}

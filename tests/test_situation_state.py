@@ -307,3 +307,54 @@ def test_fetching_an_events_situation_without_the_events_class_is_403(rig):
     narrow = token({**WIDE, "classes": ["topology"]})
     r = fetch(sid, headers=narrow)
     assert r.status_code == 403 and r.json() == {"detail": "outside authority scope: class"}
+
+
+# ---- the knowledge class: references are stored, artefacts are not ----
+
+KNOWLEDGE_AUTH = {"entities": ["*"], "purposes": ["diagnosis"], "classes": ["knowledge"]}
+KNOWLEDGE_ASK = {"purpose": "diagnosis", "scope": {"device": "Router-A", "interface": "GigabitEthernet0/0/0"},
+                 "classes": ["knowledge"], "topic": "interface errors"}
+
+
+def test_a_stored_knowledge_situation_references_the_artefacts_and_holds_none(rig):
+    from tests.test_knowledge_bundles import KNOWLEDGE_ROOT
+    from tests.test_knowledge_request import serve
+    serve()
+    answer = recorded(rig, headers=token(KNOWLEDGE_AUTH), body=KNOWLEDGE_ASK)
+    identifiers = sorted(ref["identifier"] for ref in answer["knowledge"]["references"])
+    assert len(identifiers) == 3
+    sid = answer["situation"]["id"]
+    out = fetch(sid, headers=token(KNOWLEDGE_AUTH)).json()
+    assert out["situation"]["topic"] == "interface errors"
+    assert out["expiry_basis"] == "knowledge_set"
+    assert out["evidence"]["provenance"] == [
+        {"source_system": "okf", "reference": f"{name}@1.0", "observed_at": None,
+         "retrieved_at": NOW.isoformat()} for name in identifiers]
+    body = get_store().get_situation(sid, now=NOW).body
+    for ref in answer["knowledge"]["references"]:
+        assert ref["title"] not in body and ref["content_hash"] not in body
+    for path in KNOWLEDGE_ROOT.glob("bundles/*/*.md"):
+        assert path.read_text().split("---\n", 2)[2].strip()[:40] not in body
+
+
+def test_a_fetch_without_the_knowledge_class_is_refused(rig):
+    from tests.test_knowledge_request import serve
+    serve()
+    sid = recorded(rig, headers=token(KNOWLEDGE_AUTH), body=KNOWLEDGE_ASK)["situation"]["id"]
+    r = fetch(sid, headers=token({**KNOWLEDGE_AUTH, "classes": ["topology"]}))
+    assert r.status_code == 403 and r.json() == {"detail": "outside authority scope: class"}
+
+
+def test_a_body_stored_before_the_topic_existed_still_validates():
+    from data_contracts.situation_record import StoredSituation
+    stored = {
+        "situation": {"id": "sit-" + "0" * 32, "requester": "x", "purpose": "diagnosis",
+                      "scope": {"device": "Router-A", "interface": None}, "intent_id": None,
+                      "classes": ["topology"], "max_depth": 1, "relationship_types": ["has_interface"],
+                      "valid_at": NOW.isoformat(), "known_at": None, "retrieved_at": NOW.isoformat(),
+                      "historical": False},
+        "eligibility": {"result": "eligible", "classes": {"topology": {"result": "eligible", "reasons": []}},
+                        "reasons": []},
+        "expires_at": NOW.isoformat(), "expiry_basis": "configured_state",
+        "evidence": {"provenance": [], "graph_nodes": []}, "verdict": None}
+    assert StoredSituation.model_validate(stored).situation.topic is None
