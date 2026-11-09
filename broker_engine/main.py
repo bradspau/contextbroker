@@ -1,4 +1,5 @@
-"""Broker REST interface (MCP server built but not mounted) over the joiner, pruner, operations queries and the TMF921 assess.
+"""Broker REST interface over the joiner, pruner, operations queries and the TMF921 assess. The MCP server is
+built in code but not served; it is an optional extra installed from requirements-mcp.txt.
 
 REST callers present a bearer token (broker_engine/auth.py); every /context/* route is refused
 with 401 without one. The in-process MCP server and agent harness call broker functions directly
@@ -54,7 +55,9 @@ def build_mcp_server():
     try:
         from mcp.server.mcpserver import MCPServer
     except ImportError as exc:  # pragma: no cover
-        raise RuntimeError("The 'mcp' package (>=2) is required for the MCP server") from exc
+        raise RuntimeError(
+            "The MCP server is not served and needs the optional extra: pip install -r requirements-mcp.txt"
+        ) from exc
 
     server = MCPServer("context-broker")
 

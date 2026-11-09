@@ -1,7 +1,9 @@
 """The MCP server is an optional extra: its nine pins live in requirements-mcp.txt, not in the
 default install list, and the broker works (and its tests skip) without the package."""
 
+import ast
 import importlib.metadata as md
+import os
 import re
 import subprocess
 import sys
@@ -9,6 +11,8 @@ from pathlib import Path
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
+
+from broker_engine import main
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -99,3 +103,62 @@ def test_the_five_mcp_tests_skip_without_the_package():
     )
     assert "5 skipped" in run.stdout, run.stdout + run.stderr
     assert run.returncode == 0, run.stdout + run.stderr
+
+
+# --- the image and the module ---
+
+
+def test_the_dockerfile_installs_the_default_list_only():
+    lines = (ROOT / "Dockerfile").read_text().splitlines()
+    installs = [line for line in lines if "pip install" in line]
+    assert len(installs) == 1 and "requirements.txt" in installs[0]
+    assert not [line for line in lines if "requirements-mcp" in line]
+
+
+def test_the_build_context_excludes_the_extra():
+    assert "requirements-mcp.txt" in _lines(ROOT / ".dockerignore")
+
+
+def test_importing_the_broker_module_loads_no_mcp_module(tmp_path):
+    code = (
+        "import sys, broker_engine.main; "
+        "print(sorted(m for m in sys.modules if m == 'mcp' or m.startswith('mcp.')))"
+    )
+    env = dict(os.environ, BROKER_STATE_PATH=str(tmp_path / "state.sqlite"))
+    run = subprocess.run(
+        [sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "[]"
+
+
+def test_the_only_mcp_import_sits_inside_build_mcp_server():
+    tree = ast.parse((ROOT / "broker_engine" / "main.py").read_text())
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("mcp"):
+            found.append(node)
+        elif isinstance(node, ast.Import):
+            found.extend(n for n in [node] if any(a.name.startswith("mcp") for a in node.names))
+    assert len(found) == 1
+    builder = next(
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "build_mcp_server"
+    )
+    assert found[0] in list(ast.walk(builder))
+
+
+def test_the_builder_without_the_package_names_the_extra_and_says_it_is_not_served(monkeypatch):
+    for name in ("mcp", "mcp.server", "mcp.server.mcpserver"):
+        monkeypatch.setitem(sys.modules, name, None)
+    try:
+        main.build_mcp_server()
+    except RuntimeError as exc:
+        assert "requirements-mcp.txt" in str(exc) and "not served" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("build_mcp_server did not raise")
+
+
+def test_the_module_docstring_says_not_served_and_optional_extra():
+    doc = main.__doc__
+    assert "not served" in doc and "optional extra" in doc
+    assert "built but not mounted" not in doc

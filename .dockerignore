@@ -25,5 +25,6 @@ scripts/
 CLAUDE.md
 AGENTS.md
 planning.md
+requirements-mcp.txt
 *.pem
 *.key
