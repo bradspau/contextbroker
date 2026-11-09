@@ -1,0 +1,628 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "@base": "https://example.org/ns/context-broker/id/",
+    "cb": "https://example.org/ns/context-broker#",
+    "prov": "http://www.w3.org/ns/prov#",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+    "dcterms": "http://purl.org/dc/terms/",
+    "approved": "cb:approved",
+    "authority_cut": "cb:authorityCut",
+    "candidates": "cb:candidates",
+    "candidates_withheld": "cb:candidatesWithheld",
+    "cap": "cb:cap",
+    "class": "cb:contextClass",
+    "classes": {
+      "@id": "cb:classes",
+      "@type": "@json"
+    },
+    "configured": "cb:configured",
+    "conflicts": "cb:conflicts",
+    "content_hash": "cb:contentHash",
+    "cut_by": "cb:cutBy",
+    "depth": "cb:depth",
+    "device": "cb:device",
+    "edges": "cb:edges",
+    "eligibility": "cb:eligibility",
+    "end": {
+      "@id": "cb:end",
+      "@type": "xsd:dateTime"
+    },
+    "entities": "cb:entities",
+    "entity_id": "cb:entityId",
+    "envelopes": "cb:envelopes",
+    "event": "cb:event",
+    "event_id": {
+      "@id": "cb:eventId",
+      "@type": "@id"
+    },
+    "event_time": {
+      "@id": "cb:eventTime",
+      "@type": "xsd:dateTime"
+    },
+    "events": "cb:events",
+    "expires_at": {
+      "@id": "cb:expiresAt",
+      "@type": "xsd:dateTime"
+    },
+    "expiry_basis": "cb:expiryBasis",
+    "facility": "cb:facility",
+    "flags": "cb:flags",
+    "fluent": "cb:fluent",
+    "fluent_values": "cb:fluentValues",
+    "fluents": "cb:fluents",
+    "format": "cb:format",
+    "from": {
+      "@id": "cb:from",
+      "@type": "@id"
+    },
+    "graph": "cb:graph",
+    "graph_ref": "cb:graphRef",
+    "historical": "cb:historical",
+    "hypotheses": "cb:hypotheses",
+    "hypotheses_truncated": "cb:hypothesesTruncated",
+    "hypotheses_withheld": "cb:hypothesesWithheld",
+    "id": "cb:id",
+    "identifier": "dcterms:identifier",
+    "in_force": "cb:inForce",
+    "ingest_time": {
+      "@id": "cb:ingestTime",
+      "@type": "xsd:dateTime"
+    },
+    "intent_id": "cb:intentId",
+    "interface": "cb:interface",
+    "kind": "cb:kind",
+    "knowledge": "cb:knowledge",
+    "known_at": {
+      "@id": "cb:knownAt",
+      "@type": "xsd:dateTime"
+    },
+    "label": "cb:label",
+    "limits": "cb:limits",
+    "link": "cb:link",
+    "linked_actions": "cb:linkedActions",
+    "mapping": "cb:mapping",
+    "matched_scope": "cb:matchedScope",
+    "max_depth": "cb:maxDepth",
+    "metric": "cb:metric",
+    "missing": "cb:missing",
+    "node": {
+      "@id": "cb:node",
+      "@type": "@id"
+    },
+    "node_cap": "cb:nodeCap",
+    "nodes": "cb:nodes",
+    "observed_at": {
+      "@id": "prov:generatedAtTime",
+      "@type": "xsd:dateTime"
+    },
+    "ontology_class": "cb:ontologyClass",
+    "promoted_at": {
+      "@id": "cb:promotedAt",
+      "@type": "xsd:dateTime"
+    },
+    "promoted_conflicts": "cb:promotedConflicts",
+    "promoted_id": "cb:promotedId",
+    "provenance": "cb:provenance",
+    "purpose": "cb:purpose",
+    "quality": "cb:quality",
+    "reasons": "cb:reasons",
+    "recorded_at": {
+      "@id": "cb:recordedAt",
+      "@type": "xsd:dateTime"
+    },
+    "reference": "cb:reference",
+    "references": "cb:references",
+    "relationship_types": "cb:relationshipTypes",
+    "requested_depth": "cb:requestedDepth",
+    "requester": "cb:requester",
+    "result": "cb:result",
+    "retrieval": "cb:retrieval",
+    "retrieval_rank": "cb:retrievalRank",
+    "retrieved_at": {
+      "@id": "cb:retrievedAt",
+      "@type": "xsd:dateTime"
+    },
+    "rule": "cb:rule",
+    "scope": "cb:scope",
+    "seconds": "cb:seconds",
+    "severity": "cb:severity",
+    "situation": "cb:situation",
+    "source": "cb:source",
+    "source_host": "cb:sourceHost",
+    "source_references": "cb:sourceReferences",
+    "source_system": "cb:sourceSystem",
+    "stale": "cb:stale",
+    "start": {
+      "@id": "cb:start",
+      "@type": "xsd:dateTime"
+    },
+    "state": "cb:state",
+    "status": "cb:status",
+    "subject": "cb:subject",
+    "superseded_at": {
+      "@id": "cb:supersededAt",
+      "@type": "xsd:dateTime"
+    },
+    "support": "cb:support",
+    "template_id": "cb:templateId",
+    "text": "cb:text",
+    "title": "dcterms:title",
+    "to": {
+      "@id": "cb:to",
+      "@type": "@id"
+    },
+    "topic": "cb:topic",
+    "truncated": "cb:truncated",
+    "type": "cb:type",
+    "unresolved_actions": "cb:unresolvedActions",
+    "valid_at": {
+      "@id": "cb:validAt",
+      "@type": "xsd:dateTime"
+    },
+    "valid_from": {
+      "@id": "cb:validFrom",
+      "@type": "xsd:dateTime"
+    },
+    "valid_to": {
+      "@id": "cb:validTo",
+      "@type": "xsd:dateTime"
+    },
+    "value": "cb:value",
+    "verdict": {
+      "@id": "cb:verdict",
+      "@type": "@json"
+    },
+    "version": "cb:version",
+    "window": "cb:window",
+    "window_seconds": "cb:windowSeconds",
+    "withheld": "cb:withheld"
+  },
+  "@type": "cb:ContextResponse",
+  "situation": {
+    "@type": "cb:Situation",
+    "@id": "sit-0123456789abcdef0123456789abcdef",
+    "id": "sit-0123456789abcdef0123456789abcdef",
+    "requester": "demo-caller",
+    "purpose": "assurance",
+    "scope": {
+      "@type": "cb:Scope",
+      "device": "Router-A",
+      "interface": null
+    },
+    "intent_id": "hsi-demo-1",
+    "classes": [
+      "topology",
+      "goals",
+      "observations",
+      "events",
+      "knowledge"
+    ],
+    "max_depth": 3,
+    "relationship_types": [
+      "has_interface",
+      "connected_to"
+    ],
+    "valid_at": "2026-11-06T12:00:00+00:00",
+    "known_at": null,
+    "retrieved_at": "2026-11-06T12:00:00+00:00",
+    "historical": false,
+    "window_seconds": 3600,
+    "topic": "link flap"
+  },
+  "eligibility": {
+    "@type": "cb:Eligibility",
+    "result": "eligible",
+    "classes": {
+      "topology": {
+        "result": "eligible",
+        "reasons": []
+      },
+      "goals": {
+        "result": "eligible",
+        "reasons": []
+      },
+      "observations": {
+        "result": "eligible",
+        "reasons": []
+      },
+      "events": {
+        "result": "eligible",
+        "reasons": []
+      },
+      "knowledge": {
+        "result": "eligible",
+        "reasons": []
+      }
+    },
+    "reasons": []
+  },
+  "expires_at": "2026-11-06T12:04:30+00:00",
+  "expiry_basis": "oldest_observation",
+  "fluent_values": [
+    {
+      "@type": "cb:FluentValue",
+      "class": "topology",
+      "kind": "link",
+      "subject": "link-router-a-router-b",
+      "value": [
+        "Router-A/GigabitEthernet0/0/0",
+        "Router-B/GigabitEthernet0/0/1"
+      ],
+      "in_force": true,
+      "valid_from": "2026-11-01T00:00:00+00:00",
+      "valid_to": null,
+      "recorded_at": "2026-11-06T11:00:01+00:00",
+      "superseded_at": null,
+      "provenance": {
+        "@type": "prov:Entity",
+        "source_system": "fuseki",
+        "reference": "link-router-a-router-b-fluent-demo",
+        "observed_at": null,
+        "retrieved_at": "2026-11-06T12:00:00+00:00"
+      }
+    },
+    {
+      "@type": "cb:FluentValue",
+      "class": "goals",
+      "kind": "goal",
+      "subject": "LatencyMetric",
+      "value": 25.0,
+      "in_force": true,
+      "valid_from": "2026-11-05T11:00:00+00:00",
+      "valid_to": null,
+      "recorded_at": "2026-11-06T11:00:01+00:00",
+      "superseded_at": null,
+      "provenance": {
+        "@type": "prov:Entity",
+        "source_system": "fuseki",
+        "reference": "goal-fluent-demo",
+        "observed_at": null,
+        "retrieved_at": "2026-11-06T12:00:00+00:00"
+      }
+    },
+    {
+      "@type": "cb:FluentValue",
+      "class": "goals",
+      "kind": "placement",
+      "subject": "LatencyMetric",
+      "value": "Router-A/GigabitEthernet0/0/0",
+      "in_force": true,
+      "valid_from": "2026-11-05T11:00:00+00:00",
+      "valid_to": null,
+      "recorded_at": "2026-11-06T11:00:01+00:00",
+      "superseded_at": null,
+      "provenance": {
+        "@type": "prov:Entity",
+        "source_system": "fuseki",
+        "reference": "placement-fluent-demo",
+        "observed_at": null,
+        "retrieved_at": "2026-11-06T12:00:00+00:00"
+      }
+    }
+  ],
+  "envelopes": [
+    {
+      "@type": "cb:Envelope",
+      "metric": "LatencyMetric",
+      "node": "Router-A/GigabitEthernet0/0/0",
+      "entity_id": "Router-A:GigabitEthernet0/0/0",
+      "state": "observed",
+      "value": 12.5,
+      "source": "victoriametrics",
+      "observed_at": "2026-11-06T11:59:30+00:00",
+      "quality": {
+        "@type": "cb:Quality",
+        "stale": false,
+        "missing": false,
+        "conflicts": []
+      },
+      "provenance": [
+        {
+          "@type": "prov:Entity",
+          "source_system": "victoriametrics",
+          "reference": "interface_metrics_latency",
+          "observed_at": "2026-11-06T11:59:30+00:00",
+          "retrieved_at": "2026-11-06T12:00:00+00:00"
+        }
+      ]
+    }
+  ],
+  "graph": {
+    "@type": "cb:ContextGraph",
+    "nodes": [
+      {
+        "@type": "cb:Node",
+        "@id": "Router-A",
+        "id": "Router-A",
+        "type": "device",
+        "device": "Router-A",
+        "interface": null,
+        "graph_ref": null,
+        "depth": 0
+      },
+      {
+        "@type": "cb:Node",
+        "@id": "Router-A/GigabitEthernet0/0/0",
+        "id": "Router-A/GigabitEthernet0/0/0",
+        "type": "interface",
+        "device": "Router-A",
+        "interface": "GigabitEthernet0/0/0",
+        "graph_ref": "if-router-a-gi0-0-0",
+        "depth": 1
+      },
+      {
+        "@type": "cb:Node",
+        "@id": "Router-B/GigabitEthernet0/0/1",
+        "id": "Router-B/GigabitEthernet0/0/1",
+        "type": "interface",
+        "device": "Router-B",
+        "interface": "GigabitEthernet0/0/1",
+        "graph_ref": "if-router-b-gi0-0-1",
+        "depth": 2
+      },
+      {
+        "@type": "cb:Node",
+        "@id": "Router-B",
+        "id": "Router-B",
+        "type": "device",
+        "device": "Router-B",
+        "interface": null,
+        "graph_ref": null,
+        "depth": 3
+      }
+    ],
+    "edges": [
+      {
+        "@type": "cb:Edge",
+        "from": "Router-A",
+        "to": "Router-A/GigabitEthernet0/0/0",
+        "type": "has_interface",
+        "link": null,
+        "fluent": null
+      },
+      {
+        "@type": "cb:Edge",
+        "from": "Router-A/GigabitEthernet0/0/0",
+        "to": "Router-B/GigabitEthernet0/0/1",
+        "type": "connected_to",
+        "link": "link-router-a-router-b",
+        "fluent": "link-router-a-router-b-fluent-demo"
+      },
+      {
+        "@type": "cb:Edge",
+        "from": "Router-B",
+        "to": "Router-B/GigabitEthernet0/0/1",
+        "type": "has_interface",
+        "link": null,
+        "fluent": null
+      }
+    ],
+    "limits": {
+      "@type": "cb:GraphLimits",
+      "requested_depth": 3,
+      "max_depth": 3,
+      "node_cap": 50,
+      "relationship_types": [
+        "has_interface",
+        "connected_to"
+      ],
+      "cut_by": []
+    },
+    "hypotheses": [
+      {
+        "@type": "cb:Hypothesis",
+        "@id": "prm-5c276cb6e2113785f1ed641082b26545",
+        "promoted_id": "prm-5c276cb6e2113785f1ed641082b26545",
+        "from": "Router-A/GigabitEthernet0/0/1",
+        "to": "Router-C/GigabitEthernet0/0/2",
+        "label": "hypothesis",
+        "state": "inferred",
+        "rule": "adjacency_without_configured_link",
+        "valid_from": "2026-11-06T11:40:00+00:00",
+        "promoted_at": "2026-11-06T11:55:00+00:00",
+        "support": [
+          {
+            "@type": "cb:SupportRef",
+            "kind": "situation",
+            "id": null,
+            "state": "withheld"
+          },
+          {
+            "@type": "cb:SupportRef",
+            "kind": "event",
+            "id": "evt-22222222222222222222222222222222",
+            "state": "present"
+          },
+          {
+            "@type": "cb:SupportRef",
+            "kind": "event",
+            "id": "evt-33333333333333333333333333333333",
+            "state": "present"
+          }
+        ],
+        "provenance": {
+          "@type": "prov:Entity",
+          "source_system": "broker-promotion",
+          "reference": "prm-5c276cb6e2113785f1ed641082b26545",
+          "observed_at": null,
+          "retrieved_at": "2026-11-06T12:00:00+00:00"
+        }
+      }
+    ],
+    "hypotheses_truncated": false,
+    "hypotheses_withheld": 0
+  },
+  "events": {
+    "@type": "cb:EventsResult",
+    "window": {
+      "@type": "cb:EventWindow",
+      "start": "2026-11-06T11:00:00+00:00",
+      "end": "2026-11-06T12:00:00+00:00",
+      "seconds": 3600
+    },
+    "cap": 100,
+    "truncated": false,
+    "events": [
+      {
+        "@type": "cb:Event",
+        "@id": "evt-11111111111111111111111111111111",
+        "event_id": "evt-11111111111111111111111111111111",
+        "mapping": "mapped",
+        "device": "Router-A",
+        "source_host": "Router-A",
+        "candidates": [],
+        "candidates_withheld": 0,
+        "format": "rfc5424",
+        "facility": 23,
+        "severity": 3,
+        "event_time": "2026-11-06T11:40:00+00:00",
+        "ingest_time": "2026-11-06T11:40:02+00:00",
+        "kind": "link_down",
+        "flags": [],
+        "provenance": {
+          "@type": "prov:Entity",
+          "source_system": "syslog",
+          "reference": "evt-11111111111111111111111111111111",
+          "observed_at": "2026-11-06T11:40:00+00:00",
+          "retrieved_at": "2026-11-06T12:00:00+00:00"
+        }
+      }
+    ],
+    "envelopes": [
+      {
+        "@type": "cb:EventEnvelope",
+        "event_id": "evt-11111111111111111111111111111111",
+        "node": "Router-A",
+        "entity_id": "Router-A",
+        "state": "observed",
+        "value": "link_down",
+        "source": "syslog",
+        "observed_at": "2026-11-06T11:40:00+00:00",
+        "quality": {
+          "@type": "cb:Quality",
+          "stale": false,
+          "missing": false,
+          "conflicts": [
+            "event link_down contradicts configured link_in_force"
+          ]
+        },
+        "provenance": [
+          {
+            "@type": "prov:Entity",
+            "source_system": "syslog",
+            "reference": "evt-11111111111111111111111111111111",
+            "observed_at": "2026-11-06T11:40:00+00:00",
+            "retrieved_at": "2026-11-06T12:00:00+00:00"
+          }
+        ]
+      }
+    ],
+    "configured": {
+      "@type": "cb:ConfiguredSide",
+      "device": "Router-A",
+      "status": "held",
+      "value": "link_in_force",
+      "fluents": [
+        "link-router-a-router-b"
+      ],
+      "authority_cut": false
+    },
+    "conflicts": [
+      {
+        "@type": "cb:Conflict",
+        "event_id": "evt-11111111111111111111111111111111",
+        "device": "Router-A",
+        "event": "link_down",
+        "configured": "link_in_force",
+        "text": "event link_down contradicts configured link_in_force"
+      }
+    ],
+    "promoted_conflicts": [
+      {
+        "@type": "cb:PromotedConflict",
+        "@id": "prm-650df0001ae3f12dba2a4c034657de63",
+        "promoted_id": "prm-650df0001ae3f12dba2a4c034657de63",
+        "rule": "repeated_link_down_vs_configured",
+        "device": "Router-A",
+        "event": "link_down",
+        "configured": "link_in_force",
+        "text": "event link_down contradicts configured link_in_force",
+        "valid_from": "2026-11-06T11:40:00+00:00",
+        "promoted_at": "2026-11-06T11:55:00+00:00",
+        "support": [
+          {
+            "@type": "cb:SupportRef",
+            "kind": "situation",
+            "id": "sit-0123456789abcdef0123456789abcdef",
+            "state": "present"
+          },
+          {
+            "@type": "cb:SupportRef",
+            "kind": "event",
+            "id": "evt-11111111111111111111111111111111",
+            "state": "evicted"
+          }
+        ],
+        "provenance": {
+          "@type": "prov:Entity",
+          "source_system": "broker-promotion",
+          "reference": "prm-650df0001ae3f12dba2a4c034657de63",
+          "observed_at": null,
+          "retrieved_at": "2026-11-06T12:00:00+00:00"
+        }
+      }
+    ]
+  },
+  "knowledge": {
+    "@type": "cb:KnowledgeResult",
+    "retrieval": "answered",
+    "cap": 10,
+    "truncated": false,
+    "references": [
+      {
+        "@type": "cb:KnowledgeReference",
+        "identifier": "runbook-demo",
+        "version": "1.0",
+        "status": "approved",
+        "title": "Demo runbook",
+        "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "matched_scope": {
+          "@type": "cb:MatchedScope",
+          "entities": [
+            "Router-A"
+          ],
+          "purpose": "assurance",
+          "ontology_class": "Device"
+        },
+        "source_references": [
+          "demo-source"
+        ],
+        "retrieval_rank": 1,
+        "linked_actions": [
+          {
+            "@type": "cb:ActionReference",
+            "template_id": "restart-demo",
+            "version": "1",
+            "approved": true
+          }
+        ],
+        "unresolved_actions": 0,
+        "provenance": {
+          "@type": "prov:Entity",
+          "source_system": "okf",
+          "reference": "runbook-demo@1.0",
+          "observed_at": null,
+          "retrieved_at": "2026-11-06T12:00:00+00:00"
+        }
+      }
+    ],
+    "withheld": 0
+  },
+  "verdict": {
+    "verdict": "inconclusive",
+    "reasons": [
+      "goal changed: LatencyMetric"
+    ]
+  }
+}

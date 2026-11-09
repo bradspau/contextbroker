@@ -56,6 +56,8 @@ _PLAIN_TERMS = (
     "source_references", "source_system", "stale", "state", "status", "subject", "template_id", "text",
     "topic", "truncated", "type", "unresolved_actions", "value", "version", "window", "window_seconds",
     "withheld", "provenance", "cut_by",
+    "hypotheses", "hypotheses_truncated", "hypotheses_withheld", "label", "promoted_conflicts", "promoted_id",
+    "rule", "support",
 )
 
 
@@ -111,6 +113,9 @@ TYPE_PATHS: tuple[tuple[str, str, str | None], ...] = (
     ("graph.nodes[]", "cb:Node", "id"),
     ("graph.edges[]", "cb:Edge", None),
     ("graph.limits", "cb:GraphLimits", None),
+    ("graph.hypotheses[]", "cb:Hypothesis", "promoted_id"),
+    ("graph.hypotheses[].support[]", "cb:SupportRef", None),
+    ("graph.hypotheses[].provenance", "prov:Entity", None),
     ("events", "cb:EventsResult", None),
     ("events.window", "cb:EventWindow", None),
     ("events.events[]", "cb:Event", "event_id"),
@@ -120,6 +125,9 @@ TYPE_PATHS: tuple[tuple[str, str, str | None], ...] = (
     ("events.envelopes[].provenance[]", "prov:Entity", None),
     ("events.configured", "cb:ConfiguredSide", None),
     ("events.conflicts[]", "cb:Conflict", None),
+    ("events.promoted_conflicts[]", "cb:PromotedConflict", "promoted_id"),
+    ("events.promoted_conflicts[].support[]", "cb:SupportRef", None),
+    ("events.promoted_conflicts[].provenance", "prov:Entity", None),
     ("knowledge", "cb:KnowledgeResult", None),
     ("knowledge.references[]", "cb:KnowledgeReference", None),
     ("knowledge.references[].matched_scope", "cb:MatchedScope", None),
