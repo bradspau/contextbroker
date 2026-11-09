@@ -4,6 +4,9 @@ The profile is chosen after the request has been answered and recorded, so every
 two media types asks the same question twice and compares the situation, the stored row and the
 upstream calls.
 """
+import json
+import time
+
 import pytest
 
 from broker_state.process import get_store
@@ -13,7 +16,7 @@ from data_contracts.exchange_profile import (
 from tests.test_context_promoted import (  # noqa: F401
     A1, C2, PROMOTED_AT, REQUESTER, VALID_FROM, hyp, hypothesis, promote_conflict, promote_hypotheses)
 from tests.test_context_request import (  # noqa: F401
-    NOW, TOPOLOGY, _store_clock, client, event, events_headers, post, put)
+    ALL_FOUR, NOW, TOPOLOGY, WIDE, _store_clock, client, event, events_headers, post, put, rig, token)
 
 ASK = {**TOPOLOGY, "classes": ["topology", "events"]}
 
@@ -69,3 +72,137 @@ def test_a_request_without_the_header_is_native_json(hyp):
     assert out.headers["content-type"] == "application/json"
     assert out.headers["vary"] == "Accept"
     assert "@context" not in out.json()
+
+
+# ---- the header parser: pinned examples, lenient, never a refusal ----
+
+LD = PROFILE_MEDIA_TYPE
+NATIVE_CASES = [
+    None, "", "*/*", "application/json", "text/html", "application/*", "application/ld+json, application/json",
+    "application/ld+json;q=0", "application/ld+json;q=0, */*", "application/ld+json;q=abc",
+    "application/ld+json;q=nan", "application/ld+json;q=inf", "application/ld+json;q=2",
+    "application/ld+json;q=-0.5", "application/ld+json;q=1e0", "application/ld+json;q=",
+    "application/json, application/ld+json;q=0.5", "application/ld+json;q=0.5, application/json",
+    "application/ld+jsonx", "text/html, application/xhtml+xml;q=0.9", ",,,", ";;;", "x" * (MAX_ACCEPT_LENGTH + 1),
+    ",".join(["x/y"] * MAX_ACCEPT_ITEMS + [LD]), LD + " " * MAX_ACCEPT_LENGTH,
+]
+PROFILE_CASES = [
+    LD, "APPLICATION/LD+JSON", " application/ld+json ",
+    'application/ld+json; profile="http://www.w3.org/ns/json-ld#compacted"',
+    "application/ld+json, */*", "application/ld+json;q=0.9, */*;q=0.1", "application/json;q=0.5, application/ld+json",
+    "application/ld+json, application/*;q=0.5", "text/html, application/ld+json", "application/ld+json;q=0.001, */*;q=0",
+    "application/ld+json;q=1.0, application/json;q=0.9", ",".join(["x/y"] * (MAX_ACCEPT_ITEMS - 1) + [LD]),
+]
+
+
+@pytest.mark.parametrize("accept", NATIVE_CASES)
+def test_these_accept_headers_keep_the_native_json(accept):
+    assert negotiate(accept) == "json"
+
+
+@pytest.mark.parametrize("accept", PROFILE_CASES)
+def test_these_accept_headers_choose_the_profile(accept):
+    assert negotiate(accept) == "jsonld"
+
+
+def test_a_header_of_commas_at_the_length_cap_is_read_in_linear_time():
+    started = time.perf_counter()
+    for _ in range(200):
+        assert negotiate("," * MAX_ACCEPT_LENGTH) == "json"
+        assert negotiate(";q=" * (MAX_ACCEPT_LENGTH // 3)) == "json"
+    assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.parametrize("accept", ["text/html", "application/ld+json;q=abc", "\x00\x01;;;,,,", "application/ld+json;q=0"])
+def test_an_unsupported_or_malformed_accept_is_native_json_200_never_406(rig, accept):
+    out = ask(token(), accept, body=TOPOLOGY)
+    assert out.status_code == 200, out.text
+    assert out.headers["content-type"] == "application/json"
+    assert out.headers["vary"] == "Accept"
+    assert "@context" not in out.json()
+
+
+def test_a_header_over_the_length_cap_is_native_json(rig):
+    out = ask(token(), LD + " " * MAX_ACCEPT_LENGTH, body=TOPOLOGY)
+    assert out.status_code == 200 and out.headers["content-type"] == "application/json"
+    assert "@context" not in out.json()
+
+
+def test_the_profile_answer_for_a_topology_request_round_trips_through_the_route(rig):
+    native = ask(token(), None, body=TOPOLOGY)
+    ld = ask(token(), LD, body=TOPOLOGY)
+    assert ld.status_code == 200 and ld.headers["content-type"] == LD
+    assert from_jsonld(ld.json()) == ContextResponse.model_validate(native.json())
+    assert json.loads(ld.text)["@context"] == CONTEXT
+
+
+# ---- errors and every other route stay plain JSON ----
+
+def _is_plain_json(r, status):
+    assert r.status_code == status, r.text
+    assert r.headers["content-type"] == "application/json"
+    assert "@context" not in r.json()
+
+
+def test_an_unauthenticated_request_is_401_json_whatever_accept_says(rig):
+    r = client.post("/context/request", json=TOPOLOGY, headers={"Accept": LD})
+    _is_plain_json(r, 401)
+    rig.untouched()
+
+
+REFUSED_WITH_PROFILE = {
+    "no_authority_claim": (token(None), TOPOLOGY, 403, {"detail": "authority claims required"}),
+    "entity": (token({**WIDE, "entities": ["Router-B"]}), TOPOLOGY, 403,
+               {"detail": "outside authority scope: entity"}),
+    "intent_without_assess_scope": (
+        token(ALL_FOUR), {"purpose": "assurance", "scope": {"device": "olt1"}, "intent_id": "i1",
+                          "classes": ["goals", "observations"]}, 403, {"detail": "insufficient scope"}),
+    "malformed_body": (token(), {**TOPOLOGY, "colour": "red"}, 422, None),
+    "offset_beyond_retention": (token(), {**TOPOLOGY, "as_of": "31d"}, 400,
+                                {"detail": "as_of is further back than the retention period"}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(REFUSED_WITH_PROFILE))
+def test_a_refusal_stays_plain_json_with_the_profile_requested_and_reaches_no_upstream(case, rig):
+    headers, body, status, detail = REFUSED_WITH_PROFILE[case]
+    r = ask(headers, LD, body=body)
+    _is_plain_json(r, status)
+    if detail is not None:
+        assert r.json() == detail
+    rig.untouched()
+
+
+def test_a_query_parameter_is_422_json_with_the_profile_requested(rig):
+    r = client.post("/context/request", json=TOPOLOGY, params={"debug": "1"},
+                    headers={**token(), "Accept": LD})
+    _is_plain_json(r, 422)
+    rig.untouched()
+
+
+def test_only_the_context_request_route_negotiates(rig):
+    put(event(1))
+    headers = events_headers()
+    sid = ask(headers, None).json()["situation"]["id"]
+    got = client.get(f"/context/situation/{sid}", headers={**headers, "Accept": LD})
+    assert got.status_code == 200, got.text
+    assert got.headers["content-type"] == "application/json"
+    assert "@context" not in got.json()
+    health = client.get("/health", headers={"Accept": LD})
+    assert health.headers["content-type"] == "application/json"
+
+
+# ---- the published contract ----
+
+def test_the_openapi_document_lists_both_media_types_and_no_extra_route(rig):
+    spec = client.get("/openapi.json").json()
+    content = spec["paths"]["/context/request"]["post"]["responses"]["200"]["content"]
+    assert set(content) == {"application/json", LD}
+    assert content["application/json"]["schema"]["$ref"].endswith("/ContextResponse")
+    assert content[LD]["schema"] == {"type": "object"}
+    assert "Accept: application/ld+json" in spec["paths"]["/context/request"]["post"]["description"]
+    context_routes = sorted(p for p in spec["paths"] if p.startswith("/context/"))
+    assert context_routes == sorted(set(context_routes)) and len(context_routes) == 7
+    text = str(spec)
+    for secret in ("Router-A", "olt1", "eyJ", "BEGIN", "test-caller", "testpassword0"):
+        assert secret not in text
