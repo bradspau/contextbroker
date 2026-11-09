@@ -13,9 +13,10 @@ Code: `data_contracts/context_contract.py` (the contract, no I/O, no web framewo
 `broker_engine/context_request.py` (the one handler that reads the sources),
 `broker_engine/context_eligibility.py`, `broker_engine/context_graph.py`,
 `broker_engine/auth.py` and `scripts/mint_token.py` (authority), and `okf_retrieval/service.py` (the
-knowledge class). Phase 4 stores situations and Phase 7 adds exchange profiles; both build on the
-decisions below. The events class (Phase 5) and the knowledge class (Phase 6) were added to this
-contract without changing any earlier situation id.
+knowledge class). Phase 4 stores situations and Phase 7 added the JSON-LD exchange profile
+(`design/exchange-profile.md`) and promoted state (`design/semantic-promotion.md`); both build on the
+decisions below. The events class (Phase 5), the knowledge class (Phase 6) and the Phase 7 additions were
+added to this contract without changing any earlier situation id.
 
 ## The request
 
@@ -52,7 +53,10 @@ Coherence rules, all refused by shape before any I/O: `topology` exactly when bo
 together with `goals`, because the series to read come from the intent's placements.
 
 The logical contract is defined apart from its wire format. The JSON form is purpose-built nodes
-and edges; JSON-LD and NGSI-LD views of the same content are Phase 7 and need no change to it.
+and edges. A JSON-LD view of the same answer is built (Phase 7): a caller sends `Accept:
+application/ld+json` on this route and gets the profile of the very answer native JSON would have
+given, with the same situation id and the same stored row. It needs no change to the contract and is
+described in `design/exchange-profile.md`. An NGSI-LD view is deferred.
 
 ## Authority
 
@@ -235,8 +239,11 @@ an upstream answer. An envelope with no provenance serialises `[]` on every rout
 - Fields left the model client and reconciler provenance when the dict became records: the always
   empty `uncertainty` and the `input_window` object (the inputs are now per-input records), and
   the reconciler's raw device text and severity. Event storage is built in Phase 5 (see
-  `design/event-store.md`); semantic references on events and anything else Phase 7 needs are added in
-  their own structures.
+  `design/event-store.md`); promoted state (Phase 7) is added in its own structures: the events result
+  carries `promoted_conflicts`, and the Context Graph carries `hypotheses` beside, never inside, its
+  edges. Each returned promoted record has one provenance record (source system `broker-promotion`, the
+  promoted id as the reference, the promotion time as the observation time, the retrieval time). See
+  `design/semantic-promotion.md`.
 
 ## The Context Graph
 
@@ -309,10 +316,11 @@ outcome or records an outcome; tests spy on each.
 
 - The fate of the five older routes (keep, deprecate, remove): decided once the new route is
   proven.
-- JSON-LD and NGSI-LD views of the Context Graph: Phase 7, as an exchange profile over this
-  content.
+- JSON-LD is built (Phase 7): see `design/exchange-profile.md`. NGSI-LD views of the Context Graph are
+  still deferred.
 - Where situations and decision records are kept: see `design/durable-state.md` (Phase 4).
-- Adoption by the MCP server and the agent tool (unchanged here; the MCP server is not mounted).
+- Adoption by the MCP server and the agent tool (unchanged here; the MCP server is built and
+  unit-tested, not served, and an optional extra installed from `requirements-mcp.txt`).
 - `/docs` and `/openapi.json` are still public (bead `contextbroker-8at`). A test checks that the
   OpenAPI document, which now describes the new route, holds no claim value, token or secret.
 - Events are built (Phase 5): see `design/event-store.md` for the store, the events class and
