@@ -388,6 +388,16 @@ def _check_promoted(r) -> None:
         raise ValueError("event_ids must be distinct")
 
 
+def _check_event_ids(event_ids) -> list:
+    ids = list(event_ids)
+    if len(ids) > EVENT_BATCH_MAX:
+        raise ValueError("at most %d event ids" % EVENT_BATCH_MAX)
+    for i in ids:
+        if not isinstance(i, str) or not _EVENT_ID.match(i):
+            raise ValueError("event_id must be evt- and 32 lower-case hex digits")
+    return ids
+
+
 def _check_quarantine(quarantined) -> dict:
     if quarantined is None:
         return {}
@@ -854,22 +864,70 @@ class StateStore:
         if len({r.promoted_id for r in records}) != len(records):
             raise ValueError("a batch holds each promoted_id once")
         now_us = _to_us(now)
-        written = 0
+        retention_us = self._promoted_retention_s * 1000000
+        written = refreshed = removed = evicted = 0
+        swept_at = None
         with self._txn() as conn:
             seq = conn.execute(
                 "SELECT COALESCE(MAX(written_seq), 0) FROM promoted").fetchone()[0]
             for r in records:
                 seq += 1
+                valid_us = _to_us(r.valid_from)
+                support = json.dumps(list(r.event_ids))
+                row = conn.execute(
+                    "SELECT last_promoted_at_us FROM promoted WHERE promoted_id = ?",
+                    (r.promoted_id,)).fetchone()
+                if row is not None and row[0] + retention_us <= now_us:
+                    # Past retention reads as gone, so a re-run starts over (D-66).
+                    conn.execute("DELETE FROM promoted WHERE promoted_id = ?",
+                                 (r.promoted_id,))
+                    row = None
                 conn.execute(
                     "INSERT INTO promoted (promoted_id, kind, rule, device_a, device_b, "
                     "body, valid_from_us, promoted_at_us, last_promoted_at_us, "
                     "repeat_count, written_seq, situation_id, situation_requester, "
-                    "event_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+                    "event_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?) "
+                    "ON CONFLICT(promoted_id) DO UPDATE SET "
+                    "valid_from_us = MIN(valid_from_us, excluded.valid_from_us), "
+                    "last_promoted_at_us = excluded.last_promoted_at_us, "
+                    "repeat_count = repeat_count + 1, "
+                    "written_seq = excluded.written_seq, "
+                    "situation_id = excluded.situation_id, "
+                    "situation_requester = excluded.situation_requester, "
+                    "event_ids = excluded.event_ids, body = excluded.body",
                     (r.promoted_id, r.kind, r.rule, r.device_a, r.device_b, r.body,
-                     _to_us(r.valid_from), now_us, now_us, seq, r.situation_id,
-                     r.situation_requester, json.dumps(list(r.event_ids))))
-                written += 1
-        return PromoteBatch(written=written, refreshed=0, evicted=0, removed=0)
+                     valid_us, now_us, now_us, seq, r.situation_id,
+                     r.situation_requester, support))
+                if row is None:
+                    written += 1
+                else:
+                    refreshed += 1
+            tick = self._monotonic()
+            if (self._last_promoted_sweep is None
+                    or tick - self._last_promoted_sweep >= SWEEP_INTERVAL_S):
+                swept = conn.execute(
+                    "DELETE FROM promoted WHERE last_promoted_at_us + ? <= ?",
+                    (retention_us, now_us)).rowcount
+                swept_at = tick
+                removed += swept
+                if swept > 0:
+                    self._after.append(
+                        ("state retention: table=promoted removed=%d", (swept,)))
+            if written > 0:  # a refresh adds no row, so only a new id can pass the cap
+                count = conn.execute("SELECT COUNT(*) FROM promoted").fetchone()[0]
+                excess = count - self._promoted_cap
+                if excess > 0:
+                    conn.execute(
+                        "DELETE FROM promoted WHERE rowid IN "
+                        "(SELECT rowid FROM promoted ORDER BY written_seq LIMIT ?)",
+                        (excess,))
+                    conn.execute(_UPSERT_COUNTER, (PROMOTED_EVICTION_COUNTER, excess))
+                    self._after.append(("state eviction: table=promoted evicted=%d", (excess,)))
+                    evicted = excess
+        if swept_at is not None:  # taken only after COMMIT
+            self._last_promoted_sweep = swept_at
+        return PromoteBatch(written=written, refreshed=refreshed, evicted=evicted,
+                            removed=removed)
 
     @_guarded
     def promoted_rows(self, kind: str, device: str, *, valid_at: datetime,
@@ -906,6 +964,62 @@ class StateStore:
     def promoted_count(self) -> int:
         with self._lock:
             return self._conn.execute("SELECT COUNT(*) FROM promoted").fetchone()[0]
+
+    @_guarded
+    def promoted_evictions(self) -> int:
+        """Rows the promoted cap has evicted so far (the evicted_promoted counter)."""
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM counters WHERE name = ?",
+                                     (PROMOTED_EVICTION_COUNTER,)).fetchone()
+        return row[0] if row else 0
+
+    @_guarded
+    def support_present(self, situation_id: str, event_ids, *,
+                        now: datetime) -> tuple[bool, tuple]:
+        """Whether the stored situation and each event still exist and are inside their
+        own retention at `now`, by the cut-offs get_situation and events_in_window use,
+        so an evicted source is reported and never left dangling (D-60)."""
+        if not isinstance(situation_id, str) or not _SITUATION_ID.match(situation_id):
+            raise ValueError("situation_id must be sit- and 32 lower-case hex digits")
+        ids = _check_event_ids(event_ids)
+        now_us = _to_us(now)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT expires_at_us FROM situations WHERE situation_id = ?",
+                (situation_id,)).fetchone()
+            situation = row is not None and row[0] + self._retention_s * 1000000 > now_us
+            events = tuple(
+                self._conn.execute(
+                    "SELECT 1 FROM events WHERE event_id = ? AND ingest_time_us + ? > ?",
+                    (i, self._event_retention_s * 1000000, now_us)).fetchone() is not None
+                for i in ids)
+        return situation, events
+
+    @_guarded
+    def events_by_ids(self, event_ids, *, now: datetime) -> list[EventRow]:
+        """The events with these ids in the given order, skipping any that is absent or
+        past event retention at `now`. Never the raw line."""
+        ids = _check_event_ids(event_ids)
+        now_us = _to_us(now)
+        out: list[EventRow] = []
+        with self._lock:
+            for i in ids:
+                r = self._conn.execute(
+                    "SELECT event_id, ingest_time_us, event_time_us, severity, facility, "
+                    "format, source_host, mapping, device, kind FROM events "
+                    "WHERE event_id = ? AND ingest_time_us + ? > ?",
+                    (i, self._event_retention_s * 1000000, now_us)).fetchone()
+                if r is None:
+                    continue
+                cands = tuple(c[0] for c in self._conn.execute(
+                    "SELECT device FROM event_devices WHERE event_id = ? ORDER BY device",
+                    (i,)).fetchall())
+                out.append(EventRow(
+                    event_id=r[0], ingest_time=_from_us(r[1]),
+                    event_time=None if r[2] is None else _from_us(r[2]),
+                    severity=r[3], facility=r[4], format=r[5], source_host=r[6],
+                    mapping=r[7], device=r[8], candidates=cands, kind=r[9]))
+        return out
 
     # -- eviction counters ---------------------------------------------
 
