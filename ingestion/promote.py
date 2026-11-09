@@ -131,6 +131,8 @@ def promote_situation(situation_id: str, *, store, query_endpoint, min_events: i
                 raise PromoteRefused(REFUSED_GRAPH_DOWN) from None
             except MalformedTopology:
                 raise PromoteRefused(REFUSED_GRAPH_MALFORMED) from None
+            if links.status == "invalid":  # conflicting or malformed link records
+                raise PromoteRefused(REFUSED_GRAPH_MALFORMED)
             if links.status == "held":
                 configured = ConfiguredSide(device, CONFIGURED_LINK_IN_FORCE)
         records = select_conflicts(counted, device=device, configured=configured,
