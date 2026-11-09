@@ -77,7 +77,7 @@ def recognise_adjacency(message: str) -> Adjacency | None:
     order and the first match wins."""
     if not isinstance(message, str):
         return None
-    if message.startswith("﻿"):
+    if message.startswith("\ufeff"):
         message = message[1:]
     for _name, pattern in _FORMATS:
         found = pattern.search(message)
