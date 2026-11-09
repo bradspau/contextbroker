@@ -89,7 +89,7 @@ from data_contracts.context_contract import (
 from broker_state.process import event_window_limits, get_store
 from data_contracts.knowledge import KNOWLEDGE_RESULT_CAP, KNOWLEDGE_SOURCE
 from data_contracts.metric_map import load_metric_map
-from data_contracts.promotion import PROMOTION_SOURCE
+from data_contracts.promotion import HYPOTHESIS_LABEL, HYPOTHESIS_STATE, PROMOTION_SOURCE
 from data_contracts.syslog_events import EVENT_KINDS
 from data_contracts.situation_record import (
     SITUATION_ID_PATTERN,
@@ -237,6 +237,60 @@ def _promoted_conflicts(device: str, times, now: datetime, requester: str) -> li
         except (ValueError, TypeError, KeyError):
             log.warning(PROMOTED_UNREADABLE)
     return out
+
+
+def _hypotheses(graph, times, now: datetime, requester: str, covers
+                ) -> tuple[list[HypothesisEdge], bool, int]:
+    """The promoted hypotheses incident to a returned node: (edges, truncated, withheld). Read from the
+    state file only, one bounded read per device in the graph.
+
+    A hypothesis is kept when at least one end is a returned node, and is not returned when its two ends
+    are already a configured connected_to edge of this graph (the status is computed here, at read time,
+    and nothing is stored for it). One whose end lies on a device the caller's entities do not cover is
+    counted in `withheld` and never named. The rest are sorted by (from, to, promoted_id) and cut at the
+    cap. They are separate from the configured edges and add no node, limit or fluent value (D-63, D-67)."""
+    node_ids = {node.id for node in graph.nodes}
+    configured = {frozenset((edge.from_, edge.to)) for edge in graph.edges if edge.type == "connected_to"}
+    limit = HYPOTHESIS_RESULT_CAP + 1
+    found, full = {}, False
+    for device in sorted({node.device for node in graph.nodes}):
+        rows = get_store().promoted_rows(
+            "hypothesis", device, valid_at=times.valid_at, known_at=times.known_at, now=now, limit=limit)
+        full = full or len(rows) >= limit
+        for row in rows:
+            found.setdefault(row.promoted_id, row)
+    kept, withheld = [], 0
+    for row in found.values():
+        try:
+            ends = json.loads(row.body)
+            first, second = ends["from"], ends["to"]
+            if (row.device_b is None or not isinstance(first, str) or not isinstance(second, str)
+                    or first.split("/", 1)[0] != row.device_a or second.split("/", 1)[0] != row.device_b):
+                raise ValueError("body does not match the record's devices")
+        except (ValueError, TypeError, KeyError):
+            log.warning(PROMOTED_UNREADABLE)
+            continue
+        if first not in node_ids and second not in node_ids:
+            continue
+        if frozenset((first, second)) in configured:
+            continue
+        if not (covers(row.device_a) and covers(row.device_b)):
+            withheld += 1
+            continue
+        kept.append((first, second, row))
+    kept.sort(key=lambda item: (item[0], item[1], item[2].promoted_id))
+    truncated = full or len(kept) > HYPOTHESIS_RESULT_CAP
+    edges = []
+    for first, second, row in kept[:HYPOTHESIS_RESULT_CAP]:
+        try:
+            edges.append(HypothesisEdge(
+                promoted_id=row.promoted_id, from_=first, to=second, label=HYPOTHESIS_LABEL,
+                state=HYPOTHESIS_STATE, rule=row.rule, valid_from=_iso(row.valid_from),
+                promoted_at=_iso(row.promoted_at), support=_support(row, now, requester),
+                provenance=_promotion_provenance(row, now)))
+        except (ValueError, TypeError):
+            log.warning(PROMOTED_UNREADABLE)
+    return edges, truncated, withheld
 
 
 def _fluent_value(metric, kind, fluent, device_interface, valid_at, retrieved_at) -> FluentValue:
@@ -401,6 +455,14 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
             known_at=times.known_at, retrieved_at=now, allowed=covers, priority=frozenset(priority),
             query_endpoint=query_endpoint)
         graph = read.graph
+        if "connected_to" in body.relationship_types:
+            # Promoted hypotheses sit beside the configured edges, never among them. The eligibility below
+            # is computed from `read` exactly as before and the graph's nodes, edges and limits are untouched.
+            edges, hypotheses_truncated, hypotheses_withheld = _hypotheses(
+                graph, times, now, caller.requester, covers)
+            graph = graph.model_copy(update={
+                "hypotheses": edges, "hypotheses_truncated": hypotheses_truncated,
+                "hypotheses_withheld": hypotheses_withheld})
         fluent_values.extend(read.fluent_values)
         eligibility["topology"] = topology_eligibility(
             read.scope_identity, conflicting_links=read.conflicting_links,
