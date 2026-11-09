@@ -1,9 +1,10 @@
-# Durable state (Phase 4, with the Phase 5 event tables)
+# Durable state (Phase 4, with the Phase 5 event tables and the Phase 7 promoted table)
 
 What the broker remembers between requests, where it keeps it, for how long, how it makes room and
-how it fails. Phase 5 added the event tables to the same file (see `design/event-store.md`); later
-phases (Phase 6 retrieval, Phase 7 exchange) read situations and events by id, so the rules here
-must not change without a plan for the rows already stored. The broker still resolves, joins and
+how it fails. Phase 5 added the event tables to the same file (see `design/event-store.md`) and Phase 7
+added the promoted table (see `design/semantic-promotion.md`); Phase 6 retrieval and the Phase 7
+exchange profile read situations and events by id, so the rules here must not change without a plan for
+the rows already stored. The broker still resolves, joins and
 delivers context and never decides or acts: nothing stored here feeds a verdict or grants execution
 authority.
 
@@ -24,14 +25,18 @@ integer microseconds since the Unix epoch (UTC). Every statement is literal SQL 
 | `counters` | name | Eviction counters, one per table, and the event counters (duplicates, unmapped, quarantined per reason), so they survive a restart |
 | `events` | event id | A stored syslog event (Phase 5): times, severity, facility, format, source host, mapping, device, recognised kind and the raw line |
 | `event_devices` | event id and device | One row per event and candidate device, so a device request finds its events |
+| `promoted` | promoted id | A promoted conflict or hypothesis (Phase 7): its rule, devices, valid-from, support (the situation and up to 20 event ids) and promotion times. Written only by the operator command |
 
-Each of the data tables (`outcomes`, `marks`, `situations`, `events`) carries a write sequence number.
-Eviction orders by it. What the event tables hold and how they are filled, mapped and read is in
-`design/event-store.md`.
+Each of the data tables (`outcomes`, `marks`, `situations`, `events`, `promoted`) carries a write
+sequence number. Eviction orders by it. What the event tables hold and how they are filled, mapped and
+read is in `design/event-store.md`; what the promoted table holds and how it is written and read is in
+`design/semantic-promotion.md`.
 
-Schema policy (Phase 5, D-34): **additive**. The event tables are created with `IF NOT EXISTS` at
-schema version 1, so `user_version` stays 1, a Phase 4 file is upgraded in place by the first start of
-the new image, and the Phase 4 image can still open the upgraded file (it ignores the new tables).
+Schema policy (Phase 5, D-34; kept in Phase 7): **additive**. The event tables and the promoted table
+are created with `IF NOT EXISTS` at schema version 1, so `user_version` stays 1, an earlier file is
+upgraded in place by the first start of the new image, and the earlier image can still open the upgraded
+file (it ignores the new tables). The promoted table has its own existence check, so a Phase 5 or Phase 6
+file gains it too.
 Rollback is therefore an image rollback. `user_version` moves only when an existing table changes
 shape or meaning.
 
@@ -163,16 +168,20 @@ never echoes the value.
 | `BROKER_EVENT_RETENTION` | `7d` | digits then `h` or `d`, from `1h` to `90d` |
 | `BROKER_EVENT_WINDOW_DEFAULT` | `15m` | digits then `s`, `m`, `h` or `d`, from `1m` to `7d`, not above the maximum |
 | `BROKER_EVENT_WINDOW_MAX` | `24h` | same grammar, not above the event retention |
+| `BROKER_PROMOTED_CAP` | `10000` | whole number from 1 to 1000000 |
+| `BROKER_PROMOTED_RETENTION` | `30d` | digits then `h` or `d`, from `1h` to `90d`, counted from the last promotion |
+| `BROKER_PROMOTE_MIN_EVENTS` | `3` | whole number from 2 to 1000 |
+| `BROKER_PROMOTE_WINDOW` | `15m` | digits then `s`, `m`, `h` or `d`, from `1m` to `7d`, not above the event retention |
 
 ## Operating it
 
 - Never run `docker compose down -v`: it deletes the `broker-state` volume together with the Fuseki
   and VictoriaMetrics data.
 - A backup is a copy of the two files with the API stopped. Take one before an upgrade that changes
-  the file (the Phase 5 image adds the event tables on its first start). Under the additive policy
-  the rollback is an image rollback: start the earlier image on the same volume; it ignores the event
-  tables. A restore of the copy is only needed if the file itself was damaged.
-- Losing the state file loses outcomes, marks, situation records and events. After that the 300 s freshness
+  the file (the Phase 5 image adds the event tables on its first start, and the Phase 7 image adds the
+  promoted table on its first start). Under the additive policy the rollback is an image rollback: start
+  the earlier image on the same volume; it ignores the new tables. A restore of the copy is only needed if the file itself was damaged.
+- Losing the state file loses outcomes, marks, situation records, events and promoted records. After that the 300 s freshness
   check is the only limit on re-pushing an observation.
 - The file holds requester subjects, device names and, for events, the raw syslog lines as sent (a
   line can carry anything a device wrote). Keep the volume private. No route returns a raw line.
@@ -186,4 +195,9 @@ never echoes the value.
 - Storing the full response body for each situation.
 - Events are built (Phase 5): see `design/event-store.md`, which also lists what that phase deferred
   (a live listener, interface-level mapping, re-resolving stored ambiguous events).
-- Knowledge retrieval (Phase 6) and exchange profiles (Phase 7) build on the situation row and its id.
+- Knowledge retrieval (Phase 6) and the JSON-LD exchange profile (Phase 7) build on the situation row and
+  its id (`design/knowledge.md`, `design/exchange-profile.md`).
+- Promoted records are built (Phase 7): see `design/semantic-promotion.md`, which also lists what that
+  phase deferred (retiring a hypothesis, an operator rule file, telemetry-based inference).
+- The promoted eviction count is a counter (`evicted_promoted`), not a `/health` key: `/health` keeps its
+  eight keys.

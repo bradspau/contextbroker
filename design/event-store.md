@@ -3,8 +3,9 @@
 How syslog lines become stored events, how a context request retrieves them, and how a recognised
 event is set beside the configured state without either side overwriting the other. This note
 describes Phase 5 as built. It closes gap 4 of `design/layer3-gap-analysis.md` (events need a real
-store). Later phases read this store (Phase 6 retrieval, Phase 7 exchange and inferred state), so the
-rules below must not change without a plan for the rows already stored.
+store). Later phases read this store (Phase 6 retrieval; Phase 7 exchange and promotion, which reads the
+stored lines again and so adds its own table beside these), so the rules below must not change without a
+plan for the rows already stored.
 
 The broker resolves, joins and delivers context. It never decides or acts. An event grants no
 authority, feeds no verdict and changes no configured state.
@@ -31,8 +32,10 @@ mapping:
 
 - `StateCategory` and `data_contracts/envelope.py` keep their four values. Adding a fifth would
   change every envelope consumer and every wire model, so it stays out.
-- An event only ever yields an `observed` envelope (D-02). The broker derives no `inferred` state
-  from events. That belongs to Phase 7.
+- An event only ever yields an `observed` envelope (D-02). The events class derives no `inferred` state
+  from events. Inferred state exists since Phase 7, but only as the promoted hypotheses of
+  `design/semantic-promotion.md`: a separate, labelled `hypothesis` list written by an operator command,
+  never an envelope and never evidence.
 - The words desired and controller-reported are reconciliation vocabulary. They never appear as an
   envelope category.
 
@@ -135,8 +138,10 @@ moment (D-07 to D-11):
 - **Unmapped events are kept, counted and never returned** for a device request.
 - **The mapping is frozen at ingest** (D-11). A later change to the topology does not touch stored
   events. Re-resolving stored ambiguous events when the device table changes is deferred.
-- Device only (D-08). A request scoped to an interface reads its device's events. No interface is
-  inferred from message text.
+- Device only (D-08). A request scoped to an interface reads its device's events. The events class
+  still infers no interface from message text. The Phase 7 promotion command reads interface names from
+  the stored text of neighbour-discovery lines, but only as lookup keys against the network graph's own
+  names, and stores graph names only (see `design/semantic-promotion.md`).
 - **The origin is unauthenticated.** Syslog carries no proof of who sent a line, and the broker does
   not add one. A mapped event is a claim by whoever sent it, matched by name. That is why an event
   only ever becomes an `observed` envelope and a conflict only shows both sides.
@@ -264,6 +269,7 @@ decided.
 
 - A live syslog listener (UDP or TCP) or an authenticated ingest route.
 - Interface-level mapping from message text.
-- Inferred state from events and semantic promotion (Phase 7).
+- Inferred state from events and semantic promotion: built in Phase 7 (`design/semantic-promotion.md`).
+  The events class itself still infers nothing; what that phase deferred is listed in its own note.
 - Re-resolving stored ambiguous events when the device table changes.
 - Marking configured state possibly stale when a newer event contradicts it.
