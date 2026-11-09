@@ -1,0 +1,12 @@
+# Optional extra: the MCP server (broker_engine.main.build_mcp_server). It is not served and the
+# image does not install it; install it with `pip install -r requirements-mcp.txt`.
+-r requirements.txt
+attrs==26.1.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+mcp==2.3.0
+mcp-types==2.3.0
+python-multipart==0.0.32
+referencing==0.37.0
+rpds-py==2026.9.1
+sse-starlette==3.6.0

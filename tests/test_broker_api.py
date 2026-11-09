@@ -89,6 +89,7 @@ def test_unsafe_token_400():
 
 
 def test_mcp_tool_names():
+    pytest.importorskip("mcp.server.mcpserver")
     server = main.build_mcp_server()
     names = {t.name for t in asyncio.run(server.list_tools())}
     assert names == {"query_tsdb_metrics", "assess_intent",
@@ -195,6 +196,7 @@ def test_timeout_passed_to_requests():
 
 
 def test_mcp_metric_tool_returns_envelope():
+    pytest.importorskip("mcp.server.mcpserver")
     import json
     server = main.build_mcp_server()
     env = build_observed("r1:e0", 1.0, "vm", NOW - timedelta(hours=1), NOW)
@@ -218,6 +220,7 @@ def test_default_source_is_tmf921():
     assert r.status_code == 200 and r.json() == ret
     via.assert_called_once()
     # MCP tool without source
+    pytest.importorskip("mcp.server.mcpserver")
     import json
     server = main.build_mcp_server()
     with patch("broker_engine.assess.assess_via_tmf921", return_value=ret) as via:
@@ -269,6 +272,7 @@ def test_assess_tmf921_client_input_error_is_400():
 
 
 def test_mcp_assess_tool_has_no_source_argument():
+    pytest.importorskip("mcp.server.mcpserver")
     import json
     server = main.build_mcp_server()
     tool = next(t for t in asyncio.run(server.list_tools()) if t.name == "assess_intent")
@@ -335,6 +339,7 @@ def test_rest_neighbours_pass_as_of_and_known_at_and_reject_others():
 
 
 def test_mcp_neighbours_tool_accepts_as_of_and_known_at():
+    pytest.importorskip("mcp.server.mcpserver")
     server = main.build_mcp_server()
     tool = next(t for t in asyncio.run(server.list_tools()) if t.name == "query_interface_neighbours")
     assert set(tool.input_schema["properties"]) == {"device", "interface", "as_of", "known_at"}
