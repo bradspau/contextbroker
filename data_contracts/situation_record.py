@@ -11,6 +11,12 @@ When the knowledge class was answered, it lists one provenance record per return
 artefact's identifier and version): a fetched situation points at the artefacts it rested on and holds
 no title and no body.
 
+When a promoted conflict or a hypothesis was returned, it lists one provenance record per promoted record
+(source system "broker-promotion", the promoted id): a fetched situation points at the promoted state it
+delivered and holds none of it. Promoted records are read from the state file only, are never written by a
+request and never count as evidence, and a hypothesis is never a configured fact. With none returned the
+record is exactly what it was before.
+
 It reuses the Phase 3 response models. The module is pure: no FastAPI and no I/O.
 """
 import re
@@ -88,6 +94,13 @@ def stored_situation(response: ContextResponse) -> StoredSituation:
         # events it rested on and holds none of them (D-07).
         for event in response.events.events:
             seen.setdefault(_key(event.provenance), event.provenance)
+        # A reference per returned promoted conflict (its id), never the record or its support.
+        for promoted in response.events.promoted_conflicts:
+            seen.setdefault(_key(promoted.provenance), promoted.provenance)
+    if response.graph is not None:
+        # A reference per returned hypothesis (its id), never the hypothesis or its support.
+        for hypothesis in response.graph.hypotheses:
+            seen.setdefault(_key(hypothesis.provenance), hypothesis.provenance)
     if response.knowledge is not None:
         # A reference per returned artefact, never the artefact: no title, hash or text is kept (D-45).
         for reference in response.knowledge.references:

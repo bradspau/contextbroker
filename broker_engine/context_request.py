@@ -6,6 +6,12 @@ recognised event on a mapped device is returned it also reads the device's link 
 (SELECT only) and publishes a contradiction as a conflict naming both sides; the configured side is
 never written and the conflict never reaches the eligibility or the verdict.
 
+Promoted records (a conflict an operator promoted for the scope device, and a topology link inferred from
+stored neighbour-discovery events) are read from the state file only, in the events and topology classes. They
+are delivered with what they rest on and never written by a request. A promoted record never counts as
+evidence: it feeds neither the eligibility, the expiry nor the verdict, and a hypothesis is never a
+configured fact (it sits beside the configured edges, labelled and stated as inferred).
+
 The knowledge class reads reviewed files, ranked by a retrieval index (the index orders, the files decide
 which apply), and is judged on its own. It returns references only: the identifier, version, status,
 title, content hash, matched scope, source references and the approved actions by id and version, never
@@ -23,6 +29,8 @@ intent named without ``context:assess``, an offset beyond retention, a freshness
 limit) happens before the first Fuseki, VictoriaMetrics or TMF921 call (D-10). Nothing here logs the
 request body, the requester or a claim value.
 """
+import json
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -63,11 +71,15 @@ from data_contracts.context_contract import (
     EventsResult,
     EventWindow,
     FluentValue,
+    HYPOTHESIS_RESULT_CAP,
+    HypothesisEdge,
     KnowledgeRef,
     KnowledgeResult,
     MatchedScope,
+    PromotedConflictOut,
     Provenance,
     Situation,
+    SupportRef,
     authorize,
     authorize_scope,
     expiry,
@@ -77,6 +89,7 @@ from data_contracts.context_contract import (
 from broker_state.process import event_window_limits, get_store
 from data_contracts.knowledge import KNOWLEDGE_RESULT_CAP, KNOWLEDGE_SOURCE
 from data_contracts.metric_map import load_metric_map
+from data_contracts.promotion import PROMOTION_SOURCE
 from data_contracts.syslog_events import EVENT_KINDS
 from data_contracts.situation_record import (
     SITUATION_ID_PATTERN,
@@ -97,6 +110,13 @@ from state_reconciliation.event_reconciler import (
 # The telemetry lookback is twice the default freshness limit, so a sample that is too old is read and
 # reported stale (ineligible) instead of vanishing from the window and reading as missing (a gap).
 OBSERVATION_LOOKBACK = "10m"
+
+log = logging.getLogger(__name__)
+
+# The one line written for a stored promoted record that does not build its model: no id, device or text.
+PROMOTED_UNREADABLE = "promoted record unreadable"
+# One promoted conflict exists per rule and device (the id is built from both), so a few cover a device.
+PROMOTED_CONFLICT_LIMIT = 10
 
 AUTHORITY_REQUIRED = "authority claims required"
 INSUFFICIENT_SCOPE = "insufficient scope"
@@ -173,6 +193,50 @@ def _knowledge_ref(ref: ApplicableRef, retrieved_at: datetime) -> KnowledgeRef:
         unresolved_actions=ref.unresolved_actions,
         provenance=Provenance(source_system=KNOWLEDGE_SOURCE, reference=f"{bundle.identifier}@{bundle.version}",
                               observed_at=None, retrieved_at=_iso(retrieved_at)))
+
+
+def _promotion_provenance(row, retrieved_at: datetime) -> Provenance:
+    return Provenance(source_system=PROMOTION_SOURCE, reference=row.promoted_id,
+                      observed_at=_iso(row.promoted_at), retrieved_at=_iso(retrieved_at))
+
+
+def _support(row, now: datetime, requester: str) -> list[SupportRef]:
+    """What a promoted record rests on: the situation first, then each event in stored order. Whether each
+    still exists comes from the state file at `now`; an evicted source stays listed and marked (D-60). The
+    situation id goes only to the requester who asked that question; anyone else sees "withheld" and no id,
+    whether or not the situation still exists (D-66)."""
+    situation_present, event_present = get_store().support_present(
+        row.situation_id, row.event_ids, now=now)
+    if row.situation_requester == requester:
+        first = SupportRef(kind="situation", id=row.situation_id,
+                           state="present" if situation_present else "evicted")
+    else:
+        first = SupportRef(kind="situation", id=None, state="withheld")
+    return [first] + [SupportRef(kind="event", id=event_id, state="present" if present else "evicted")
+                      for event_id, present in zip(row.event_ids, event_present)]
+
+
+def _promoted_conflicts(device: str, times, now: datetime, requester: str) -> list[PromotedConflictOut]:
+    """The conflicts promoted for `device` (already authorised), newest first. Read from the state file
+    only. They are delivered beside the live conflicts and never feed the eligibility, the expiry or the
+    verdict (D-61, D-64). A row that does not build its model is skipped with one fixed line."""
+    rows = get_store().promoted_rows(
+        "conflict", device, valid_at=times.valid_at, known_at=times.known_at, now=now,
+        limit=PROMOTED_CONFLICT_LIMIT)
+    out = []
+    for row in rows:
+        try:
+            body = json.loads(row.body)
+            if body["device"] != row.device_a:
+                raise ValueError("body names another device")
+            out.append(PromotedConflictOut(
+                promoted_id=row.promoted_id, rule=row.rule, device=row.device_a, event=body["event"],
+                configured=body["configured"], text=body["text"], valid_from=_iso(row.valid_from),
+                promoted_at=_iso(row.promoted_at), support=_support(row, now, requester),
+                provenance=_promotion_provenance(row, now)))
+        except (ValueError, TypeError, KeyError):
+            log.warning(PROMOTED_UNREADABLE)
+    return out
 
 
 def _fluent_value(metric, kind, fluent, device_interface, valid_at, retrieved_at) -> FluentValue:
@@ -383,7 +447,8 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
         events = EventsResult(
             window=EventWindow(start=_iso(start), end=_iso(times.valid_at), seconds=window_s),
             cap=EVENT_RESULT_CAP, truncated=truncated, events=returned, envelopes=envelope_out,
-            configured=configured_out, conflicts=conflicts_out)
+            configured=configured_out, conflicts=conflicts_out,
+            promoted_conflicts=_promoted_conflicts(body.scope.device, times, now, caller.requester))
         eligibility["events"] = events_eligibility(
             count=len(returned), ambiguous=sum(e.mapping == "ambiguous" for e in returned),
             beyond_retention=start < now - timedelta(seconds=get_store().event_retention_s))
