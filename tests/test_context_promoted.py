@@ -5,15 +5,22 @@ for real. A promoted record is read from the state file only and is never eviden
 compares an answer with and without rows asks the same question twice.
 """
 import copy
+import json
+import logging
+from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
-import rdflib
 
 from broker_state.process import get_store
+from broker_state.store import NewPromoted
+from data_contracts import fluents as f
+from tests.fluent_helpers import IF0, IF1, LAT, NS, T0, bind
 from tests.promotion_helpers import EVENT, SID, new_hypothesis, new_promoted
 from tests.test_context_request import (  # noqa: F401
-    A_IF, B_IF, EVENTS, NOW, S, TOPOLOGY, WIDE, _store_clock, _upstreams, client, demo_graph, event,
-    events_headers, olt, post, put, rig, token)
+    A_IF, ALL_FOUR, B_IF, BOTH, EVENTS, NOW, OLT_EVENT, OLT_PON0, RAW_CANARY, S, TOPOLOGY, WIDE,
+    _store_clock, _upstreams, assure, client, demo_graph, event, events_headers, live_goal, olt, post,
+    put, rig, sample, token)
 
 PROMOTED_AT = NOW - 60 * S
 VALID_FROM = NOW - 300 * S
@@ -220,3 +227,177 @@ def test_a_request_without_the_topology_class_reads_no_hypothesis(rig, monkeypat
     seed_events(1)
     ask_events()
     assert seen == ["conflict"]
+
+
+# ---- a promoted record is never evidence (D-64) ----
+
+def test_untouched_a_promoted_conflict_is_returned_even_with_no_event_in_the_window(rig):
+    bare = ask_events()
+    promote_conflict(SID, requester="someone-else")
+    out = ask_events()
+    assert [p["promoted_id"] for p in out["events"]["promoted_conflicts"]] == ["prm-" + f"{1:032x}"]
+    assert out["events"]["events"] == []
+    assert out["eligibility"]["classes"]["events"] == {"result": "gap", "reasons": ["no events in window"]}
+    assert out["eligibility"]["result"] == "gap"
+    assert (out["expires_at"], out["expiry_basis"]) == (bare["expires_at"], bare["expiry_basis"])
+    assert without_promoted(out) == without_promoted(bare)
+    rig.untouched()  # the state file only: no Fuseki query, no VictoriaMetrics, no TMF921 call
+
+
+OLT_ALL = {"purpose": "assurance", "scope": OLT_PON0, "intent_id": "i1", "max_depth": 1,
+           "relationship_types": BOTH, "classes": ["topology", "goals", "observations", "events"]}
+
+
+def strip_promoted(out):
+    out = copy.deepcopy(out)
+    out["events"].pop("promoted_conflicts")
+    for key in ("hypotheses", "hypotheses_truncated", "hypotheses_withheld"):
+        out["graph"].pop(key)
+    return out
+
+
+def test_spy_the_verdict_eligibility_expiry_and_configured_side_are_identical_with_promoted_rows(olt):
+    bind(olt.fx, "i1", LAT, 100.0, IF0, T0)
+    sample(olt)
+    live_goal(olt)
+    f.add_link_fluent(olt.fx.graph, NS + "link-olt1-loop", IF0, IF1, T0, T0)
+    put(event(1, **OLT_EVENT))
+    judged = {"verdict": "success", "reasons": [], "context": [], "goals": []}
+    results = {}
+    triples, updates = len(olt.fx.graph), len(olt.fx.updates())
+    for name in ("without", "with"):
+        if name == "with":
+            sid = results["without"][0]["situation"]["id"]
+            get_store().promote([
+                new_promoted(1, device="olt1", situation_id=sid, requester=REQUESTER,
+                             valid_from=VALID_FROM),
+                new_hypothesis(2, "olt1/pon0", "olt2/pon0", situation_id=sid, requester=REQUESTER,
+                               valid_from=VALID_FROM)], now=PROMOTED_AT)
+        before = len(olt.queries())
+        vm_before = len(olt.vm.queries)
+        with patch("broker_engine.context_request.assess_tmf921_as_of",
+                   side_effect=lambda *a, **kw: dict(judged)) as spy:
+            r = assure(OLT_ALL, authority=ALL_FOUR)
+        assert r.status_code == 200, r.text
+        [call] = spy.call_args_list
+        results[name] = (r.json(), call, olt.queries()[before:], olt.vm.queries[vm_before:])
+    plain, with_rows = results["without"], results["with"]
+    assert with_rows[0]["events"]["promoted_conflicts"] and with_rows[0]["graph"]["hypotheses"]
+    assert plain[0]["events"]["promoted_conflicts"] == [] and plain[0]["graph"]["hypotheses"] == []
+    assert plain[0]["events"]["conflicts"]  # the live conflict is there in both
+    def shape(call):  # the recording joiner is a fresh closure per request; everything else must match
+        return call.args, {k: v for k, v in call.kwargs.items() if k != "join"}
+    assert shape(with_rows[1]) == shape(plain[1])
+    assert strip_promoted(with_rows[0]) == strip_promoted(plain[0])  # verdict, every eligibility class,
+    # expires_at, expiry_basis, fluent values, graph nodes, edges and limits, configured and conflicts
+    assert with_rows[0]["eligibility"] == plain[0]["eligibility"]
+    assert with_rows[0]["verdict"] == plain[0]["verdict"] == {"verdict": "success", "reasons": []}
+    assert with_rows[2] == plain[2] and with_rows[3] == plain[3]  # the same Fuseki and telemetry reads
+    assert olt.fx.updates()[updates:] == [] and len(olt.fx.graph) == triples
+    olt.push.assert_not_called()
+
+
+def test_the_situation_id_and_stored_body_do_not_change_unless_a_promoted_record_is_returned(rig):
+    seed_events(1, 2, 3)
+    first = ask_events()
+    sid = first["situation"]["id"]
+    assert "broker-promotion" not in get_store().get_situation(sid, now=NOW).body
+    promote_conflict(sid)
+    second = ask_events()
+    assert second["situation"]["id"] == sid
+    assert "broker-promotion" in get_store().get_situation(sid, now=NOW).body
+
+
+# ---- support: who sees a situation id, and what an eviction looks like (D-60, D-66) ----
+
+def test_withheld_another_requester_sees_no_situation_id_but_the_event_ids(rig):
+    seed_events(1, 2, 3)
+    sid = ask_events()["situation"]["id"]
+    promote_conflict(sid, requester=REQUESTER)
+    other = token({"entities": ["*"], "purposes": ["diagnosis"], "classes": ["events"]}, sub="someone-else")
+    r = post(EVENTS, headers=other)
+    assert r.status_code == 200, r.text
+    [record] = r.json()["events"]["promoted_conflicts"]
+    assert record["support"][0] == {"kind": "situation", "id": None, "state": "withheld"}
+    assert [s["id"] for s in record["support"][1:]] == [EVENT(1), EVENT(2), EVENT(3)]
+    assert sid not in r.text
+    assert ask_events()["events"]["promoted_conflicts"][0]["support"][0]["id"] == sid
+
+
+def test_withheld_holds_for_a_support_situation_that_no_longer_exists(rig):
+    promote_conflict(SID, requester="someone-else")  # no such situation was ever stored
+    [record] = ask_events()["events"]["promoted_conflicts"]
+    assert record["support"][0] == {"kind": "situation", "id": None, "state": "withheld"}
+    assert [s["state"] for s in record["support"][1:]] == ["evicted"] * 3  # no event was stored either
+
+
+def test_evicted_support_stays_visible_and_marked_past_its_own_retention_without_a_sweep(rig):
+    seed_events(1, 2, 3)
+    sid = ask_events()["situation"]["id"]
+    promote_conflict(sid)
+    store = get_store()
+    later = NOW + timedelta(days=10)
+    assert later > NOW + timedelta(seconds=store.event_retention_s + 1)
+    assert later < PROMOTED_AT + timedelta(seconds=store.promoted_retention_s)
+    with patch("broker_engine.context_request._utcnow", return_value=later):
+        r = post(EVENTS, headers=events_headers())
+    assert r.status_code == 200, r.text
+    [record] = r.json()["events"]["promoted_conflicts"]
+    assert record["support"] == [{"kind": "situation", "id": sid, "state": "evicted"}] + [
+        {"kind": "event", "id": EVENT(n), "state": "evicted"} for n in (1, 2, 3)]
+    assert r.json()["events"]["events"] == []
+
+
+def test_a_promoted_record_past_its_own_retention_is_not_returned(rig):
+    promote_conflict(SID)
+    later = PROMOTED_AT + timedelta(seconds=get_store().promoted_retention_s + 1)
+    with patch("broker_engine.context_request._utcnow", return_value=later):
+        r = post(EVENTS, headers=events_headers())
+    assert r.json()["events"]["promoted_conflicts"] == []
+
+
+# ---- a malformed or hostile stored row never breaks or colours the answer ----
+
+def promoted_with_body(body, n=1):
+    return NewPromoted(promoted_id="prm-" + f"{n:032x}", kind="conflict",
+                       rule="repeated_link_down_vs_configured", device_a="Router-A", device_b=None,
+                       body=json.dumps(body), valid_from=VALID_FROM, situation_id=SID,
+                       situation_requester=REQUESTER, event_ids=(EVENT(1),))
+
+
+@pytest.mark.parametrize("body", [
+    {"device": "Router-A", "event": "not_a_kind", "configured": "link_in_force", "text": "x"},
+    {"device": "Router-A", "event": "link_down", "configured": "not_a_value", "text": "x"},
+    {"device": "Router-B", "event": "link_down", "configured": "link_in_force", "text": "x"},
+    {"event": "link_down", "configured": "link_in_force"},
+])
+def test_an_unreadable_promoted_row_is_skipped_with_one_fixed_line_naming_nothing(rig, caplog, body):
+    get_store().promote([promoted_with_body(body)], now=PROMOTED_AT)
+    with caplog.at_level(logging.DEBUG):
+        r = post(EVENTS, headers=events_headers())
+    assert r.status_code == 200, r.text
+    assert r.json()["events"]["promoted_conflicts"] == []
+    lines = [rec.getMessage() for rec in caplog.records if "promoted record" in rec.getMessage()]
+    assert lines == ["promoted record unreadable"]
+    assert "prm-" + f"{1:032x}" not in caplog.text and "Router-A" not in caplog.text
+
+
+def test_a_stored_text_is_never_echoed_the_sentence_is_rebuilt_from_the_closed_vocabularies(rig):
+    get_store().promote([promoted_with_body(
+        {"device": "Router-A", "event": "link_down", "configured": "link_in_force",
+         "text": RAW_CANARY})], now=PROMOTED_AT)
+    r = post(EVENTS, headers=events_headers())
+    [record] = r.json()["events"]["promoted_conflicts"]
+    assert record["text"] == CONFLICT_TEXT and RAW_CANARY not in r.text
+
+
+def test_a_hypothesis_row_with_a_body_that_does_not_match_its_devices_is_skipped(hyp, caplog):
+    bad = new_hypothesis(1, A1, C2, valid_from=VALID_FROM)
+    bad = NewPromoted(**{**bad.__dict__, "body": json.dumps({"from": A1, "to": "Router-D/ge0"})})
+    promote_hypotheses(bad)
+    with caplog.at_level(logging.DEBUG):
+        out = ask_topology()
+    assert out["graph"]["hypotheses"] == [] and out["graph"]["hypotheses_withheld"] == 0
+    assert [r.getMessage() for r in caplog.records if "promoted record" in r.getMessage()] == [
+        "promoted record unreadable"]
+    assert "Router-D" not in caplog.text

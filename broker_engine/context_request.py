@@ -104,6 +104,7 @@ from state_reconciliation.event_reconciler import (
     CONFIGURED_LINK_IN_FORCE,
     ConfiguredSide,
     EventFact,
+    conflict_text,
     reconcile,
 )
 
@@ -229,11 +230,12 @@ def _promoted_conflicts(device: str, times, now: datetime, requester: str) -> li
             body = json.loads(row.body)
             if body["device"] != row.device_a:
                 raise ValueError("body names another device")
+            # The sentence is rebuilt from the two closed vocabularies; the stored text is never echoed.
             out.append(PromotedConflictOut(
                 promoted_id=row.promoted_id, rule=row.rule, device=row.device_a, event=body["event"],
-                configured=body["configured"], text=body["text"], valid_from=_iso(row.valid_from),
-                promoted_at=_iso(row.promoted_at), support=_support(row, now, requester),
-                provenance=_promotion_provenance(row, now)))
+                configured=body["configured"], text=conflict_text(body["event"], body["configured"]),
+                valid_from=_iso(row.valid_from), promoted_at=_iso(row.promoted_at),
+                support=_support(row, now, requester), provenance=_promotion_provenance(row, now)))
         except (ValueError, TypeError, KeyError):
             log.warning(PROMOTED_UNREADABLE)
     return out
