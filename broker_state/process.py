@@ -14,6 +14,14 @@ ingest time), BROKER_EVENT_WINDOW_DEFAULT (default 15m) and BROKER_EVENT_WINDOW_
 (default 24h), both digits then s, m, h or d from 1m to 7d. The default window may
 not exceed the maximum and the maximum may not exceed the retention. event_window_limits()
 applies these checks; load_settings() calls it, so a bad window stops the API at start.
+
+Promotion settings (plan 07-03): BROKER_PROMOTED_CAP (1 to 1000000, default 10000),
+BROKER_PROMOTED_RETENTION (digits then h or d, 1h to 90d, default 30d, counted from the
+last promotion), BROKER_PROMOTE_MIN_EVENTS (a whole number from 2 to 1000, default 3: the
+distinct events a situation must show before a rule fires) and BROKER_PROMOTE_WINDOW
+(digits then s, m, h or d, 1m to 7d, default 15m, not above BROKER_EVENT_RETENTION: the
+span those events must fall in). promotion_thresholds() applies these; load_settings()
+calls it, so a bad value stops the API at start.
 """
 import os
 import re
@@ -22,7 +30,7 @@ from dataclasses import dataclass
 
 from broker_engine.validation import _SAFE_RETENTION, _SAFE_WINDOW, _UNIT_SECONDS
 from broker_state.store import (DEFAULT_EVENT_CAP, DEFAULT_MARK_CAP, DEFAULT_OUTCOME_CAP,
-                                DEFAULT_SITUATION_CAP, StateStore)
+                                DEFAULT_PROMOTED_CAP, DEFAULT_SITUATION_CAP, StateStore)
 
 ENV_PATH = "BROKER_STATE_PATH"
 DEFAULT_PATH = "/data/broker-state.sqlite3"
@@ -41,6 +49,15 @@ ENV_EVENT_WINDOW_MAX = "BROKER_EVENT_WINDOW_MAX"
 DEFAULT_EVENT_RETENTION = "7d"
 DEFAULT_EVENT_WINDOW_DEFAULT = "15m"
 DEFAULT_EVENT_WINDOW_MAX = "24h"
+ENV_PROMOTED_CAP = "BROKER_PROMOTED_CAP"
+ENV_PROMOTED_RETENTION = "BROKER_PROMOTED_RETENTION"
+DEFAULT_PROMOTED_RETENTION = "30d"
+ENV_PROMOTE_MIN_EVENTS = "BROKER_PROMOTE_MIN_EVENTS"
+DEFAULT_PROMOTE_MIN_EVENTS = 3
+MIN_PROMOTE_EVENTS = 2  # one line alone is never enough (D-57)
+MAX_PROMOTE_EVENTS = 1000
+ENV_PROMOTE_WINDOW = "BROKER_PROMOTE_WINDOW"
+DEFAULT_PROMOTE_WINDOW = "15m"
 MIN_EVENT_WINDOW_S = 60  # 1m
 MAX_EVENT_WINDOW_S = 7 * 86400  # 7d
 _MAX_SETTING_LEN = 20  # longer than any valid value; keeps int() off absurd digit runs
@@ -58,6 +75,10 @@ class StateSettings:
     event_retention_s: int
     event_window_default_s: int
     event_window_max_s: int
+    promoted_cap: int
+    promoted_retention_s: int
+    promote_min_events: int
+    promote_window_s: int
 
 
 def _cap(environ, name: str, default: int) -> int:
@@ -104,11 +125,33 @@ def event_window_limits(environ=os.environ) -> tuple[int, int]:
     return default_s, max_s
 
 
+def _min_events(environ) -> int:
+    raw = environ.get(ENV_PROMOTE_MIN_EVENTS)
+    if not raw:
+        return DEFAULT_PROMOTE_MIN_EVENTS
+    if _DIGITS.match(raw) and MIN_PROMOTE_EVENTS <= int(raw) <= MAX_PROMOTE_EVENTS:
+        return int(raw)
+    raise ValueError(f"{ENV_PROMOTE_MIN_EVENTS} must be a whole number from "
+                     f"{MIN_PROMOTE_EVENTS} to {MAX_PROMOTE_EVENTS}")
+
+
+def promotion_thresholds(environ=os.environ) -> tuple[int, int]:
+    """(minimum distinct events, window in seconds) for the promotion rules, after the
+    cross check: the window may not exceed the event retention (D-57)."""
+    min_events = _min_events(environ)
+    window_s = _window(environ, ENV_PROMOTE_WINDOW, DEFAULT_PROMOTE_WINDOW)
+    retention_s = _retention(environ, ENV_EVENT_RETENTION, DEFAULT_EVENT_RETENTION)
+    if window_s > retention_s:
+        raise ValueError(f"{ENV_PROMOTE_WINDOW} must not exceed {ENV_EVENT_RETENTION}")
+    return min_events, window_s
+
+
 def load_settings(environ=os.environ) -> StateSettings:
     path = environ.get(ENV_PATH) or DEFAULT_PATH
     if path == ":memory:":
         raise ValueError(f"{ENV_PATH} must be a file path")
     window_default_s, window_max_s = event_window_limits(environ)
+    promote_min_events, promote_window_s = promotion_thresholds(environ)
     return StateSettings(
         path=path,
         outcome_cap=_cap(environ, ENV_OUTCOME_CAP, DEFAULT_OUTCOME_CAP),
@@ -118,7 +161,12 @@ def load_settings(environ=os.environ) -> StateSettings:
         event_cap=_cap(environ, ENV_EVENT_CAP, DEFAULT_EVENT_CAP),
         event_retention_s=_retention(environ, ENV_EVENT_RETENTION, DEFAULT_EVENT_RETENTION),
         event_window_default_s=window_default_s,
-        event_window_max_s=window_max_s)
+        event_window_max_s=window_max_s,
+        promoted_cap=_cap(environ, ENV_PROMOTED_CAP, DEFAULT_PROMOTED_CAP),
+        promoted_retention_s=_retention(environ, ENV_PROMOTED_RETENTION,
+                                        DEFAULT_PROMOTED_RETENTION),
+        promote_min_events=promote_min_events,
+        promote_window_s=promote_window_s)
 
 
 _LOCK = threading.Lock()
@@ -136,7 +184,9 @@ def get_store() -> StateStore:
                                 situation_cap=settings.situation_cap,
                                 situation_retention_s=settings.situation_retention_s,
                                 event_cap=settings.event_cap,
-                                event_retention_s=settings.event_retention_s)
+                                event_retention_s=settings.event_retention_s,
+                                promoted_cap=settings.promoted_cap,
+                                promoted_retention_s=settings.promoted_retention_s)
         return _STORE
 
 
