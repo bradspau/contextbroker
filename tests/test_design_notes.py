@@ -221,3 +221,34 @@ def test_wording_the_checks_catch_what_they_look_for():
     assert FORBIDDEN_WORDS.search("the upper bound") and FORBIDDEN_WORDS.search("slow drift")
     assert FORBIDDEN_WORDS.search("the goal and the bounded read") is None
     assert FAILS_CLOSED.search("fails closed")
+
+
+# ---- README, CLAUDE.md and the gap analysis (task 3) ------------------------------------------
+
+
+def test_nothing_still_calls_the_mcp_server_not_mounted():
+    for path in (ROOT / "README.md", DESIGN / "context-contract.md", DESIGN / "layer3-gap-analysis.md"):
+        assert "not mounted" not in _text(path).lower(), path.name
+
+
+def test_the_readme_says_the_mcp_server_is_not_served_and_an_optional_extra():
+    text = _text(ROOT / "README.md")
+    assert "not served" in text
+    assert "pip install -r requirements-mcp.txt" in text
+    assert "Phase 7 decides whether it is served" not in text
+
+
+def test_the_readme_and_claude_md_describe_the_profile_and_the_promotion_command():
+    readme, claude = _text(ROOT / "README.md"), _text(ROOT / "CLAUDE.md")
+    assert "application/ld+json" in readme and "application/ld+json" in claude
+    assert "ingestion.promote" in readme and "ingestion.promote" in claude
+    assert "requirements-mcp.txt" in claude
+    for note in ("design/exchange-profile.md", "design/semantic-promotion.md"):
+        assert note in readme, note
+    for name in ("exchange-profile.md", "semantic-promotion.md"):
+        assert name in claude, name
+
+
+def test_the_notes_keep_the_health_keys_at_eight():
+    assert "eight keys" in _text(PROMOTION_NOTE)
+    assert "eight keys" in _text(ROOT / "CLAUDE.md")

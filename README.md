@@ -43,16 +43,18 @@ structure below by a strangler migration.
 | REST API (`/context/metric`, `/context/assess`, the three operations queries and `POST /context/request`) | Built, unit-tested. Every `/context/*` route needs a bearer token with a scope (see [Authentication](#authentication)); `GET /health` is public. `POST /context/request` is the context request and response contract (see [Context requests](#context-requests)); run live on 2026-11-05 against the rebuilt API and the persistent stack: the refusals, the Context Graph (including the authority cut and a past request), goals and placements with provenance, and an `inconclusive` verdict. No telemetry was flowing, so no run saw a `success` or `failure` verdict. |
 | Operations queries, no intent needed (`metric-history`, `interfaces-nonzero`, `neighbours`; REST, MCP and agent tools) | Built, unit-tested, run live against Fuseki, VictoriaMetrics and LM Studio |
 | Agent harness (Claude tool-calling loop, LM Studio fallback, `broker.py` CLI) | Built, tested with mocks |
-| MCP server | Built and unit-tested, **not mounted** or served by anything |
+| MCP server | Built and unit-tested, **not served** by anything, and an **optional extra**: `pip install -r requirements-mcp.txt`. The image does not install it and its tests skip without it |
+| JSON-LD exchange profile (`Accept: application/ld+json` on `POST /context/request`) | Built, unit-tested against rdflib and a known-answer fixture pair; the native JSON stays the default (see [JSON-LD](#json-ld) and [design/exchange-profile.md](design/exchange-profile.md)) |
+| Semantic promotion (promoted conflicts and hypotheses, an operator command) | Built, unit-tested; nothing promoted is ever evidence, and one neighbour-discovery wording is unverified against a real device (see [Promoted state](#promoted-state) and [design/semantic-promotion.md](design/semantic-promotion.md)) |
 | Action-readiness check (`governance_gate`) and executor (`action_lifecycle`) | A library only. The check fails closed on evidence freshness, catalogue membership, scope and loop reservation; it does not test identity or approval. The only controller is `NullController`, so nothing is ever changed on a device. No runtime path submits a proposal. |
 | TMF921 verification (`"source":"tmf921"`, the only source) | Built. Pushes fresh observations to the intent server, reads its reports, and maps them to a verdict. The old graph intent path was removed (see [Removed: the old graph intent path](#removed-the-old-graph-intent-path)). |
-| Outcomes, high-water marks, situation records, events and decision records | Durable. Outcomes, high-water marks, situation records and syslog events are in one SQLite file on the `broker-state` volume; decision records are a file by default; the reservation book and the action catalogue stay in memory (see [Situation records](#situation-records) and [design/durable-state.md](design/durable-state.md)) |
+| Outcomes, high-water marks, situation records, events and decision records | Durable. Outcomes, high-water marks, situation records, syslog events and promoted records are in one SQLite file on the `broker-state` volume; decision records are a file by default; the reservation book and the action catalogue stay in memory (see [Situation records](#situation-records) and [design/durable-state.md](design/durable-state.md)) |
 | Syslog events (strict RFC 5424 and RFC 3164 parser, durable event store, `events` context class, recognised link events reconciled against configured links) | Built, unit-tested; lines enter through a command, there is no listener (see [Events](#events) and [design/event-store.md](design/event-store.md)) |
 | LQM, System 1 / investigation models | Stubs |
 | Governed knowledge (tracked OKF bundles in `knowledge/`, Qdrant hybrid index, `knowledge` context class, approved-action references) | Built, unit-tested; the four bundles are drafts, approval is a reviewed commit, and a response carries references only, never a body (see [Knowledge](#knowledge) and [design/knowledge.md](design/knowledge.md)). The suite uses a fake embedder: the real models and a live Qdrant were not part of the test run |
 | Redpanda, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 2546 tests passing and 26 skipped (`pytest`): 15 live TMF921 tests, skipped
+The test suite has 2960 tests passing and 26 skipped (`pytest`): 15 live TMF921 tests, skipped
 unless `TMF921_LIVE=1`, and 11 real-engine Fuseki parity tests, skipped unless
 `FUSEKI_PARITY_URL` is set (see [Running the tests](#running-the-tests)). The work is on the `fullnetwork` branch
 (pushed to GitHub) and has not been reviewed by anyone else.
@@ -167,7 +169,7 @@ flowchart TB
         Assure["outcome_assurance<br/>deterministic success, failure, inconclusive"]
         Bind["metric_map.json and the binding in the network graph"]
         BindCli["bind_intent CLI<br/>reads goals from TMF921, writes :ServiceBinding"]
-        MCP["MCP server<br/>built, not mounted"]
+        MCP["MCP server<br/>built, not served<br/>optional extra"]
     end
 
     subgraph Net["Network side"]
@@ -268,7 +270,7 @@ under [`ingestion/load_ontologies.py`](#ingestionload_ontologiespy).
 | Package | Responsibility | Spec component |
 |---|---|---|
 | `data_contracts` | `ContextEnvelope` and state-quality labels shared by all layers | Data contracts |
-| `broker_engine` | FastAPI app (`broker_engine.main:app`, REST with bearer-token auth and `/health`; MCP server built but not mounted), pruner, SPARQL/PromQL resolvers, `assess` | Context broker engine |
+| `broker_engine` | FastAPI app (`broker_engine.main:app`, REST with bearer-token auth and `/health`; MCP server built, not served, an optional extra), pruner, SPARQL/PromQL resolvers, `assess` | Context broker engine |
 | `outcome_assurance` | Deterministic, three-valued intent verdict (the LLM is not the judge) | Outcome assurance |
 | `agent_harness` | Tool-calling LLM loop (Claude, LM Studio fallback); `broker.py` is a thin CLI shim over it | Agent harness |
 | `ontologies` | `tbox/` topology ontology (loader allow-list), `shacl/` shapes, `migrations/` one-off store clean-ups | Ontology / knowledge layer |
@@ -298,9 +300,10 @@ under [`ingestion/load_ontologies.py`](#ingestionload_ontologiespy).
    `POST /context/assess` assesses via the separate TMF921 intent server and its own graph (`"source":"tmf921"`, the only value). For a bound intent:
    `curl -X POST localhost:8080/context/assess -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"intent_id":"<intent_id>","time_window":"5m"}'`
    An MCP server is built and unit-tested (`broker_engine.main.build_mcp_server()`)
-   but is NOT mounted on that app and nothing serves it; to use it you would have
-   to run it yourself, e.g. `build_mcp_server().run()`. A served MCP server must
-   authenticate its callers (Phase 7 decides whether it is served).
+   but it is not served: it is not on that app and nothing runs it. It is an optional
+   extra (`pip install -r requirements-mcp.txt`); the image does not install it and its
+   tests skip without it. To use it you would have to run it yourself, e.g.
+   `build_mcp_server().run()`. A served MCP server must authenticate its callers.
 2. `broker_engine` resolves declared state from Fuseki and observed state from
    VictoriaMetrics, wraps each in a `ContextEnvelope` with quality metadata, and prunes it.
 3. `outcome_assurance` computes the success / failure / inconclusive verdict
@@ -634,8 +637,9 @@ TOKEN=$(python scripts/mint_token.py --key ~/keys/broker_jwt_private.pem --sub a
 ```
 
 The agent command line (`broker.py`) and the MCP server call broker functions in
-process and present no token; they run with the operator's local trust. A served MCP
-server must authenticate (Phase 7).
+process and present no token; they run with the operator's local trust. The MCP server
+is not served and is an optional extra (`requirements-mcp.txt`); a served one must
+authenticate.
 
 ## Health
 
@@ -1023,8 +1027,8 @@ An abridged answer to the request above (times shortened, one metric shown):
   missing (a gap). Each envelope carries a list of provenance records: source system,
   reference (a pinned series name, never server text), observation time and retrieval
   time.
-- **Context Graph.** Nodes and edges, not a wire format: JSON-LD and NGSI-LD views are
-  later work. A device node id is the device name (`edge-sw-1`) and an interface node id
+- **Context Graph.** Nodes and edges, not a wire format: a JSON-LD view of the whole answer is
+  available (see [JSON-LD](#json-ld)); an NGSI-LD view is later work. A device node id is the device name (`edge-sw-1`) and an interface node id
   is `device/interface` (`edge-sw-1/uplink0`); an interface node also carries `graph_ref`,
   the local name of its graph IRI. Edges are `has_interface` (device to interface) and
   `connected_to` (interface to interface, naming the link and its fluent). Depth counts
@@ -1038,9 +1042,14 @@ An abridged answer to the request above (times shortened, one metric shown):
   Two interfaces that would get the same node id, an ambiguous scope, two conflicting
   link records or a malformed topology record make the topology class ineligible; a
   scope that is not in the topology is a gap.
-- **Events.** Present only when `events` was asked for, else `null`; see [Events](#events).
+- **Events.** Present only when `events` was asked for, else `null`; see [Events](#events). It also
+  carries `promoted_conflicts`, empty unless an operator promoted one for the scope device (see
+  [Promoted state](#promoted-state)).
 - **Knowledge.** Present only when `knowledge` was asked for, else `null`; see
   [Knowledge](#knowledge).
+- **Hypotheses.** The graph also carries `hypotheses`, `hypotheses_truncated` and
+  `hypotheses_withheld`: inferred links, beside and never among the edges, empty unless an operator
+  promoted one (see [Promoted state](#promoted-state)).
 - **Verdict.** Present only when the request names an `intent_id` with both `goals` and
   `observations`; otherwise it is `null`. It comes from the read-only TMF921 assess
   (`success`, `failure` or `inconclusive`), judged on the same goal snapshot and the same
@@ -1223,6 +1232,62 @@ Operator notes: `QDRANT_API_KEY` must be in `.env` (see [Start the data stores](
 `/health` reports `qdrant`, and the state file gets no new table. The image's rollback caveat for
 situation rows is in [design/knowledge.md](design/knowledge.md).
 
+### JSON-LD
+
+`POST /context/request` can answer in JSON-LD. Send `Accept: application/ld+json` and the answer is
+the profile of the very answer native JSON would have given: the same situation id, the same stored
+row, the same upstream reads. The native JSON stays the default. The profile is the native answer plus
+an inline, static `@context` and an `@type` (and an `@id` where the model has an identity); the context
+is never fetched, there is no new route, and a consumer needs no network to read it.
+
+```bash
+curl -s -X POST localhost:8080/context/request -H "Authorization: Bearer $TOKEN" \
+  -H 'Accept: application/ld+json' -H 'Content-Type: application/json' -d @request.json
+```
+
+- **Never a refusal.** A header the broker cannot use (missing, `text/html`, malformed, over 512
+  characters or 32 items, or `application/ld+json;q=0`) gets the native JSON with status 200, not a 406.
+  Both answers carry `Vary: Accept`.
+- **Errors stay JSON.** A 401, 403, 400 or 422 is `application/json` whatever the header says, and no
+  upstream is read for it. The situation and health routes do not negotiate.
+- **Checked against the code.** A known-answer fixture pair of a five-class answer is read by rdflib
+  with no network, and a test fails if the context printed in
+  [design/exchange-profile.md](design/exchange-profile.md) and the one the broker emits ever differ.
+  NGSI-LD is not built.
+
+### Promoted state
+
+Two kinds of record can be kept beyond the request that produced them, and only an operator keeps
+them. Neither is ever evidence: a promoted record feeds no verdict, eligibility or expiry, changes no
+configured state and grants no authority to act.
+
+- A **promoted conflict** appears under `events.promoted_conflicts` for the scope device: three or more
+  `link_down` events of one device inside 15 minutes (the defaults) while a configured link on that
+  device was in force.
+- A **hypothesis** appears under `graph.hypotheses` of a topology request that follows `connected_to`:
+  a link that stored neighbour-discovery lines report between two interfaces of the graph that have no
+  configured link. It is labelled `hypothesis` and `inferred`, shown only when both ends are on devices
+  the token covers (otherwise counted in `hypotheses_withheld`), and hidden as soon as a configured
+  link covers the pair.
+
+Each carries its support: the situation and event ids it rests on, each `present`, `evicted` (the
+source was removed by its own retention, and stays listed and marked) or `withheld` (another
+requester's situation, with no id), and a `broker-promotion` provenance record.
+
+```bash
+docker exec contextbroker-api python -m ingestion.promote --situation sit-... --dry-run
+docker exec contextbroker-api python -m ingestion.promote --situation sit-...
+```
+
+The id is that of a stored events situation. The command reads Fuseki with SELECT queries only,
+writes the records in one transaction and prints one line of counts
+(`conflicts=N hypotheses=N events=N counted=N evicted=N`). Every refusal is one fixed line and
+nothing is written. The thresholds (`BROKER_PROMOTE_MIN_EVENTS`, `BROKER_PROMOTE_WINDOW`), the cap and
+the retention are in [design/durable-state.md](design/durable-state.md). Syslog origin is
+unauthenticated, so a promoted record is a claim by whoever sent the lines; the neighbour-discovery
+wording of one format is proposed and unverified against a device. The full rules are in
+[design/semantic-promotion.md](design/semantic-promotion.md).
+
 ## Using an external TMF921 intent server
 
 The broker takes each intent (and its handling state) from a TMF921 server
@@ -1353,7 +1418,7 @@ Docker required to run the suite:
 pytest tests/ -v
 ```
 
-The full suite is 2546 passed and 26 skipped (the 15 live TMF921 tests and the 11 real-engine
+The full suite is 2960 passed and 26 skipped (the 15 live TMF921 tests and the 11 real-engine
 parity tests are skipped unless their variables are set).
 
 Every test gets its own state file and decision-record file from `tests/conftest.py`, so no test
