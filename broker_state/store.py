@@ -27,9 +27,24 @@ ingest time only, since an event time comes from the device and cannot be truste
 (a nil or future one would otherwise pin an event for ever). Reads hide events past
 retention without waiting for a sweep. Neither line carries a host, device or id.
 
+Promoted records (D-59, D-60, D-66, D-67): one more table, promoted, added at the same
+schema version with IF NOT EXISTS, by its own existence check on any existing version-1
+file. A row is derived semantic state (a promoted conflict or a hypothesis) with its
+valid-from time and the ids of its support: the stored situation and at most 20 events.
+It is written only by the operator command (plan 07-04), never by a request. A re-run
+is an upsert that keeps the earliest valid-from. At the cap (default 10000) the least
+recently written rows are evicted inside the write, counted in counters as
+evicted_promoted (not in EVICTION_TABLES, so /health keeps its shape) and announced by
+"state eviction: table=promoted evicted=N". A sweep inside a promotion write, at most
+once a minute on its own timer, removes rows BROKER_PROMOTED_RETENTION (default 30 d)
+after their last promotion; reads hide them without waiting. support_present() says
+whether the situation and each event of a record still exist, so a record never points
+at an evicted source without saying so.
+
 All SQL text is literal; every value is passed as a query parameter.
 """
 import functools
+import json
 import logging
 import math
 import os
@@ -61,6 +76,14 @@ QUARANTINE_REASONS = ("no priority", "not text", "too long", "unparsable header"
 EVENT_FORMATS = ("rfc5424", "rfc3164")
 EVENT_MAPPINGS = ("mapped", "ambiguous", "unmapped")
 EVENT_LIMIT_MAX = 10000
+DEFAULT_PROMOTED_CAP = 10000
+DEFAULT_PROMOTED_RETENTION_S = 2592000  # 30 d
+PROMOTED_KINDS = ("conflict", "hypothesis")
+PROMOTED_SUPPORT_MAX = 20
+PROMOTED_BATCH_MAX = 200
+PROMOTED_LIMIT_MAX = 1000
+PROMOTED_BODY_MAX = 4096
+PROMOTED_EVICTION_COUNTER = "evicted_promoted"
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _US = timedelta(microseconds=1)
@@ -110,6 +133,23 @@ _EVENT_SCHEMA = (
     "CREATE INDEX IF NOT EXISTS event_devices_device ON event_devices (device, event_id)",
 )
 
+# Added at schema version 1 (D-59). Written only by the operator command. event_ids is a
+# JSON array of at most PROMOTED_SUPPORT_MAX ids; device_b is set for a hypothesis only.
+_PROMOTED_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS promoted ("
+    "promoted_id TEXT PRIMARY KEY, "
+    "kind TEXT NOT NULL CHECK (kind IN ('conflict','hypothesis')), "
+    "rule TEXT NOT NULL, device_a TEXT NOT NULL, device_b TEXT, body TEXT NOT NULL, "
+    "valid_from_us INTEGER NOT NULL, promoted_at_us INTEGER NOT NULL, "
+    "last_promoted_at_us INTEGER NOT NULL, repeat_count INTEGER NOT NULL, "
+    "written_seq INTEGER NOT NULL, situation_id TEXT NOT NULL, "
+    "situation_requester TEXT NOT NULL, event_ids TEXT NOT NULL, "
+    "CHECK ((kind = 'conflict') = (device_b IS NULL)))",
+    "CREATE INDEX IF NOT EXISTS promoted_written_seq ON promoted (written_seq)",
+    "CREATE INDEX IF NOT EXISTS promoted_device_a ON promoted (device_a, kind)",
+    "CREATE INDEX IF NOT EXISTS promoted_device_b ON promoted (device_b, kind)",
+    "CREATE INDEX IF NOT EXISTS promoted_last ON promoted (last_promoted_at_us)",
+)
 
 _OUTCOMES = ("success", "failure", "inconclusive")
 
@@ -138,6 +178,9 @@ _QUARANTINE_COUNTER = {"no priority": "quarantine_no_priority",
 _EVENT_ID = re.compile(r"^evt-[0-9a-f]{32}\Z")
 _DEVICE = re.compile(r"^[A-Za-z0-9_\-/]{1,128}\Z")
 _KIND = re.compile(r"^[a-z_]{1,32}\Z")
+_PROMOTED_ID = re.compile(r"^prm-[0-9a-f]{32}\Z")
+_PROMOTED_RULE = re.compile(r"^[a-z_]{1,64}\Z")
+_SITUATION_ID = re.compile(r"^sit-[0-9a-f]{32}\Z")
 _UPSERT_COUNTER = ("INSERT INTO counters (name, value) VALUES (?, ?) "
                    "ON CONFLICT(name) DO UPDATE SET value = value + excluded.value")
 
@@ -202,6 +245,49 @@ class EventBatch:
     ambiguous: int
 
 
+@dataclass(frozen=True)
+class NewPromoted:
+    """One promoted record as the operator command hands it to the store."""
+    promoted_id: str
+    kind: str
+    rule: str
+    device_a: str
+    device_b: str | None
+    body: str
+    valid_from: datetime
+    situation_id: str
+    situation_requester: str
+    event_ids: tuple
+
+
+@dataclass(frozen=True)
+class PromotedRow:
+    """A promoted record as a read returns it."""
+    promoted_id: str
+    kind: str
+    rule: str
+    device_a: str
+    device_b: str | None
+    body: str
+    valid_from: datetime
+    promoted_at: datetime
+    last_promoted_at: datetime
+    repeat_count: int
+    situation_id: str
+    situation_requester: str
+    event_ids: tuple
+
+
+@dataclass(frozen=True)
+class PromoteBatch:
+    """What one promote call did: new ids, refreshed ids, rows the cap evicted and rows
+    the retention sweep removed."""
+    written: int
+    refreshed: int
+    evicted: int
+    removed: int
+
+
 def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -259,6 +345,49 @@ def _check_event(e) -> None:
         raise ValueError("raw must be encodable as UTF-8") from None
 
 
+def _reject_constant(_name):
+    raise ValueError("body must be a JSON object")
+
+
+def _check_promoted(r) -> None:
+    """Every refusal here is a programming error in the caller, raised before any SQL."""
+    if not isinstance(r, NewPromoted):
+        raise ValueError("record must be a NewPromoted")
+    if not isinstance(r.promoted_id, str) or not _PROMOTED_ID.match(r.promoted_id):
+        raise ValueError("promoted_id must be prm- and 32 lower-case hex digits")
+    if r.kind not in PROMOTED_KINDS:
+        raise ValueError("kind must be conflict or hypothesis")
+    if not isinstance(r.rule, str) or not _PROMOTED_RULE.match(r.rule):
+        raise ValueError("rule must be 1 to 64 lower-case letters or underscores")
+    _check_device(r.device_a)
+    if r.device_b is not None:
+        _check_device(r.device_b)
+    if (r.kind == "conflict") != (r.device_b is None):
+        raise ValueError("only a hypothesis has a second device")
+    if not isinstance(r.body, str) or len(r.body) > PROMOTED_BODY_MAX:
+        raise ValueError("body must be a string of at most %d characters" % PROMOTED_BODY_MAX)
+    try:
+        parsed = json.loads(r.body, parse_constant=_reject_constant)
+    except ValueError:
+        raise ValueError("body must be a JSON object") from None
+    if not isinstance(parsed, dict):
+        raise ValueError("body must be a JSON object")
+    _to_us(r.valid_from)
+    if not isinstance(r.situation_id, str) or not _SITUATION_ID.match(r.situation_id):
+        raise ValueError("situation_id must be sit- and 32 lower-case hex digits")
+    who = r.situation_requester
+    if not isinstance(who, str) or not 1 <= len(who) <= 1024 or not who.isprintable():
+        raise ValueError("situation_requester must be 1 to 1024 printable characters")
+    ids = r.event_ids
+    if not isinstance(ids, tuple) or not 1 <= len(ids) <= PROMOTED_SUPPORT_MAX:
+        raise ValueError("event_ids must be a tuple of 1 to %d ids" % PROMOTED_SUPPORT_MAX)
+    for i in ids:
+        if not isinstance(i, str) or not _EVENT_ID.match(i):
+            raise ValueError("event_id must be evt- and 32 lower-case hex digits")
+    if len(set(ids)) != len(ids):
+        raise ValueError("event_ids must be distinct")
+
+
 def _check_quarantine(quarantined) -> dict:
     if quarantined is None:
         return {}
@@ -301,11 +430,16 @@ class StateStore:
                  situation_retention_s: int = DEFAULT_SITUATION_RETENTION_S,
                  event_cap: int = DEFAULT_EVENT_CAP,
                  event_retention_s: int = DEFAULT_EVENT_RETENTION_S,
+                 promoted_cap: int = DEFAULT_PROMOTED_CAP,
+                 promoted_retention_s: int = DEFAULT_PROMOTED_RETENTION_S,
                  clock=None, monotonic=time.monotonic):
         self._caps = {"outcomes": outcome_cap, "marks": mark_cap,
                       "situations": situation_cap, "events": event_cap}
+        self._promoted_cap = promoted_cap
         self._retention_s = situation_retention_s
         self._event_retention_s = event_retention_s
+        self._promoted_retention_s = promoted_retention_s
+        self._last_promoted_sweep: float | None = None
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic
         self._last_sweep: float | None = None
@@ -327,6 +461,10 @@ class StateStore:
     @property
     def event_retention_s(self) -> int:
         return self._event_retention_s
+
+    @property
+    def promoted_retention_s(self) -> int:
+        return self._promoted_retention_s
 
     def _open(self, path) -> None:
         in_memory = str(path) == _MEMORY
@@ -352,7 +490,7 @@ class StateStore:
             with self._txn():
                 # Re-read inside the write lock: another process may have created it.
                 if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
-                    for stmt in _SCHEMA + _EVENT_SCHEMA:
+                    for stmt in _SCHEMA + _EVENT_SCHEMA + _PROMOTED_SCHEMA:
                         conn.execute(stmt)
                     conn.execute("PRAGMA user_version=1")  # SCHEMA_VERSION
         elif not self._has_event_tables():
@@ -361,11 +499,23 @@ class StateStore:
                 if not self._has_event_tables():  # re-read inside the write lock
                     for stmt in _EVENT_SCHEMA:
                         conn.execute(stmt)
+        # Any version-1 file may lack the promoted table (Phase 4, 5 or 6): the check
+        # above only fires for missing event tables, so this one runs on its own (D-59).
+        if version != 0 and not self._has_promoted_table():
+            with self._txn():
+                if not self._has_promoted_table():  # re-read inside the write lock
+                    for stmt in _PROMOTED_SCHEMA:
+                        conn.execute(stmt)
 
     def _has_event_tables(self) -> bool:
         return self._conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' "
             "AND name IN ('events', 'event_devices')").fetchone()[0] == 2
+
+    def _has_promoted_table(self) -> bool:
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'promoted'").fetchone()[0] == 1
 
     @contextmanager
     def _txn(self):
@@ -688,6 +838,74 @@ class StateStore:
                 "unmapped": rows.get("events_unmapped", 0),
                 "quarantined": {r: rows.get(_QUARANTINE_COUNTER[r], 0)
                                 for r in QUARANTINE_REASONS}}
+
+    # -- promoted records ----------------------------------------------
+
+    @_guarded
+    def promote(self, records, *, now: datetime) -> PromoteBatch:
+        """Write promoted records in one transaction (D-59, D-67).
+
+        Anything a caller got wrong is a ValueError raised before any SQL."""
+        records = list(records)
+        if len(records) > PROMOTED_BATCH_MAX:
+            raise ValueError("a batch holds at most %d records" % PROMOTED_BATCH_MAX)
+        for r in records:
+            _check_promoted(r)
+        if len({r.promoted_id for r in records}) != len(records):
+            raise ValueError("a batch holds each promoted_id once")
+        now_us = _to_us(now)
+        written = 0
+        with self._txn() as conn:
+            seq = conn.execute(
+                "SELECT COALESCE(MAX(written_seq), 0) FROM promoted").fetchone()[0]
+            for r in records:
+                seq += 1
+                conn.execute(
+                    "INSERT INTO promoted (promoted_id, kind, rule, device_a, device_b, "
+                    "body, valid_from_us, promoted_at_us, last_promoted_at_us, "
+                    "repeat_count, written_seq, situation_id, situation_requester, "
+                    "event_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+                    (r.promoted_id, r.kind, r.rule, r.device_a, r.device_b, r.body,
+                     _to_us(r.valid_from), now_us, now_us, seq, r.situation_id,
+                     r.situation_requester, json.dumps(list(r.event_ids))))
+                written += 1
+        return PromoteBatch(written=written, refreshed=0, evicted=0, removed=0)
+
+    @_guarded
+    def promoted_rows(self, kind: str, device: str, *, valid_at: datetime,
+                      known_at: datetime | None, now: datetime,
+                      limit: int) -> list[PromotedRow]:
+        """Records of `kind` that name `device` as device_a or device_b, valid at
+        `valid_at`, promoted at or before known_at (when given) and not past retention
+        at `now`. Newest valid-from first, then promoted_id."""
+        if kind not in PROMOTED_KINDS:
+            raise ValueError("kind must be conflict or hypothesis")
+        _check_device(device)
+        valid_us, now_us = _to_us(valid_at), _to_us(now)
+        known_us = None if known_at is None else _to_us(known_at)
+        if not _is_int(limit) or not 1 <= limit <= PROMOTED_LIMIT_MAX:
+            raise ValueError("limit must be a whole number from 1 to %d" % PROMOTED_LIMIT_MAX)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT promoted_id, kind, rule, device_a, device_b, body, valid_from_us, "
+                "promoted_at_us, last_promoted_at_us, repeat_count, situation_id, "
+                "situation_requester, event_ids FROM promoted "
+                "WHERE kind = ? AND (device_a = ? OR device_b = ?) "
+                "AND valid_from_us <= ? AND last_promoted_at_us + ? > ? "
+                "AND (? IS NULL OR promoted_at_us <= ?) "
+                "ORDER BY valid_from_us DESC, promoted_id ASC LIMIT ?",
+                (kind, device, device, valid_us, self._promoted_retention_s * 1000000,
+                 now_us, known_us, known_us, limit)).fetchall()
+        return [PromotedRow(
+            promoted_id=r[0], kind=r[1], rule=r[2], device_a=r[3], device_b=r[4],
+            body=r[5], valid_from=_from_us(r[6]), promoted_at=_from_us(r[7]),
+            last_promoted_at=_from_us(r[8]), repeat_count=r[9], situation_id=r[10],
+            situation_requester=r[11], event_ids=tuple(json.loads(r[12]))) for r in rows]
+
+    @_guarded
+    def promoted_count(self) -> int:
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) FROM promoted").fetchone()[0]
 
     # -- eviction counters ---------------------------------------------
 
