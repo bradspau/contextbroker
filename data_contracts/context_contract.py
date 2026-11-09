@@ -18,6 +18,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from broker_engine.validation import freshness_seconds, window_seconds
 from data_contracts.envelope import DEFAULT_MAX_AGE_S
 from data_contracts.knowledge import KNOWLEDGE_SOURCE, ONTOLOGY_CLASSES, RETRIEVAL_OUTCOMES, RETURNED_STATUSES
+from data_contracts.promotion import (
+    HYPOTHESIS_LABEL,
+    HYPOTHESIS_STATE,
+    RULE_ADJACENCY,
+    RULE_REPEATED_LINK_DOWN,
+    SUPPORT_KINDS,
+    SUPPORT_STATES,
+)
 from data_contracts.syslog_events import EVENT_FORMATS, EVENT_KINDS, EVENT_SOURCE
 
 PURPOSES = ("assurance", "diagnosis", "reporting")
@@ -33,6 +41,8 @@ CUT_REASONS = ("authority", "depth", "node_cap", "relationship_types")
 # What can be said about one event beyond its stored fields (D-14, D-33). The result of an events
 # request holds at most EVENT_RESULT_CAP events; the cap cutting it is shown as `truncated`.
 EVENT_RESULT_CAP = 100
+# The most hypothesis edges one topology result holds; the cap cutting it is shown as `hypotheses_truncated`.
+HYPOTHESIS_RESULT_CAP = 50
 EVENT_FLAGS = ("ambiguous", "future_dated", "time_unknown")
 # Eligibility outcomes (D-15).
 RESULTS = ("eligible", "ineligible", "gap")
@@ -398,12 +408,57 @@ class GraphLimits(_Out):
     cut_by: list[Literal[CUT_REASONS]]
 
 
+class SupportRef(_Out):
+    """What a promoted record rests on: a stored situation or a stored event, and whether it is still
+    held. An evicted support stays listed and is marked; a situation the caller may not see is withheld
+    and has no id, so its existence is not revealed (D-60)."""
+
+    kind: Literal[SUPPORT_KINDS]
+    id: str | None = Field(description="The stored identifier, or null when the support is withheld.")
+    state: Literal[SUPPORT_STATES]
+
+    @model_validator(mode="after")
+    def _coherent(self):
+        if self.state == "withheld":
+            if self.id is not None:
+                raise ValueError("a withheld support has no id")
+            if self.kind != "situation":
+                raise ValueError("only a situation can be withheld")
+        elif self.id is None:
+            raise ValueError("a support that is not withheld names its id")
+        return self
+
+
+class HypothesisEdge(_Out):
+    """A topology link inferred from stored neighbour-discovery events where the configured topology has
+    none. It is a hypothesis, never a fact: it is labelled and stated as inferred, it sits beside the
+    configured edges and never among them, and it changes no configured state, eligibility or verdict (D-63, D-64)."""
+
+    promoted_id: str
+    from_: str = Field(alias="from", description="The node id of one end of the inferred link.")
+    to: str = Field(description="The node id of the other end of the inferred link.")
+    label: Literal[HYPOTHESIS_LABEL]
+    state: Literal[HYPOTHESIS_STATE]
+    rule: Literal[RULE_ADJACENCY] = Field(description="The named promotion rule that selected it.")
+    valid_from: str = Field(description="The earliest supporting event time, not after the promotion time.")
+    promoted_at: str
+    support: list[SupportRef]
+    provenance: Provenance
+
+
 class ContextGraph(_Out):
     """The entities and relationships in scope as nodes and edges, with the limits that applied (CTX-07)."""
 
     nodes: list[GraphNode]
     edges: list[GraphEdge]
     limits: GraphLimits
+    hypotheses: list[HypothesisEdge] = Field(
+        default_factory=list,
+        description="Inferred links beside the configured edges. Never merged into `edges`.")
+    hypotheses_truncated: bool = Field(default=False, description="True when the cap cut the hypotheses.")
+    hypotheses_withheld: int = Field(
+        default=0, ge=0, description="How many hypotheses touch an entity the caller's authority does not "
+                                     "cover. They are counted, never named.")
 
 
 class EventWindow(_Out):
@@ -481,6 +536,23 @@ class ConflictOut(_Out):
     text: str = Field(description="A fixed sentence built from the event kind and the configured value.")
 
 
+class PromotedConflictOut(_Out):
+    """A conflict that an operator promoted from a stored situation: it outlives the events that produced
+    it. Like a live conflict it names both sides and ranks neither; it never changes configured state and
+    never counts as evidence (D-61, D-64)."""
+
+    promoted_id: str
+    rule: Literal[RULE_REPEATED_LINK_DOWN] = Field(description="The named promotion rule that selected it.")
+    device: str
+    event: Literal[EVENT_KINDS]
+    configured: Literal["link_in_force"]
+    text: str = Field(description="A fixed sentence built from the event kind and the configured value.")
+    valid_from: str = Field(description="The earliest supporting event time, not after the promotion time.")
+    promoted_at: str
+    support: list[SupportRef]
+    provenance: Provenance
+
+
 class EventsResult(_Out):
     """The events class: the events of the device in the window, newest first, at most `cap` of them."""
 
@@ -493,6 +565,9 @@ class EventsResult(_Out):
     configured: ConfiguredOut | None = Field(
         default=None, description="Null when no recognised mapped event needed a configured read.")
     conflicts: list[ConflictOut] = Field(default_factory=list)
+    promoted_conflicts: list[PromotedConflictOut] = Field(
+        default_factory=list, description="Conflicts an operator promoted for this device, newest first. "
+                                          "They are read from the state file and never feed eligibility.")
 
 
 class ActionRef(_Out):

@@ -655,7 +655,8 @@ def test_the_response_json_carries_the_expected_top_level_keys():
     assert set(dumped["situation"]) == {"id", "requester", "purpose", "scope", "intent_id", "classes",
                                         "max_depth", "relationship_types", "valid_at", "known_at",
                                         "retrieved_at", "historical", "window_seconds", "topic"}
-    assert set(dumped["graph"]) == {"nodes", "edges", "limits"}
+    assert set(dumped["graph"]) == {"nodes", "edges", "limits", "hypotheses", "hypotheses_truncated",
+                                     "hypotheses_withheld"}
     assert set(dumped["graph"]["limits"]) == {"requested_depth", "max_depth", "node_cap",
                                               "relationship_types", "cut_by"}
     assert set(dumped["fluent_values"][0]) == {"class", "kind", "subject", "value", "in_force", "valid_from",
