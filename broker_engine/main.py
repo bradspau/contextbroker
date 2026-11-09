@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Literal
 
 import requests
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -26,6 +26,7 @@ from broker_state.store import STATE_UNAVAILABLE, StateUnavailable
 from okf_retrieval.service import get_service, reset_service
 from broker_engine.tsdb_joiner import join_observed_metric
 from data_contracts.context_contract import ContextRequest, ContextResponse
+from data_contracts.exchange_profile import PROFILE_MEDIA_TYPE, negotiate, to_jsonld
 from data_contracts.situation_record import SituationRecord
 from outcome_assurance.evaluate import evaluate_intent  # noqa: F401
 
@@ -194,8 +195,9 @@ def post_assess(body: AssessRequest, request: Request) -> dict:
 
 
 @app.post("/context/request", response_model=ContextResponse,
+          responses={200: {"content": {PROFILE_MEDIA_TYPE: {"schema": {"type": "object"}}}}},
           dependencies=[need(SCOPE_READ), need_authority_claims()])
-def post_context_request(body: ContextRequest, request: Request) -> ContextResponse:
+def post_context_request(body: ContextRequest, request: Request, response: Response) -> ContextResponse:
     """Ask for context: why (purpose), about what (a device, optionally an interface), when (now, or
     as_of and known_at offsets) and which classes (topology, goals, observations, events, knowledge).
 
@@ -211,10 +213,18 @@ def post_context_request(body: ContextRequest, request: Request) -> ContextRespo
     text, excerpt or ranking value; it is current only and carries no execution authority.
     Eligibility describes the fitness of the evidence and grants no execution authority. A verdict is
     present only for an intent with the goals and observations
-    classes; it is kept apart from eligibility and the two can disagree."""
+    classes; it is kept apart from eligibility and the two can disagree.
+
+    The JSON-LD profile is returned for Accept: application/ld+json and is a mapping of the same answer.
+    Any other Accept gives the native JSON."""
     if request.query_params:
         raise HTTPException(422, "Undeclared query parameter(s)")
-    return context_request.handle(body, request.state.caller)
+    answer = context_request.handle(body, request.state.caller)
+    if negotiate(request.headers.get("accept")) == "jsonld":
+        return JSONResponse(content=to_jsonld(answer), media_type=PROFILE_MEDIA_TYPE,
+                            headers={"Vary": "Accept"})
+    response.headers["Vary"] = "Accept"
+    return answer
 
 
 @app.get("/context/situation/{situation_id}", response_model=SituationRecord,

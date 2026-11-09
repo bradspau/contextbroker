@@ -173,6 +173,76 @@ def _targets(node, steps):
         yield from _targets(child, rest)
 
 
+MAX_ACCEPT_LENGTH = 512
+MAX_ACCEPT_ITEMS = 32
+_NATIVE_MEDIA_TYPE = "application/json"
+_Q_CHARACTERS = frozenset("0123456789.")
+
+
+def _quality(parameters) -> float | None:
+    """The q of one item's parameters (1 when absent), or None when it is not a number from 0 to 1.
+    Other parameters are ignored, so a `profile` parameter changes nothing. Only digits and a point are
+    read as a number: no sign, exponent, underscore, `nan` or `inf`."""
+    for parameter in parameters:
+        name, _, value = parameter.partition("=")
+        if name.strip().lower() != "q":
+            continue
+        value = value.strip()
+        if not value or not set(value) <= _Q_CHARACTERS:
+            return None
+        try:
+            q = float(value)
+        except ValueError:
+            return None
+        return q if 0.0 <= q <= 1.0 else None
+    return 1.0
+
+
+def _specificity(media_range: str, offered: str) -> int | None:
+    """How closely a media range names the offered type: exact 2, application/* 1, */* 0, else None."""
+    if media_range == offered:
+        return 2
+    if media_range == "application/*":
+        return 1
+    if media_range == "*/*":
+        return 0
+    return None
+
+
+def negotiate(accept: str | None) -> str:
+    """"jsonld" when an Accept header prefers the profile over the native JSON, else "json" (D-51, D-66).
+
+    The default is the native JSON. The profile is chosen only when it is acceptable (q above 0) and the
+    caller ranks it above the native type: a higher q, or an equal q named more specifically (an exact
+    type beats application/* beats */*). A tie at equal specificity keeps the native default. An item
+    with an unreadable q is ignored; a header that is missing, empty, over MAX_ACCEPT_LENGTH characters
+    or over MAX_ACCEPT_ITEMS items, or that names neither type, is native. Nothing is ever refused. One
+    pass over the items with the standard library only, so the cost grows with the header length."""
+    if not accept or len(accept) > MAX_ACCEPT_LENGTH:
+        return "json"
+    items = accept.split(",")
+    if len(items) > MAX_ACCEPT_ITEMS:
+        return "json"
+    best = {PROFILE_MEDIA_TYPE: (-1, 0.0), _NATIVE_MEDIA_TYPE: (-1, 0.0)}  # (specificity, q)
+    for item in items:
+        media_range, *parameters = item.split(";")
+        media_range = media_range.strip().lower()
+        q = _quality(parameters)
+        if q is None:
+            continue
+        for offered, (held_specificity, held_q) in best.items():
+            specificity = _specificity(media_range, offered)
+            if specificity is None:
+                continue
+            if specificity > held_specificity or (specificity == held_specificity and q > held_q):
+                best[offered] = (specificity, q)
+    ld_specificity, ld_q = best[PROFILE_MEDIA_TYPE]
+    json_specificity, json_q = best[_NATIVE_MEDIA_TYPE]
+    if ld_q > 0 and (ld_q > json_q or (ld_q == json_q and ld_specificity > json_specificity)):
+        return "jsonld"
+    return "json"
+
+
 def to_jsonld(response: ContextResponse) -> dict:
     """The profile document of a response. The response is not changed."""
     native = response.model_dump(mode="json", by_alias=True)
