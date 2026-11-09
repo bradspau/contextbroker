@@ -5,6 +5,12 @@ least ``min_events`` distinct mapped ``link_down`` events of that device lie wit
 seconds of each other, and the configured side holds a link in force on that device. Anything else
 selects nothing, and nothing is stored for an unselected state.
 
+The rule ``adjacency_without_configured_link`` in words: a hypothesis is selected for a pair of
+interfaces when at least ``min_events`` distinct events of one device lie within ``window_s`` seconds of
+each other and each names that same pair, both interfaces exist in the graph, and neither has a
+configured link in force. Reading the neighbour-discovery lines and the graph is the caller's work;
+this module sees only graph node ids.
+
 The thresholds are inputs, read by the caller from the environment. Nothing about a request, a route
 or an ingest can move them, and a device can only add events, never change the rule.
 
@@ -19,7 +25,12 @@ no clock read beyond the ``now`` argument.
 from dataclasses import dataclass
 from datetime import datetime
 
-from data_contracts.promotion import PROMOTED_SUPPORT_MAX, RULE_REPEATED_LINK_DOWN, promoted_id
+from data_contracts.promotion import (
+    PROMOTED_SUPPORT_MAX,
+    RULE_ADJACENCY,
+    RULE_REPEATED_LINK_DOWN,
+    promoted_id,
+)
 from data_contracts.syslog_events import EVENT_KINDS
 from state_reconciliation.event_reconciler import (
     CONFIGURED_LINK_IN_FORCE,
@@ -115,3 +126,59 @@ def select_conflicts(events, *, device: str, configured: ConfiguredSide, min_eve
               "text": conflict_text(_LINK_DOWN, CONFIGURED_LINK_IN_FORCE)},
         valid_from=min(qualifying[start].placed_at, now),
         event_ids=tuple(e.event_id for e in qualifying[:PROMOTED_SUPPORT_MAX])),)
+
+
+@dataclass(frozen=True)
+class AdjacencyObservation:
+    """One stored event that names a pair of interfaces, as graph node ids (``device/interface``).
+
+    Only graph names belong here: the caller has already mapped the written neighbour and checked
+    both interfaces against the graph. ``placed_at`` is the event time, else the ingest time."""
+
+    event_id: str
+    local_node: str
+    peer_node: str
+    placed_at: datetime
+
+    def __post_init__(self):
+        _aware(self.placed_at, "placed_at")
+
+
+def _device_of(node_id: str) -> str:
+    return node_id.split("/", 1)[0]
+
+
+def select_hypotheses(observations, *, known_interfaces: frozenset, linked_interfaces: frozenset,
+                      min_events: int, window_s: int,
+                      now: datetime) -> tuple[PromotedRecord, ...]:
+    """The link hypotheses to promote, one per unordered pair of interfaces, sorted by promoted id.
+
+    A group is the observations naming the same pair (node ids sorted). It is skipped when its two
+    nodes are the same, when either is not in ``known_interfaces`` or when either is in
+    ``linked_interfaces`` (a configured link in force). One event id counts once. A selected group
+    needs ``min_events`` of its events inside ``window_s``; ``valid_from`` is the first event of the
+    first such window, never after ``now``; ``event_ids`` are the first ``PROMOTED_SUPPORT_MAX`` of the
+    group in (placed_at, event_id) order. The inputs are not changed."""
+    _aware(now, "now")
+    _check_thresholds(min_events, window_s)
+    groups: dict[tuple[str, str], dict[str, AdjacencyObservation]] = {}
+    for o in sorted(observations, key=lambda o: (o.placed_at, o.event_id)):
+        first, second = sorted((o.local_node, o.peer_node))
+        if first == second or first not in known_interfaces or second not in known_interfaces:
+            continue
+        if first in linked_interfaces or second in linked_interfaces:
+            continue
+        groups.setdefault((first, second), {}).setdefault(o.event_id, o)
+    records = []
+    for (first, second), seen in groups.items():
+        qualifying = list(seen.values())
+        start = first_window([o.placed_at for o in qualifying], min_events, window_s)
+        if start is None:
+            continue
+        records.append(PromotedRecord(
+            promoted_id=promoted_id("hypothesis", RULE_ADJACENCY, (first, second)),
+            kind="hypothesis", rule=RULE_ADJACENCY, device_a=_device_of(first),
+            device_b=_device_of(second), body={"from": first, "to": second},
+            valid_from=min(qualifying[start].placed_at, now),
+            event_ids=tuple(o.event_id for o in qualifying[:PROMOTED_SUPPORT_MAX])))
+    return tuple(sorted(records, key=lambda r: r.promoted_id))
