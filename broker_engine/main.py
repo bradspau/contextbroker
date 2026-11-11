@@ -29,7 +29,7 @@ from broker_engine.validation import (
 from broker_state.process import load_settings, open_process_store, reset_store
 from broker_state.store import STATE_UNAVAILABLE, StateUnavailable
 from okf_retrieval.service import get_service, reset_service
-from broker_engine.tsdb_joiner import join_observed_metric
+from broker_engine.tsdb_joiner import join_observed_metric, query_tsdb_metrics
 from data_contracts.context_contract import ContextRequest, ContextResponse
 from data_contracts.exchange_profile import PROFILE_MEDIA_TYPE, negotiate, to_jsonld
 from data_contracts.situation_record import SituationRecord
@@ -56,10 +56,6 @@ def assess(intent_id: str, time_window: str, source: str = "tmf921",
     )
 
 
-def _metric(device: str, interface: str, metric_type: str, time_window: str) -> dict:
-    return join_observed_metric(device, interface, metric_type, time_window).to_dict()
-
-
 def build_mcp_server():
     """MCP server exposing the same tool names as the LLM tools plus assess_intent."""
     try:
@@ -71,10 +67,10 @@ def build_mcp_server():
 
     server = MCPServer("context-broker")
 
-    @server.tool()
-    def query_tsdb_metrics(device: str, interface: str, metric_type: str, time_window: str) -> dict:
+    @server.tool(name="query_tsdb_metrics")
+    def read_metric(device: str, interface: str, metric_type: str, time_window: str) -> dict:
         """Read the observed metric as a context envelope incl. quality flags (stale/missing)."""
-        return _metric(device, interface, metric_type, time_window)
+        return query_tsdb_metrics(device, interface, metric_type, time_window)
 
     @server.tool()
     def assess_intent(
@@ -192,7 +188,7 @@ class AssessRequest(BaseModel):
 @app.get("/context/metric",
          dependencies=[need(SCOPE_READ), _allow_only("device", "interface", "metric_type", "time_window")])
 def get_metric(device: str, interface: str, metric_type: str, time_window: str) -> dict:
-    return _metric(device, interface, metric_type, time_window)
+    return query_tsdb_metrics(device, interface, metric_type, time_window)
 
 
 @app.post("/context/assess", dependencies=[need(SCOPE_ASSESS)])

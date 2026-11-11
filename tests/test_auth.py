@@ -141,7 +141,7 @@ def _patched_handlers():
     """Stub every handler so a request that passes authentication returns 200 with no upstream."""
     env = build_observed("r1:e0", 1.0, "vm", None, None)
     return (
-        patch("broker_engine.main.join_observed_metric", return_value=env),
+        patch("broker_engine.tsdb_joiner.join_observed_metric", return_value=env),
         patch("broker_engine.main.operations.metric_history", return_value={"ok": 1}),
         patch("broker_engine.main.operations.interfaces_with_nonzero", return_value={"ok": 1}),
         patch("broker_engine.main.operations.interface_neighbours", return_value={"ok": 1}),

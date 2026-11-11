@@ -25,14 +25,6 @@ from broker_engine.validation import _SAFE_TOKEN, _SAFE_WINDOW, _validate_token 
 from ingestion.telemetry_simulator import MEASUREMENT_NAME  # noqa: F401
 
 
-def query_tsdb_metrics(device, interface, metric_type, time_window, query_endpoint=VM_QUERY_ENDPOINT):
-    """Back-compat shim returning the bare float/None. The LLM tool path uses the
-    envelope-returning agent_harness.tools.query_tsdb_metrics instead."""
-    return join_observed_metric(
-        device, interface, metric_type, time_window, query_endpoint
-    ).value
-
-
 if __name__ == "__main__":
     prompt = " ".join(sys.argv[1:]) or input("Ask the broker: ")
     result = run_agent(prompt)

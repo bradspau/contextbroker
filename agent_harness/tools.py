@@ -5,25 +5,12 @@ import requests
 
 from broker_engine import operations
 from broker_engine.assess import assess_intent
-from broker_engine.tsdb_joiner import VM_QUERY_ENDPOINT, join_observed_metric
+from broker_engine.tsdb_joiner import query_tsdb_metrics  # noqa: F401  (execute_tool dispatches through globals())
 from broker_engine.validation import ClientInputError
 
 query_metric_history = operations.metric_history
 query_interfaces_with_nonzero = operations.interfaces_with_nonzero
 query_interface_neighbours = operations.interface_neighbours
-
-
-def query_tsdb_metrics(
-    device: str,
-    interface: str,
-    metric_type: str,
-    time_window: str,
-    query_endpoint: str = VM_QUERY_ENDPOINT,
-) -> dict:
-    """Full context envelope (value plus quality flags), never a bare number."""
-    return join_observed_metric(
-        device, interface, metric_type, time_window, query_endpoint
-    ).to_dict()
 
 
 SYSTEM_PROMPT = """You are a network operations assistant. Many questions are about the state of the network and have nothing to do with an intent; use the tool that fits the question. You have these tools:

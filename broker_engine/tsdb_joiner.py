@@ -96,6 +96,19 @@ def join_observed_metric(
     return env
 
 
+def query_tsdb_metrics(
+    device: str,
+    interface: str,
+    metric_type: str,
+    time_window: str,
+    query_endpoint: str = VM_QUERY_ENDPOINT,
+) -> dict:
+    """Full context envelope (value plus quality flags), never a bare number."""
+    return join_observed_metric(
+        device, interface, metric_type, time_window, query_endpoint
+    ).to_dict()
+
+
 FUTURE_TOLERANCE_S = 5
 
 

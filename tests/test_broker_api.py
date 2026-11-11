@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from broker_engine import main
+from broker_engine import main, tsdb_joiner
 from broker_engine.pruner import prune
 from tests.auth_helpers import auth_headers
 from data_contracts.envelope import build_observed
@@ -58,15 +58,16 @@ def test_prune_zero_max():
 
 def test_metric_missing_telemetry_200():
     env = build_observed("r1:e0", None, "vm", None, NOW)
-    with patch("broker_engine.main.join_observed_metric", return_value=env):
+    with patch("broker_engine.tsdb_joiner.join_observed_metric", return_value=env) as m:
         r = client.get("/context/metric", params={
             "device": "r1", "interface": "e0", "metric_type": "latency_ms", "time_window": "5m"})
     assert r.status_code == 200
     assert r.json()["quality"]["missing"] is True
+    m.assert_called_once_with("r1", "e0", "latency_ms", "5m", tsdb_joiner.VM_QUERY_ENDPOINT)
 
 
 def test_metric_query_endpoint_rejected():
-    with patch("broker_engine.main.join_observed_metric", side_effect=fake_join) as m:
+    with patch("broker_engine.tsdb_joiner.join_observed_metric", side_effect=fake_join) as m:
         r = client.get("/context/metric", params={
             "device": "r1", "interface": "e0", "metric_type": "latency_ms",
             "time_window": "5m", "query_endpoint": "http://evil"})
@@ -198,10 +199,20 @@ def test_mcp_metric_tool_returns_envelope():
     import json
     server = main.build_mcp_server()
     env = build_observed("r1:e0", 1.0, "vm", NOW - timedelta(hours=1), NOW)
-    with patch("broker_engine.main.join_observed_metric", return_value=env):
+    with patch("broker_engine.tsdb_joiner.join_observed_metric", return_value=env) as m:
         res = asyncio.run(server.call_tool("query_tsdb_metrics", _metric_params()))
     payload = json.loads(res.content[0].text)
     assert payload["quality"]["stale"] is True and payload["value"] == 1.0
+    m.assert_called_once()
+
+
+def test_mcp_metric_tool_schema_has_four_arguments_and_no_query_endpoint():
+    pytest.importorskip("mcp.server.mcpserver")
+    server = main.build_mcp_server()
+    tool = next(t for t in asyncio.run(server.list_tools()) if t.name == "query_tsdb_metrics")
+    schema = tool.input_schema
+    assert set(schema["properties"]) == {"device", "interface", "metric_type", "time_window"}
+    assert "query_endpoint" not in schema["properties"]
 
 
 # --- source (tmf921 only) ---
