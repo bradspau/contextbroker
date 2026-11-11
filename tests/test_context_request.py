@@ -7,6 +7,7 @@ NOW is the one clock read of the handler.
 """
 import logging
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -17,6 +18,8 @@ import requests
 from fastapi.testclient import TestClient
 
 from broker_engine import main
+from broker_engine.context_request import recording
+from broker_engine.validation import ClientInputError
 from broker_state.process import get_store
 from broker_state.store import NewEvent
 from data_contracts import fluents as f
@@ -25,7 +28,7 @@ from data_contracts.context_contract import (
 from intent_management import tmf921_source
 from tests.auth_helpers import make_token
 from tests.fluent_helpers import (
-    IF0, IF1, IFACES_TTL, LAT, NS, T0, T1, UPDATE_URL, GraphFuseki, bind, replace_goal)
+    IF0, IF1, IFACES_TTL, JIT, LAT, NS, T0, T1, UPDATE_URL, GraphFuseki, bind, replace_goal)
 
 DEMO = Path(__file__).resolve().parent.parent / "ontologies" / "abox" / "topology-demo.ttl"
 NOW = datetime(2026, 11, 6, 12, 0, 0, tzinfo=timezone.utc)
@@ -47,6 +50,8 @@ class FakeVictoriaMetrics:
         self.series = {}
         self.queries = []
         self.params = []
+        self.threads = set()  # the threads that asked: more than one means the reads overlapped
+        self.barrier = None  # when set, every query waits for its parties (proves overlap)
 
     def add(self, metric_type, device, interface, *samples):
         self.series[(f"interface_metrics_{metric_type}", device, interface)] = list(samples)
@@ -55,6 +60,9 @@ class FakeVictoriaMetrics:
         query = params["query"]
         self.queries.append(query)
         self.params.append(dict(params))
+        self.threads.add(threading.get_ident())
+        if self.barrier is not None:
+            self.barrier.wait(timeout=5)
         name, device, interface = re.search(
             r'(\w+)\{device="([^"]+)", interface="([^"]+)"\}', query).groups()
         rows = self.series.get((name, device, interface), [])
@@ -1413,3 +1421,173 @@ def test_the_openapi_document_lists_knowledge_and_the_topic_without_names(rig):
                    "example-collect-interface-counters", "test-caller"):
         assert banned not in text
     rig.untouched()
+
+
+# ---- parallel observation reads (plan 08-06) ----
+
+LOSS = "http://broadband-forum.org/Intent#PacketLossMetric"
+DOWN = "http://broadband-forum.org/Intent#DownstreamBandwidthMetric"
+FOUR = ((LAT, 100.0, IF0), (JIT, 10.0, IF1), (LOSS, 1.0, IF0), (DOWN, 100.0, IF1))
+
+
+def bind_four(rig, places=None):
+    """Four metrics on two interfaces: latency and loss on pon0, jitter and downstream on pon1."""
+    for n, (metric, goal, where) in enumerate(FOUR):
+        bind(rig.fx, "i1", metric, goal, (places or {}).get(metric, where), T0)
+    rig.get_intent.return_value = tmf921_intent(*[(m, g) for m, g, _ in FOUR])
+    at = (NOW - timedelta(seconds=30)).timestamp()
+    rig.vm.add("latency_ms", "olt1", "pon0", (42.0, at))        # passes
+    rig.vm.add("packet_loss_percent", "olt1", "pon0", (0.2, at))  # passes
+    rig.vm.add("jitter_ms", "olt1", "pon1", (25.0, at))         # breaches the goal
+    # downstream bandwidth has no sample: a gap
+
+
+def ask_four(monkeypatch, rig, workers, body=None, **kw):
+    monkeypatch.setenv("BROKER_TELEMETRY_WORKERS", str(workers))
+    rig.vm.queries.clear()
+    r = assure(body, **kw)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_four_observations_give_the_same_response_with_one_worker_and_eight(olt, monkeypatch):
+    bind_four(olt)
+    one = ask_four(monkeypatch, olt, 1)
+    reads_one = len(olt.vm.queries)
+    eight = ask_four(monkeypatch, olt, 8)
+    assert one == eight
+    assert reads_one == len(olt.vm.queries) == 7  # three sampled metrics at two queries, one empty at one: none twice
+    assert [e["metric"] for e in one["envelopes"]] == sorted(e["metric"] for e in one["envelopes"])
+    assert [e["metric"] for e in one["envelopes"]] == [
+        "DownstreamBandwidthMetric", "JitterMetric", "LatencyMetric", "PacketLossMetric"]
+    assert one["verdict"]["verdict"] == "failure"
+    assert one["situation"]["id"] == eight["situation"]["id"]
+    assert reasons(one, "observations") == {
+        "result": "gap", "reasons": ["no observation: DownstreamBandwidthMetric"]}
+
+
+def test_four_observations_are_read_at_once_with_eight_workers(olt, monkeypatch):
+    bind_four(olt)
+    olt.vm.add("downstream_bandwidth_mbps", "olt1", "pon1", (500.0, (NOW - timedelta(seconds=30)).timestamp()))
+    olt.vm.barrier = threading.Barrier(4)  # each query waits for the other three metrics: only overlap passes
+    ask_four(monkeypatch, olt, 8)
+    assert len(olt.vm.threads) == 4
+
+
+@pytest.mark.parametrize("workers", [1, 8])
+def test_a_placement_outside_the_callers_entities_stays_unread_with_several_metrics(
+        olt, monkeypatch, workers):
+    olt.fx.graph.parse(data=f"""@prefix : <{NS}> .
+        :if-olt2-pon0 a :Interface ; :onDevice "olt2" ; :interfaceName "pon0" .""", format="turtle")
+    bind_four(olt, places={JIT: IF2, DOWN: IF2})
+    olt.vm.add("jitter_ms", "olt2", "pon0", (1.0, (NOW - timedelta(seconds=5)).timestamp()))
+    olt.vm.add("downstream_bandwidth_mbps", "olt2", "pon0", (900.0, (NOW - timedelta(seconds=5)).timestamp()))
+    out = ask_four(monkeypatch, olt, workers, authority={**ASSURANCE, "entities": ["olt1"]})
+    assert olt.vm.queries and not any("olt2" in q for q in olt.vm.queries)
+    assert [e["metric"] for e in out["envelopes"]] == ["LatencyMetric", "PacketLossMetric"]
+    assert out["verdict"] is None  # a placement outside the entities: no verdict, nothing judged
+
+
+@pytest.mark.parametrize("workers", [1, 8])
+def test_a_refused_identifier_leaves_that_metric_unobserved_and_the_rest_read(
+        olt, monkeypatch, workers):
+    bind_four(olt)
+    real = tmf921_source.join_observed_metric
+
+    def refusing(device, interface, metric, window, **kw):
+        if metric == "jitter_ms":
+            raise ClientInputError("Unsafe interface")
+        return real(device, interface, metric, window, **kw)
+
+    with patch("broker_engine.context_request.join_observed_metric", refusing):
+        out = ask_four(monkeypatch, olt, workers)
+    assert [e["metric"] for e in out["envelopes"]] == [
+        "DownstreamBandwidthMetric", "LatencyMetric", "PacketLossMetric"]
+    assert not any("jitter_ms" in q for q in olt.vm.queries)
+
+
+def test_recording_reads_each_distinct_key_once_under_eight_threads():
+    seen, calls, lock = {}, [], threading.Lock()
+
+    def join(device, interface, metric, window, **kw):
+        with lock:
+            calls.append((device, interface, metric))
+        return object()
+
+    wrapped = recording(join, seen)
+    start = threading.Barrier(8)
+    got = [None] * 8
+
+    def go(n):
+        start.wait(timeout=5)
+        got[n] = wrapped("olt1", f"pon{n}", "latency_ms", "5m", aggregate="last", as_of=None)
+
+    threads = [threading.Thread(target=go, args=(n,)) for n in range(8)]
+    [t.start() for t in threads]
+    [t.join(timeout=10) for t in threads]
+    assert sorted(calls) == [("olt1", f"pon{n}", "latency_ms") for n in range(8)]
+    assert len(seen) == 8 and all(got[n] is v for n, v in enumerate(
+        seen[("olt1", f"pon{n}", "latency_ms", "5m", "last", None)] for n in range(8)))
+
+
+def test_recording_gives_every_concurrent_caller_of_one_key_one_envelope():
+    seen, calls, lock = {}, [], threading.Lock()
+    inside = threading.Event()
+
+    def join(device, interface, metric, window, **kw):
+        with lock:
+            calls.append(1)
+        inside.set()
+        threading.Event().wait(0.1)  # the other callers arrive while this read is running
+        return object()
+
+    wrapped = recording(join, seen)
+    got = [None] * 8
+    start = threading.Barrier(8)
+
+    def go(n):
+        start.wait(timeout=5)
+        got[n] = wrapped("olt1", "pon0", "latency_ms", "5m", aggregate="last", as_of=None)
+
+    threads = [threading.Thread(target=go, args=(n,)) for n in range(8)]
+    [t.start() for t in threads]
+    [t.join(timeout=10) for t in threads]
+    [stored] = seen.values()
+    assert all(g is stored for g in got) and len(calls) == 1
+
+
+def test_recording_never_holds_its_lock_while_the_read_runs():
+    seen = {}
+    held = []
+
+    def join(device, interface, metric, window, **kw):
+        # A read for another key from inside a read must not wait on the first one's lock.
+        if interface == "pon0":
+            inner = threading.Thread(
+                target=lambda: held.append(wrapped("olt1", "pon1", "latency_ms", "5m",
+                                                   aggregate="last", as_of=None)))
+            inner.start()
+            inner.join(timeout=2)
+            held.append(inner.is_alive())
+        return object()
+
+    wrapped = recording(join, seen)
+    wrapped("olt1", "pon0", "latency_ms", "5m", aggregate="last", as_of=None)
+    assert held[-1] is False and len(seen) == 2
+
+
+def test_recording_does_not_keep_a_failed_read():
+    seen = {}
+    outcomes = iter([RuntimeError("down"), "envelope"])
+
+    def join(device, interface, metric, window, **kw):
+        out = next(outcomes)
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+    wrapped = recording(join, seen)
+    with pytest.raises(RuntimeError):
+        wrapped("olt1", "pon0", "latency_ms", "5m", aggregate="last", as_of=None)
+    assert seen == {}
+    assert wrapped("olt1", "pon0", "latency_ms", "5m", aggregate="last", as_of=None) == "envelope"

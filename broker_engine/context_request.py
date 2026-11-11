@@ -32,6 +32,7 @@ request body, the requester or a claim value.
 import json
 import logging
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -53,6 +54,7 @@ from broker_engine.context_eligibility import (
     topology_eligibility,
 )
 from broker_engine.sparql_resolver import FUSEKI_QUERY_ENDPOINT
+from broker_engine.telemetry_reads import read_in_order
 from broker_engine.temporal import temporal_observation
 from broker_engine.tsdb_joiner import join_observed_metric
 from broker_engine.validation import ClientInputError
@@ -141,12 +143,39 @@ def recording(join, seen):
     """Wrap a joiner so each distinct read happens once and its envelope is kept in `seen`.
 
     The key is (device, interface, metric, window, aggregate, as_of); a repeated call returns the
-    envelope already read, so eligibility and a later verdict share one telemetry read."""
+    envelope already read, so eligibility and a later verdict share one telemetry read.
+
+    Safe for callers on several threads (the metrics of a request are read together). A lock guards
+    only the checks and the store, never the read itself. The first caller for a key reads; a
+    concurrent caller for the same key waits for that read and gets the stored envelope, so every
+    caller holds one object. A read that raises stores nothing and the waiters try again."""
+    lock = threading.Lock()
+    pending = {}  # key -> the event its reading caller sets when the read is over
+
     def wrapped(device, interface, metric, window, **kw):
         key = (device, interface, metric, window, kw.get("aggregate"), kw.get("as_of"))
-        if key not in seen:
-            seen[key] = join(device, interface, metric, window, **kw)
-        return seen[key]
+        while True:
+            with lock:
+                if key in seen:
+                    return seen[key]
+                done = pending.get(key)
+                if done is None:
+                    done = pending[key] = threading.Event()
+                    mine = True
+                else:
+                    mine = False
+            if not mine:
+                done.wait()
+                continue
+            try:
+                envelope = join(device, interface, metric, window, **kw)
+                with lock:
+                    seen[key] = envelope
+                return envelope
+            finally:
+                with lock:
+                    pending.pop(key, None)
+                done.set()
     return wrapped
 
 
@@ -412,17 +441,30 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
                 observed, nodes = {}, {}
                 # A placement the caller's entities do not cover is never read (D-26), and a metric the
                 # map does not know has no series name to read.
+                # The covered, mapped metrics are read together (BROKER_TELEMETRY_WORKERS); a metric
+                # whose identifier the joiner refuses comes back None and stays unobserved.
+                to_read = []
                 for uri in sorted(binding.bounds):
                     device, interface = binding.sources[uri]
                     mapped = mapping.get(uri)
                     if mapped is None or not covers(device):
                         continue
+                    to_read.append((uri, device, interface, mapped.broker_metric))
+
+                def read_one(item):
+                    _uri, device, interface, broker_metric = item
                     try:
-                        observed[uri] = temporal_observation(
-                            reader, device, interface, {"metric": mapped.broker_metric},
+                        return temporal_observation(
+                            reader, device, interface, {"metric": broker_metric},
                             OBSERVATION_LOOKBACK, "at", body.as_of, now)
                     except ClientInputError:
-                        continue  # left unobserved: a gap
+                        return None  # left unobserved: a gap
+
+                for (uri, device, interface, _metric), envelope in zip(
+                        to_read, read_in_order(read_one, to_read)):
+                    if envelope is None:
+                        continue
+                    observed[uri] = envelope
                     nodes[uri] = f"{device}/{interface}"
                 eligibility["observations"] = observations_eligibility(
                     sorted({metric for metric, _kind in fluents}), observed,
