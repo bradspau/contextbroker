@@ -20,7 +20,7 @@ from broker_engine.faults import log_fault
 from broker_engine.health import probe_upstreams
 from broker_engine import context_request, operations
 from broker_engine.pruner import prune  # noqa: F401
-from broker_engine.validation import ClientInputError, max_as_of_seconds
+from broker_engine.validation import ClientInputError, max_as_of_seconds, telemetry_workers
 from broker_state.process import load_settings, open_process_store, reset_store
 from broker_state.store import STATE_UNAVAILABLE, StateUnavailable
 from okf_retrieval.service import get_service, reset_service
@@ -34,6 +34,8 @@ log = logging.getLogger(__name__)
 
 # A bad BROKER_RETENTION_PERIOD stops start-up here instead of failing every temporal request.
 max_as_of_seconds()
+# A bad BROKER_TELEMETRY_WORKERS stops start-up here instead of failing every assess.
+telemetry_workers()
 
 
 def assess(intent_id: str, time_window: str, source: str = "tmf921",

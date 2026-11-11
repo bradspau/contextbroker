@@ -46,6 +46,26 @@ def max_as_of_seconds(environ=os.environ) -> int:
     return seconds
 
 
+# How many per-metric telemetry reads one assess may run at once (broker_engine/telemetry_reads.py).
+TELEMETRY_WORKERS_ENV = "BROKER_TELEMETRY_WORKERS"
+DEFAULT_TELEMETRY_WORKERS = 8
+MAX_TELEMETRY_WORKERS = 8
+_DIGITS = re.compile(r"^[0-9]+\Z")
+
+
+def telemetry_workers(environ=os.environ) -> int:
+    """The cap on concurrent telemetry reads per request: BROKER_TELEMETRY_WORKERS, a whole
+    number from 1 to 8 (default 8; blank means the default). 1 reads the metrics one by one.
+    ValueError, naming the variable but never its value, for anything else."""
+    raw = environ.get(TELEMETRY_WORKERS_ENV)
+    if not raw:
+        return DEFAULT_TELEMETRY_WORKERS
+    if _DIGITS.match(raw) and 1 <= int(raw) <= MAX_TELEMETRY_WORKERS:
+        return int(raw)
+    raise ValueError(f"{TELEMETRY_WORKERS_ENV} must be a whole number from 1 to "
+                     f"{MAX_TELEMETRY_WORKERS}")
+
+
 def window_seconds(value, label: str) -> int:
     """Seconds in a "5m"/"1h" style duration; ClientInputError if malformed or further
     back than the retention period (max_as_of_seconds). Used for as_of, an offset back from
