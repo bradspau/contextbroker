@@ -219,3 +219,53 @@ def test_the_note_holds_no_secret_value():
     for variable in ("FUSEKI_ADMIN_PASSWORD", "QDRANT_API_KEY"):
         for found in re.finditer(variable + r"\s*[=:]\s*(\S+)", text):
             raise AssertionError(f"{variable} is given a value in the note: {found.group(0)!r}")
+
+
+# ---- README and CLAUDE.md (task 2) ------------------------------------------------------------
+
+README = ROOT / "README.md"
+CLAUDE = ROOT / "CLAUDE.md"
+CLAUDE_SUITE = re.compile(r"full suite \((\d+) pass, (\d+) skipped\)")
+README_SUITE_TOP = re.compile(r"has (\d+) tests passing and (\d+) skipped")
+README_SUITE_RUN = re.compile(r"full suite is (\d+) passed and (\d+) skipped")
+
+
+def test_the_readme_describes_the_phase_8_operator_facts():
+    text = _text(README)
+    for needed in ("design/performance-and-hygiene.md", "series_truncated", "BROKER_TSDB_SERIES_LIMIT",
+                   "BROKER_TELEMETRY_WORKERS", "stop_context.sh", "requirements.in",
+                   "pip-compile --generate-hashes", "backend: claude", "backend: lmstudio",
+                   "AgentResult", "FUSEKI_DATA_ENDPOINT", "VM_WRITE_ENDPOINT"):
+        assert needed in text, needed
+    assert "kill $(cat telemetry.pid)" not in text
+
+
+def test_the_readme_still_says_what_the_phase_7_note_tests_pin():
+    text = _text(README)
+    assert "not served" in text
+    assert "pip install -r requirements-mcp.txt" in text
+
+
+def test_claude_md_describes_the_phase_8_facts_and_keeps_its_phase_7_lines():
+    text = _text(CLAUDE)
+    for needed in ("performance-and-hygiene.md", "BROKER_TSDB_SERIES_LIMIT", "BROKER_TELEMETRY_WORKERS",
+                   "stop_context.sh", "requirements.in", "series_truncated", "real_sessions",
+                   "contextbroker-7i2", "FUSEKI_DATA_ENDPOINT", "VM_WRITE_ENDPOINT",
+                   "--require-hashes", "backend:", "eight keys"):
+        assert needed in text, needed
+
+
+def test_claude_md_quotes_a_measured_suite_count_and_not_the_old_one():
+    text = _text(CLAUDE)
+    assert "2546 pass" not in text
+    found = CLAUDE_SUITE.search(text)
+    assert found is not None
+    passed, skipped = (int(n) for n in found.groups())
+    assert passed > 3278 and skipped >= 28  # the counts after plan 08-12, which only grow
+
+
+def test_the_suite_counts_agree_in_claude_md_and_the_readme():
+    claude = tuple(CLAUDE_SUITE.search(_text(CLAUDE)).groups())
+    readme = _text(README)
+    assert tuple(README_SUITE_TOP.search(readme).groups()) == claude
+    assert tuple(README_SUITE_RUN.search(readme).groups()) == claude
