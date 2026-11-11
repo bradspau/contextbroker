@@ -9,6 +9,7 @@ validated with allow-list regexes before any HTTP call.
 Errors are generic: Tmf921Error never carries the URL, headers or response
 body, and nothing sensitive is logged.
 """
+import functools
 import logging
 import math
 import os
@@ -23,7 +24,7 @@ from rdflib.namespace import RDF
 from broker_engine import upstream_http
 from broker_engine.faults import log_fault
 from broker_engine.validation import REQUEST_TIMEOUT_S, ClientInputError
-from data_contracts.metric_map import ALLOWED_UNITS, broker_metric_for, check_uri
+from data_contracts.metric_map import ALLOWED_UNITS, broker_metric_for, check_uri, metric_map_key
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +52,63 @@ def _check_intent_id(intent_id) -> str:
     return intent_id
 
 
+@functools.lru_cache(maxsize=64)
+def _parse_bounds(ttl: str, map_key: tuple) -> tuple:
+    """The parsed goals of one Turtle text as sorted (metric URI, bound) pairs.
+
+    `map_key` is metric_map_key() and is not read here: it only keys the cache, so
+    a changed metric map is never answered from an older parse. An unreadable text
+    raises, so nothing is cached and the caller logs it on every call. A text that
+    is deterministically refused (an ambiguous or non-finite goal) gives () and is
+    cached.
+    """
+    g = Graph()
+    g.parse(data=ttl, format="turtle")
+    out: dict[str, float] = {}
+    heads: set = set()
+    for _s, p, head in g:
+        if p == RDF.rest or not isinstance(head, BNode) or (head, RDF.first, None) not in g:
+            continue
+        items = list(g.items(head))
+        if not items or not isinstance(items[0], URIRef):
+            continue  # not a condition list (e.g. literal-first)
+        # A condition is a list headed by a known metric or carrying an
+        # rdf:value. It must be exactly (URI, node-with-one-rdf:value);
+        # anything else is unreadable -> fail closed. Other lists
+        # (log:allOf, log:match, ...) are structure and are skipped.
+        if not (broker_metric_for(str(items[0])) is not None
+                or any(g.value(i, RDF.value) is not None for i in items[1:])):
+            continue
+        if len(items) != 2:
+            return ()
+        vals = list(g.objects(items[1], RDF.value))
+        if len(vals) != 1 or not isinstance(vals[0], Literal):
+            return ()
+        py = vals[0].toPython()
+        if isinstance(py, bool) or not isinstance(py, (int, float, Decimal)):
+            return ()
+        num = float(py)
+        if not math.isfinite(num):
+            return ()
+        uri = str(items[0])
+        if uri in out and out[uri] != num:
+            return ()
+        out[uri] = num
+        heads.add(head)
+    # A recognised metric URI may appear nowhere else in the expression.
+    for s_, p_, o_ in g:
+        if str(p_) in out or (str(s_) in out and p_ not in _DECLARATION_PREDICATES):
+            return ()
+        if isinstance(o_, URIRef) and str(o_) in out and not (
+                p_ == RDF.first and s_ in heads):
+            return ()
+    return tuple(out.items())
+
+
+def clear_bounds_cache() -> None:
+    _parse_bounds.cache_clear()
+
+
 def intent_bounds(intent) -> dict[str, float]:
     """Metric URI -> numeric bound from an intent's Turtle expression.
 
@@ -60,53 +118,16 @@ def intent_bounds(intent) -> dict[str, float]:
     shape is unreadable and gives {}.
     Returns {} on anything unreadable, non-finite, or ambiguous (same metric
     with differing values); never raises.
+
+    A given text is parsed once per metric map state (D-72); an unreadable one
+    is never cached and is logged on every call. The caller gets its own dict.
     """
     try:
         expr = intent.get("expression")
         ttl = expr.get("expressionValue")
         if not isinstance(ttl, str) or len(ttl) > _MAX_TTL_CHARS:
             return {}
-        g = Graph()
-        g.parse(data=ttl, format="turtle")
-        out: dict[str, float] = {}
-        heads: set = set()
-        for _s, p, head in g:
-            if p == RDF.rest or not isinstance(head, BNode) or (head, RDF.first, None) not in g:
-                continue
-            items = list(g.items(head))
-            if not items or not isinstance(items[0], URIRef):
-                continue  # not a condition list (e.g. literal-first)
-            # A condition is a list headed by a known metric or carrying an
-            # rdf:value. It must be exactly (URI, node-with-one-rdf:value);
-            # anything else is unreadable -> fail closed. Other lists
-            # (log:allOf, log:match, ...) are structure and are skipped.
-            if not (broker_metric_for(str(items[0])) is not None
-                    or any(g.value(i, RDF.value) is not None for i in items[1:])):
-                continue
-            if len(items) != 2:
-                return {}
-            vals = list(g.objects(items[1], RDF.value))
-            if len(vals) != 1 or not isinstance(vals[0], Literal):
-                return {}
-            py = vals[0].toPython()
-            if isinstance(py, bool) or not isinstance(py, (int, float, Decimal)):
-                return {}
-            num = float(py)
-            if not math.isfinite(num):
-                return {}
-            uri = str(items[0])
-            if uri in out and out[uri] != num:
-                return {}
-            out[uri] = num
-            heads.add(head)
-        # A recognised metric URI may appear nowhere else in the expression.
-        for s_, p_, o_ in g:
-            if str(p_) in out or (str(s_) in out and p_ not in _DECLARATION_PREDICATES):
-                return {}
-            if isinstance(o_, URIRef) and str(o_) in out and not (
-                    p_ == RDF.first and s_ in heads):
-                return {}
-        return out
+        return dict(_parse_bounds(ttl, metric_map_key()))
     except Exception as exc:
         log_fault(log, exc, "intent goal unreadable")
         return {}

@@ -373,3 +373,91 @@ def test_bounds_still_fails_closed_on_unreadable_condition():
     # metric used as a non-head list member or object elsewhere
     assert intent_bounds(_intent(_full(f"_:x log:allOf ( ex:A <{URI}> ) .\n"))) == {}
     assert intent_bounds(_intent(_full(f"ex:s ex:p <{URI}> .\n"))) == {}
+
+
+# ---------- the goal-parse cache (D-72, PERF-01) ----------
+@pytest.fixture
+def parses(monkeypatch):
+    """Count Graph.parse calls made by intent_bounds."""
+    import rdflib
+
+    calls: list[int] = []
+    real = rdflib.Graph.parse
+
+    def spy(self, *a, **k):
+        calls.append(1)
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(rdflib.Graph, "parse", spy)
+    return calls
+
+
+def test_same_text_is_parsed_once_and_a_different_text_again(parses):
+    ttl = PRE + cond("atLeast", URI, "50")
+    assert intent_bounds(_intent(ttl)) == {URI: 50.0}
+    assert intent_bounds(_intent(ttl)) == {URI: 50.0}
+    assert len(parses) == 1
+    assert intent_bounds(_intent(PRE + cond("atLeast", URI, "60"))) == {URI: 60.0}
+    assert len(parses) == 2
+
+
+def test_unreadable_turtle_is_logged_and_parsed_every_time(parses, caplog):
+    import logging
+
+    doc = _intent("this is not turtle")
+    with caplog.at_level(logging.WARNING):
+        assert intent_bounds(doc) == {}
+        assert intent_bounds(doc) == {}
+    assert len(parses) == 2
+    assert sum("intent goal unreadable" in r.getMessage() for r in caplog.records) == 2
+
+
+def test_deterministic_fail_closed_text_is_empty_without_a_log_line(caplog):
+    import logging
+
+    ttl = PRE + cond("atLeast", URI, "100") + cond("atMost", URI, "200", node="_:d")
+    with caplog.at_level(logging.WARNING):
+        assert intent_bounds(_intent(ttl)) == {}
+        assert intent_bounds(_intent(ttl)) == {}
+    assert not [r for r in caplog.records if "intent goal unreadable" in r.getMessage()]
+
+
+def test_the_returned_dict_is_a_fresh_copy():
+    ttl = PRE + cond("atLeast", URI, "50")
+    first = intent_bounds(_intent(ttl))
+    first[URI] = 999.0
+    first["http://example.org/x"] = 1.0
+    assert intent_bounds(_intent(ttl)) == {URI: 50.0}
+
+
+def test_a_changed_metric_map_changes_the_answer(tmp_path, monkeypatch):
+    lat = "http://broadband-forum.org/Intent#LatencyMetric"
+    # A list headed by the downstream metric with three items and no value: unreadable
+    # (so {}) when the map knows that metric, skipped as structure when it does not.
+    ttl = (PRE + cond("atMost", lat, "20", "xsd:integer")
+           + f"_:x quan:atLeast ( <{URI}> [ quan:unit \"Mbps\" ] [ quan:unit \"Mbps\" ] ) .\n")
+    assert intent_bounds(_intent(ttl)) == {}
+    other = tmp_path / "other.json"
+    other.write_text(json.dumps([{
+        "broker_metric": "latency_ms", "metric_uri": lat, "unit": "ms", "operator": "<"}]))
+    monkeypatch.setenv("METRIC_MAP_PATH", str(other))
+    assert intent_bounds(_intent(ttl)) == {lat: 20.0}
+    monkeypatch.delenv("METRIC_MAP_PATH")
+    assert intent_bounds(_intent(ttl)) == {}
+
+
+def test_a_malformed_metric_map_is_not_served_from_an_old_parse(tmp_path, monkeypatch):
+    ttl = PRE + cond("atLeast", URI, "50")
+    assert intent_bounds(_intent(ttl)) == {URI: 50.0}
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    monkeypatch.setenv("METRIC_MAP_PATH", str(bad))
+    assert intent_bounds(_intent(ttl)) == {}
+
+
+def test_goal_cache_is_bounded_and_clearable():
+    assert mod._parse_bounds.cache_info().maxsize == 64
+    intent_bounds(_intent(PRE + cond("atLeast", URI, "50")))
+    assert mod._parse_bounds.cache_info().currsize == 1
+    mod.clear_bounds_cache()
+    assert mod._parse_bounds.cache_info().currsize == 0

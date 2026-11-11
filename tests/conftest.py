@@ -53,11 +53,13 @@ class _PassThroughSession:
 
 @pytest.fixture(autouse=True)
 def _empty_caches():
-    """Every test starts with an empty metric map cache (D-72): a map rewritten in
-    place within one filesystem timestamp tick must not be served stale."""
+    """Every test starts with an empty metric map cache and goal-parse cache (D-72): a
+    map rewritten in place within one filesystem timestamp tick must not be served stale."""
     from data_contracts.metric_map import clear_metric_map_cache
+    from intent_management.tmf921_client import clear_bounds_cache
 
     clear_metric_map_cache()
+    clear_bounds_cache()
     yield
 
 
