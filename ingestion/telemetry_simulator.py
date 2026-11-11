@@ -1,11 +1,15 @@
 """Generates synthetic interface telemetry and writes it to VictoriaMetrics."""
 import argparse
+import os
 import random
 import time
 
 import requests
 
-WRITE_ENDPOINT = "http://localhost:8428/write"
+from broker_engine.validation import REQUEST_TIMEOUT_S
+
+# Read once at import, like VM_QUERY_ENDPOINT; the shell environment supplies it.
+WRITE_ENDPOINT = os.environ.get("VM_WRITE_ENDPOINT", "http://localhost:8428/write")
 MEASUREMENT_NAME = "interface_metrics"
 ROUTERS = [
     ("Router-A", "GigabitEthernet0/0/0"),
@@ -78,7 +82,7 @@ def build_payload(rng: random.Random, inject_drops: bool = False, hsi: bool = Fa
 
 
 def post_metrics(write_endpoint: str, payload: str) -> None:
-    response = requests.post(write_endpoint, data=payload)
+    response = requests.post(write_endpoint, data=payload, timeout=REQUEST_TIMEOUT_S)
     response.raise_for_status()
 
 

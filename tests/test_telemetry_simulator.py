@@ -1,7 +1,13 @@
 import random
+import socket
+import time
 from unittest.mock import Mock, patch
 
+import pytest
+import requests
+
 import ingestion.telemetry_simulator as sim
+from broker_engine.validation import REQUEST_TIMEOUT_S
 
 
 def test_format_line_protocol_builds_expected_string():
@@ -105,8 +111,25 @@ def test_post_metrics_sends_payload_to_write_endpoint():
         sim.post_metrics("http://localhost:8428/write", "some,line=protocol value=1 1")
 
     mock_post.assert_called_once_with(
-        "http://localhost:8428/write", data="some,line=protocol value=1 1"
+        "http://localhost:8428/write", data="some,line=protocol value=1 1",
+        timeout=REQUEST_TIMEOUT_S,
     )
+
+
+def test_post_metrics_raises_when_the_endpoint_never_answers(monkeypatch):
+    """A server that accepts the connection and never replies must not hang the write."""
+    monkeypatch.setattr(sim, "REQUEST_TIMEOUT_S", 0.5)
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    started = time.monotonic()
+    try:
+        with pytest.raises(requests.Timeout):
+            sim.post_metrics(f"http://127.0.0.1:{port}/write", "some,line=protocol value=1 1")
+    finally:
+        listener.close()
+    assert time.monotonic() - started < 5
 
 
 HSI_FIELDS = {
