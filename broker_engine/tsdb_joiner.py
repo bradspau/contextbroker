@@ -10,7 +10,7 @@ from broker_engine import upstream_http
 from broker_engine.faults import log_fault
 from broker_engine.validation import (
     REQUEST_TIMEOUT_S,
-    _SAFE_WINDOW,
+    SAFE_WINDOW,
     ClientInputError,
     _validate_token,
     window_seconds,
@@ -47,7 +47,7 @@ def join_observed_metric(
     _validate_token(device, "device")
     _validate_token(interface, "interface")
     _validate_token(metric_type, "metric_type")
-    if not _SAFE_WINDOW.match(time_window):
+    if not SAFE_WINDOW.match(time_window):
         raise ClientInputError(f"Unsafe time_window: {time_window!r}")
 
     if aggregate not in ("max", "min", "last"):

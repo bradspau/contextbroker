@@ -13,7 +13,7 @@ from broker_engine import upstream_http
 from broker_engine.sparql_resolver import FUSEKI_QUERY_ENDPOINT, fuseki_auth
 from broker_engine.tsdb_joiner import VM_QUERY_ENDPOINT
 from broker_engine.validation import (
-    _SAFE_WINDOW,
+    SAFE_WINDOW,
     REQUEST_TIMEOUT_S,
     ClientInputError,
     _validate_token,
@@ -44,7 +44,7 @@ def _evaluation_time(as_of, now):
 
 
 def _check_window(time_window):
-    if not isinstance(time_window, str) or not _SAFE_WINDOW.match(time_window):
+    if not isinstance(time_window, str) or not SAFE_WINDOW.match(time_window):
         raise ClientInputError(f"Unsafe time_window: {time_window!r}")
 
 

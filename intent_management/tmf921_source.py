@@ -42,8 +42,8 @@ from broker_engine.telemetry_reads import read_in_order
 from broker_engine.temporal import temporal_observation
 from broker_engine.tsdb_joiner import join_observed_metric
 from broker_engine.validation import (
-    _SAFE_WINDOW,
-    _UNIT_SECONDS,
+    SAFE_WINDOW,
+    UNIT_SECONDS,
     ClientInputError,
     window_seconds,
 )
@@ -239,7 +239,7 @@ def assess_via_tmf921(
 ) -> dict:
     # Caller input first: a bad value is a client error before any HTTP.
     _check_intent_id(intent_id)
-    if not isinstance(time_window, str) or not _SAFE_WINDOW.match(time_window):
+    if not isinstance(time_window, str) or not SAFE_WINDOW.match(time_window):
         raise ClientInputError(f"Unsafe time_window: {time_window!r}")
     join = join or join_observed_metric
 
@@ -526,7 +526,7 @@ def assess_tmf921_as_of(
     """
     # Caller input first: a bad value is a client error before any I/O.
     _check_intent_id(intent_id)
-    if not isinstance(time_window, str) or not _SAFE_WINDOW.match(time_window):
+    if not isinstance(time_window, str) or not SAFE_WINDOW.match(time_window):
         raise ClientInputError(f"Unsafe time_window: {time_window!r}")
     if mode not in (None, "at", "within"):
         raise ClientInputError(f"Unknown mode: {mode!r}")
@@ -589,7 +589,7 @@ def assess_tmf921_as_of(
     # A "within" window runs back from the as_of instant; a goal or placement recorded
     # as starting inside it would judge the earlier samples against a different (or no)
     # goal, so that metric is inconclusive.
-    window_start = at - timedelta(seconds=int(time_window[:-1]) * _UNIT_SECONDS[time_window[-1]])
+    window_start = at - timedelta(seconds=int(time_window[:-1]) * UNIT_SECONDS[time_window[-1]])
     per, reasons, envs, outcomes = [], [], [], set()
 
     # First pass, in metric order, reads nothing: each metric gets its problem or its spec.

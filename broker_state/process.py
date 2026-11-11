@@ -28,7 +28,7 @@ import re
 import threading
 from dataclasses import dataclass
 
-from broker_engine.validation import _SAFE_RETENTION, _SAFE_WINDOW, _UNIT_SECONDS
+from broker_engine.validation import SAFE_RETENTION, SAFE_WINDOW, UNIT_SECONDS
 from broker_state.store import (DEFAULT_EVENT_CAP, DEFAULT_MARK_CAP, DEFAULT_OUTCOME_CAP,
                                 DEFAULT_PROMOTED_CAP, DEFAULT_SITUATION_CAP, StateStore)
 
@@ -94,8 +94,8 @@ def _retention(environ, name: str = ENV_SITUATION_RETENTION,
                default: str = DEFAULT_SITUATION_RETENTION) -> int:
     """Same grammar as BROKER_RETENTION_PERIOD: digits then h or d."""
     raw = environ.get(name) or default
-    if len(raw) <= _MAX_SETTING_LEN and _SAFE_RETENTION.match(raw):
-        seconds = int(raw[:-1]) * _UNIT_SECONDS[raw[-1]]
+    if len(raw) <= _MAX_SETTING_LEN and SAFE_RETENTION.match(raw):
+        seconds = int(raw[:-1]) * UNIT_SECONDS[raw[-1]]
         if _MIN_RETENTION_S <= seconds <= _MAX_RETENTION_S:
             return seconds
     raise ValueError(f"{name} must be digits then h or d, from 1h to 90d, for example 7d")
@@ -104,8 +104,8 @@ def _retention(environ, name: str = ENV_SITUATION_RETENTION,
 def _window(environ, name: str, default: str) -> int:
     """Digits then s, m, h or d, from 1m to 7d."""
     raw = environ.get(name) or default
-    if len(raw) <= _MAX_SETTING_LEN and _SAFE_WINDOW.match(raw):
-        seconds = int(raw[:-1]) * _UNIT_SECONDS[raw[-1]]
+    if len(raw) <= _MAX_SETTING_LEN and SAFE_WINDOW.match(raw):
+        seconds = int(raw[:-1]) * UNIT_SECONDS[raw[-1]]
         if MIN_EVENT_WINDOW_S <= seconds <= MAX_EVENT_WINDOW_S:
             return seconds
     raise ValueError(f"{name} must be digits then s, m, h or d, from 1m to 7d, "
