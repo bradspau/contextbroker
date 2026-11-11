@@ -74,6 +74,30 @@ def test_failure_plus_missing_is_failure():
     assert run(r).outcome is Outcome.FAILURE
 
 
+def test_unrecognised_clause_before_known_failure_is_failure():
+    r = load("degraded_violation")
+    r["intentHandlingReason"] = "Conditions not met: weird; 50 Mbps >= 100 Mbps: FAIL"
+    v = run(r)
+    assert v.outcome is Outcome.FAILURE
+    assert v.reasons == ["unrecognised clause", "goal not met"]
+
+
+def test_known_failure_before_unrecognised_clause_is_failure():
+    r = load("degraded_violation")
+    r["intentHandlingReason"] = "Conditions not met: 50 Mbps >= 100 Mbps: FAIL; weird"
+    v = run(r)
+    assert v.outcome is Outcome.FAILURE
+    assert v.reasons == ["goal not met", "unrecognised clause"]
+
+
+def test_unrecognised_clause_with_known_missing_observation_is_inconclusive():
+    r = load("degraded_violation")
+    r["intentHandlingReason"] = "Conditions not met: weird; atLeast: no observation: X"
+    v = run(r)
+    assert v.outcome is Outcome.INCONCLUSIVE
+    assert v.reasons == ["unrecognised clause", "no observation"]
+
+
 def test_unrecognised_clause_and_unknown_state_inconclusive():
     r = load("degraded_violation")
     r["intentHandlingReason"] = "Conditions not met: weird"

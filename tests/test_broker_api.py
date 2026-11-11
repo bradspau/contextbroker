@@ -188,10 +188,8 @@ def test_timeout_passed_to_requests():
     r2.json.return_value = {"results": {"bindings": [{"x": 1}]}}
     from broker_engine.binding_resolver import resolve_binding
     with patch("broker_engine.binding_resolver.requests.post", return_value=r2) as p:
-        try:
+        with pytest.raises(ValueError):
             resolve_binding("I1")
-        except Exception:
-            pass
     assert p.call_args.kwargs["timeout"] == REQUEST_TIMEOUT_S
 
 
