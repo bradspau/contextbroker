@@ -8,6 +8,15 @@ The TMF921 assess fails closed: stale, missing, conflicted, future-dated or unma
 never a success, and nothing is pushed unless every bound metric is pushable.
 Server text never reaches the result (fixed reason strings only).
 
+The per-intent lock orders one intent's sequence of marks, snapshot, pushes, poll and
+outcome. Before it: the caller input, the binding read, the metric map, a state store
+availability read, the goal check, the mapping check, the per-metric telemetry reads (in a
+bounded thread pool, results in metric order) and the pushability check. Under it: the
+previous outcome, the high-water marks and regress check, a second goal check (the guard,
+for an assess that waited), a pure freshness re-check, the report snapshot, the pushes
+with their marks, the poll, the success re-check and the outcome write. No telemetry read
+and no binding read happens while the lock is held.
+
 Known limitation: the server exposes no used-observation time, so pushes made
 by other clients (including future-dated ones) cannot be seen. The broker keeps a
 durable per-(intent, metric) high-water mark of what IT pushed, in the state
@@ -20,6 +29,7 @@ import re
 import threading
 import time
 import weakref
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -28,6 +38,7 @@ from fastapi.encoders import jsonable_encoder
 from broker_engine.binding_resolver import resolve_binding
 from broker_engine.faults import log_fault
 from broker_engine.pruner import prune
+from broker_engine.telemetry_reads import read_in_order
 from broker_engine.temporal import temporal_observation
 from broker_engine.tsdb_joiner import join_observed_metric
 from broker_engine.validation import (
@@ -242,14 +253,86 @@ def assess_via_tmf921(
     except ValueError:
         return _result(Outcome.INCONCLUSIVE, ["invalid binding"], status="unknown")
     client = client or Tmf921Client()
+    # A state store that cannot answer stops the assess before any TMF921 call or telemetry
+    # read. The value is discarded: the lock re-reads it, as the last completed assess.
+    TMF921_STORE.last_outcome(intent_id)
+    plan = _prepare(intent_id, time_window, binding, client, join, now, metric_map, clock)
     with _intent_lock(intent_id):
-        return _assess_locked(intent_id, time_window, binding, client, join, now,
-                              metric_map, poll_interval_s, poll_timeout_s, sleep,
-                              clock, monotonic)
+        return _assess_locked(intent_id, plan, binding, client, now, poll_interval_s,
+                              poll_timeout_s, sleep, clock, monotonic)
 
 
-def _assess_locked(intent_id, time_window, binding, client, join, now, metric_map,
-                   poll_interval_s, poll_timeout_s, sleep, clock, monotonic) -> dict:
+@dataclass(frozen=True)
+class _EarlyExit:
+    """An exit reached before the lock; the locked part builds the result from it.
+
+    `recorded` False is a caller or configuration input rejection (not an assessment):
+    the result carries `previous` and no outcome is written."""
+    outcome: Outcome
+    reasons: list
+    envs: tuple = ()
+    status: str = "active"
+    changes: tuple = ()
+    recorded: bool = True
+
+
+@dataclass(frozen=True)
+class _Ready:
+    """Everything read before the lock: the pinned metrics, their mappings, their envelopes."""
+    uris: list
+    mappings: dict
+    envs: dict
+
+
+def _prepare(intent_id, time_window, binding, client, join, now, metric_map, clock):
+    """The goal check, mapping check, telemetry reads and pushability check, all without
+    the per-intent lock. Returns _Ready, or the _EarlyExit that ends the assess."""
+    # Goal check before anything is pushed: same metric set and values as the pin.
+    try:
+        doc = client.get_intent(intent_id)
+        ok = _bounds_match(doc, binding)
+    except ClientInputError:
+        return _EarlyExit(Outcome.INCONCLUSIVE, ["invalid binding"], status="unknown",
+                          recorded=False)
+    except Exception as exc:
+        log_fault(log, exc, "intent server unavailable")
+        return _EarlyExit(Outcome.INCONCLUSIVE, ["intent server unavailable"])
+    if not ok:
+        reasons, changes = _goal_changes(doc, binding)
+        return _EarlyExit(Outcome.INCONCLUSIVE, reasons, status="unknown",
+                          changes=tuple(changes))
+
+    uris = list(binding.bounds)
+    mappings = {}
+    for uri in uris:
+        m = metric_map.get(uri)
+        if m is None or uri not in binding.sources:
+            return _EarlyExit(Outcome.INCONCLUSIVE, [f"unmapped metric: {_short_name(uri)}"])
+        mappings[uri] = m
+
+    def read(uri):
+        device, interface = binding.sources[uri]
+        return join(device, interface, mappings[uri].broker_metric, time_window,
+                    aggregate="last")
+
+    try:
+        results = read_in_order(read, uris)  # results in metric order, one read per metric
+    except ClientInputError:
+        return _EarlyExit(Outcome.INCONCLUSIVE, ["invalid binding"], status="unknown",
+                          recorded=False)
+    envs = dict(zip(uris, results))
+    all_envs = tuple(results)
+
+    ref = now or clock()
+    problems = [f"{why}: {_short_name(u)}" for u, e in envs.items()
+                if (why := _unpushable(e, ref))]
+    if problems:  # all-or-nothing: never push a partial set
+        return _EarlyExit(Outcome.INCONCLUSIVE, problems, envs=all_envs)
+    return _Ready(uris, mappings, envs)
+
+
+def _assess_locked(intent_id, plan, binding, client, now, poll_interval_s, poll_timeout_s,
+                   sleep, clock, monotonic) -> dict:
     prev = TMF921_STORE.last_outcome(intent_id)
     previous = prev.value if prev else None
 
@@ -260,7 +343,25 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
         _record(intent_id, outcome)
         return _result(outcome, reasons, per, envs, previous, status, changes)
 
-    # Goal check before anything is pushed: same metric set and values as the pin.
+    if isinstance(plan, _EarlyExit):
+        if not plan.recorded:
+            return rejected(plan.reasons[0])
+        return done(plan.outcome, plan.reasons, envs=plan.envs, status=plan.status,
+                    changes=plan.changes)
+    uris, mappings, envs = plan.uris, plan.mappings, plan.envs
+    all_envs = list(envs.values())
+
+    marks = TMF921_STORE.marks(intent_id, uris)  # one read; a store failure leaves before any post
+    regress = [u for u in uris if (m := marks.get(u)) is not None
+               and not (envs[u].observed_at > m[0]
+                        or (envs[u].observed_at == m[0] and envs[u].value == m[1]))]
+    if regress:
+        return done(Outcome.INCONCLUSIVE,
+                    [f"observation not newer than last pushed: {_short_name(u)}" for u in regress],
+                    envs=all_envs)
+
+    # Goal guard: an assess that waited for the lock may find the goal rewritten by a
+    # concurrent assess's Degraded evaluation; nothing is pushed against a changed goal.
     try:
         doc = client.get_intent(intent_id)
         ok = _bounds_match(doc, binding)
@@ -273,37 +374,13 @@ def _assess_locked(intent_id, time_window, binding, client, join, now, metric_ma
         reasons, changes = _goal_changes(doc, binding)
         return done(Outcome.INCONCLUSIVE, reasons, status="unknown", changes=changes)
 
-    uris = list(binding.bounds)
-    mappings = {}
-    for uri in uris:
-        m = metric_map.get(uri)
-        if m is None or uri not in binding.sources:
-            return done(Outcome.INCONCLUSIVE, [f"unmapped metric: {_short_name(uri)}"])
-        mappings[uri] = m
-
-    envs = {}
-    for uri in uris:
-        device, interface = binding.sources[uri]
-        try:
-            envs[uri] = join(device, interface, mappings[uri].broker_metric, time_window,
-                              aggregate="last")
-        except ClientInputError:
-            return rejected("invalid binding")
-    all_envs = list(envs.values())
-
+    # Freshness re-check: pure. An observation that was fresh when read may have gone stale
+    # while this assess waited for the lock; stale evidence is never pushed.
     ref = now or clock()
-    problems = [f"{why}: {_short_name(u)}" for u, e in envs.items()
-                if (why := _unpushable(e, ref))]
-    if problems:  # all-or-nothing: never push a partial set
-        return done(Outcome.INCONCLUSIVE, problems, envs=all_envs)
-
-    marks = TMF921_STORE.marks(intent_id, uris)  # one read; a store failure leaves before any post
-    regress = [u for u in uris if (m := marks.get(u)) is not None
-               and not (envs[u].observed_at > m[0]
-                        or (envs[u].observed_at == m[0] and envs[u].value == m[1]))]
-    if regress:
-        return done(Outcome.INCONCLUSIVE,
-                    [f"observation not newer than last pushed: {_short_name(u)}" for u in regress],
+    limit = timedelta(seconds=DEFAULT_MAX_AGE_S)
+    old = [u for u in uris if ref - envs[u].observed_at > limit]
+    if old:
+        return done(Outcome.INCONCLUSIVE, [f"stale observation: {_short_name(u)}" for u in old],
                     envs=all_envs)
 
     observed_at = {u: envs[u].observed_at for u in uris}

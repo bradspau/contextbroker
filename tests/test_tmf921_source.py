@@ -364,16 +364,30 @@ def test_report_without_id_or_bad_date_is_not_new():
 
 
 def test_goal_change_before_success_is_inconclusive():
-    c = FakeClient(docs=[intent((URI, 100)), intent((URI, 50))],
+    # pinned at the goal check and at the guard, changed at the re-check after a success report
+    c = FakeClient(docs=[intent((URI, 100)), intent((URI, 100)), intent((URI, 50))],
                    post=[[rep("n", "2026-10-27T12:00:01Z")]])
     out = run(c)
     assert out["verdict"] == "inconclusive"
     assert out["reasons"] == ["goal changed: LatencyMetric pinned 100, now 50"]
+    assert c.gets == 3
+    assert len(c.posts) == 1
+
+
+def test_goal_guard_stops_a_push_when_the_goal_changed_while_waiting():
+    # the goal is pinned at the first check and rewritten before the lock's guard read
+    c = FakeClient(docs=[intent((URI, 100)), intent((URI, 50))],
+                   post=[[rep("n", "2026-10-27T12:00:01Z")]])
+    out = run(c)
+    assert out["verdict"] == "inconclusive" and out["intent_status"] == "unknown"
+    assert out["reasons"] == ["goal changed: LatencyMetric pinned 100, now 50"]
+    assert out["goal_changes"] == [{"metric": "LatencyMetric", "pinned": 100.0, "current": 50.0}]
+    assert c.posts == [] and c.lists == 0
     assert c.gets == 2
 
 
 def test_bound_changed_after_success_report_names_metric():
-    c = FakeClient(docs=[intent((URI, 100)), intent((URI, 40.535))],
+    c = FakeClient(docs=[intent((URI, 100)), intent((URI, 100)), intent((URI, 40.535))],
                    post=[[rep("n", "2026-10-27T12:00:01Z")]])
     out = run(c)
     assert out["verdict"] == "inconclusive" and out["intent_status"] == "unknown"
@@ -382,35 +396,65 @@ def test_bound_changed_after_success_report_names_metric():
     assert len(c.posts) == 1
 
 
+def test_observation_that_went_stale_while_waiting_is_not_pushed():
+    # fresh at read time (age 10 s); the clock then moves 400 s before the lock's re-check
+    ticks = iter([NOW, NOW + timedelta(seconds=400)])
+    c = FakeClient(post=[[rep("n", "2026-10-27T12:00:01Z")]])
+    out = assess_via_tmf921(IID, "5m", client=c, join=make_join(age=10), metric_map=MMAP,
+                            bindings=BIND, sleep=lambda s: None, monotonic=lambda: 0.0,
+                            clock=lambda: next(ticks, NOW + timedelta(seconds=400)))
+    assert out["verdict"] == "inconclusive"
+    assert out["reasons"] == ["stale observation: LatencyMetric"]
+    assert c.posts == [] and c.lists == 0
+    assert len(out["context"]) == 1
+
+
 def test_same_intent_runs_are_serialised():
     entered, release = threading.Event(), threading.Event()
+    log, log_lock = [], threading.Lock()
+
+    def note(event):
+        with log_lock:
+            log.append((threading.current_thread().name, event))
 
     class Blocking(FakeClient):
-        def get_intent(self, i):
-            self.gets += 1
-            if self.gets == 1:
+        def list_reports(self, i):
+            note("list")
+            if not entered.is_set():
                 entered.set()
                 release.wait(5)
-            return self.intent_doc
+            return super().list_reports(i)
+
+        def post_observation(self, *a, **k):
+            note("post")
+            return super().post_observation(*a, **k)
 
     c = Blocking(post=[[rep("n", "2026-10-27T12:00:01Z")]])
+    j = make_join()
     results = []
 
     def work():
-        results.append(assess_via_tmf921(IID, "5m", client=c, join=make_join(), now=NOW,
+        results.append(assess_via_tmf921(IID, "5m", client=c, join=j, now=NOW,
                                          metric_map=MMAP, bindings=BIND, sleep=lambda s: None,
                                          poll_timeout_s=0.0, monotonic=lambda: 0.0))
-    t1 = threading.Thread(target=work)
+    t1 = threading.Thread(target=work, name="first")
     t1.start()
     assert entered.wait(5)
-    t2 = threading.Thread(target=work)
+    t2 = threading.Thread(target=work, name="second")
     t2.start()
     t2.join(0.3)
-    assert c.gets == 1 and t2.is_alive()
+    # the second has done its own reads, but not entered the snapshot, the pushes or the poll
+    assert len(j.seen) == 2 and t2.is_alive()
+    assert [e for n, e in log if n == "second"] == []
+    assert c.posts == []
     release.set()
     t1.join(5)
     t2.join(5)
     assert len(results) == 2
+    mine = [(n, e) for n, e in log]
+    first_last = max(i for i, (n, _) in enumerate(mine) if n == "first")
+    second_first = min(i for i, (n, _) in enumerate(mine) if n == "second")
+    assert first_last < second_first
 
 
 def test_older_observation_than_last_pushed_rejected():
