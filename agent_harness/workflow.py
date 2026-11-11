@@ -1,6 +1,8 @@
 """LLM tool-calling loops (Claude primary, LM Studio fallback)."""
 import json
 import os
+from dataclasses import dataclass
+from typing import Literal
 
 import anthropic
 from dotenv import load_dotenv
@@ -9,6 +11,15 @@ from openai import OpenAI
 from agent_harness.tools import SYSTEM_PROMPT, TOOLS, TOOLS_OPENAI, execute_tool
 
 MAX_ITERATIONS = 10
+
+
+@dataclass(frozen=True)
+class AgentResult:
+    """The answer text and which backend wrote it. `backend` is set at the return
+    site of `run_agent`, never taken from configuration or a model reply."""
+
+    answer: str
+    backend: Literal["claude", "lmstudio"]
 
 
 def _build_client() -> anthropic.Anthropic:
@@ -118,15 +129,19 @@ def run_agent(
     model: str | None = None,
     fallback_client: OpenAI | None = None,
     fallback_model: str | None = None,
-) -> str:
+) -> AgentResult:
     """LLM_BACKEND=claude (default): Claude, falling back to LM Studio when its
     API is unreachable. LLM_BACKEND=lmstudio: LM Studio only, Claude is never
-    contacted. Any other value raises ValueError."""
+    contacted. Any other value raises ValueError. The result names the backend
+    that answered, so a fallback answer is reported as "lmstudio"; an answer the
+    model left empty is the empty string."""
     if _backend() == "lmstudio":
         lm_model = _lmstudio_model(fallback_model, "LLM_BACKEND=lmstudio")
         if fallback_client is None:
             fallback_client = _build_lmstudio_client()
-        return _run_lmstudio(user_prompt, fallback_client, lm_model)
+        return AgentResult(
+            _run_lmstudio(user_prompt, fallback_client, lm_model) or "", "lmstudio"
+        )
 
     if client is None:
         client = _build_client()
@@ -135,7 +150,7 @@ def run_agent(
         model = os.environ.get("MODEL_NAME", "claude-opus-5")
 
     try:
-        return _run_claude(user_prompt, client, model)
+        return AgentResult(_run_claude(user_prompt, client, model) or "", "claude")
     except anthropic.APIConnectionError:
         # Claude's API is unreachable (network/DNS/timeout) — fall back to a
         # local LM Studio server. Auth and rate-limit errors are NOT caught
@@ -143,4 +158,6 @@ def run_agent(
         lm_model = _lmstudio_model(fallback_model, "Claude API is unreachable")
         if fallback_client is None:
             fallback_client = _build_lmstudio_client()
-        return _run_lmstudio(user_prompt, fallback_client, lm_model)
+        return AgentResult(
+            _run_lmstudio(user_prompt, fallback_client, lm_model) or "", "lmstudio"
+        )

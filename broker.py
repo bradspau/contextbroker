@@ -35,5 +35,7 @@ def query_tsdb_metrics(device, interface, metric_type, time_window, query_endpoi
 
 if __name__ == "__main__":
     prompt = " ".join(sys.argv[1:]) or input("Ask the broker: ")
-    print(run_agent(prompt))
+    result = run_agent(prompt)
+    print(result.answer)
+    print(f"backend: {result.backend}", file=sys.stderr)
 

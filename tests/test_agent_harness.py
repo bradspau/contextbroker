@@ -48,7 +48,8 @@ def test_run_agent_executes_tool_call_then_returns_final_message():
         )
 
     mock_tool.assert_called_once_with(device="Router-A", interface="ge0")
-    assert result == "Router-A ge0 has no declared neighbours."
+    assert result.answer == "Router-A ge0 has no declared neighbours."
+    assert result.backend == "claude"
     assert fake_client.messages.create.call_count == 2
 
 
@@ -59,7 +60,7 @@ def test_run_agent_returns_immediately_when_no_tool_call_needed():
 
     result = run_agent("hello", client=fake_client, model="test-model")
 
-    assert result == "I need an intent id to check."
+    assert result.answer == "I need an intent id to check."
     assert fake_client.messages.create.call_count == 1
 
 
@@ -85,7 +86,7 @@ def test_run_agent_rejects_llm_supplied_extra_kwarg_and_recovers():
         )
 
     mock_tool.assert_not_called()
-    assert result == "I hit an error reading the neighbours."
+    assert result.answer == "I hit an error reading the neighbours."
     assert fake_client.messages.create.call_count == 2
 
     # The conversation sent on the second call must contain a tool_result error message.
@@ -121,7 +122,7 @@ def test_run_agent_recovers_from_unsafe_tool_argument_value():
 
     result = run_agent("check compliance", client=fake_client, model="test-model")
 
-    assert result == "Let me retry with a valid window."
+    assert result.answer == "Let me retry with a valid window."
     assert fake_client.messages.create.call_count == 2
 
     second_call_messages = fake_client.messages.create.call_args_list[1].kwargs["messages"]
@@ -156,7 +157,7 @@ def test_run_agent_reports_no_data_explicitly_when_tsdb_returns_none():
     with patch("agent_harness.tools.query_tsdb_metrics", return_value=None):
         result = run_agent("check compliance", client=fake_client, model="test-model")
 
-    assert result == "Compliance is unknown due to missing telemetry."
+    assert result.answer == "Compliance is unknown due to missing telemetry."
 
     second_call_messages = fake_client.messages.create.call_args_list[1].kwargs["messages"]
     tool_result_messages = [m for m in second_call_messages if m["role"] == "user" and isinstance(m["content"], list)]
@@ -178,7 +179,7 @@ def test_run_agent_rejects_unknown_tool_name_without_raising():
 
     result = run_agent("do something", client=fake_client, model="test-model")
 
-    assert result == "I can't do that."
+    assert result.answer == "I can't do that."
 
 
 def test_run_agent_stops_after_max_iterations_without_raising():
@@ -197,7 +198,7 @@ def test_run_agent_stops_after_max_iterations_without_raising():
     ):
         result = run_agent("check compliance forever", client=fake_client, model="test-model")
 
-    assert result == (
+    assert result.answer == (
         f"Unable to reach a final answer after {workflow.MAX_ITERATIONS} tool-calling iterations."
     )
     assert fake_client.messages.create.call_count == workflow.MAX_ITERATIONS
@@ -235,7 +236,8 @@ def test_run_agent_falls_back_to_lmstudio_on_connection_error():
         fallback_model="local-model",
     )
 
-    assert result == "From LM Studio."
+    assert result.answer == "From LM Studio."
+    assert result.backend == "lmstudio"
     fake_claude_client.messages.create.assert_called_once()
     fake_lmstudio_client.chat.completions.create.assert_called_once()
 
@@ -297,7 +299,8 @@ def test_run_agent_lmstudio_fallback_executes_tool_call():
         )
 
     mock_tool.assert_called_once_with(device="Router-A", interface="ge0")
-    assert result == "Compliant via LM Studio."
+    assert result.answer == "Compliant via LM Studio."
+    assert result.backend == "lmstudio"
     assert fake_lmstudio_client.chat.completions.create.call_count == 2
 
 
@@ -521,10 +524,50 @@ def test_backend_lmstudio_never_contacts_claude(monkeypatch):
         result = run_agent("q", client=fake_claude, model="m",
                            fallback_client=fake_lm, fallback_model="local-model")
 
-    assert result == "local answer"
+    assert result.answer == "local answer"
+    assert result.backend == "lmstudio"
     fake_claude.messages.create.assert_not_called()
     build_claude.assert_not_called()
     assert fake_lm.chat.completions.create.call_args.kwargs["model"] == "local-model"
+
+
+def test_backend_lmstudio_none_content_is_an_empty_string(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "lmstudio")
+    fake_lm = Mock()
+    fake_lm.chat.completions.create.return_value = _lm_final(None)
+    result = run_agent("q", fallback_client=fake_lm, fallback_model="local-model")
+    assert result.answer == ""
+    assert isinstance(result.answer, str)
+    assert result.backend == "lmstudio"
+
+
+def test_agent_result_is_frozen_and_backend_is_one_of_two():
+    from dataclasses import FrozenInstanceError
+
+    from agent_harness.workflow import AgentResult
+
+    result = AgentResult("x", "claude")
+    with pytest.raises(FrozenInstanceError):
+        result.answer = "y"
+    assert result.backend in ("claude", "lmstudio")
+
+
+def test_cli_prints_answer_on_stdout_and_backend_on_stderr(monkeypatch, capsys):
+    import runpy
+
+    from agent_harness.workflow import AgentResult
+
+    monkeypatch.setattr(sys, "argv", ["broker.py", "is", "it", "up"])
+    with patch(
+        "agent_harness.workflow.run_agent",
+        return_value=AgentResult("the answer", "lmstudio"),
+    ) as fake_run:
+        runpy.run_path(str(Path(__file__).resolve().parent.parent / "broker.py"), run_name="__main__")
+
+    fake_run.assert_called_once_with("is it up")
+    captured = capsys.readouterr()
+    assert captured.out == "the answer\n"
+    assert captured.err == "backend: lmstudio\n"
 
 
 def test_backend_lmstudio_requires_model(monkeypatch):
@@ -557,7 +600,9 @@ def test_backend_blank_or_mixed_case_uses_claude(monkeypatch, value):
     monkeypatch.setenv("LLM_BACKEND", value)
     fake_claude = Mock()
     fake_claude.messages.create.return_value = _response([_text_block("claude answer")])
-    assert run_agent("q", client=fake_claude, model="m") == "claude answer"
+    result = run_agent("q", client=fake_claude, model="m")
+    assert result.answer == "claude answer"
+    assert result.backend == "claude"
 
 
 def test_time_window_format_is_declared_to_the_model():
