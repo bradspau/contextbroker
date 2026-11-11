@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 
 import requests
 
-from broker_engine import sparql_resolver, tsdb_joiner
+from broker_engine import sparql_resolver, tsdb_joiner, upstream_http
 from broker_engine.faults import log_fault
 from broker_state.process import get_store
 from broker_state.store import EVICTION_TABLES, QUARANTINE_REASONS
@@ -69,7 +69,11 @@ def _probe(name: str, url: "str | ValueError", auth) -> str:
         log_fault(log, url, f"health probe failed: {name}")
         return NOT_ANSWERING
     try:
-        response = requests.get(url, timeout=PROBE_TIMEOUT_S, allow_redirects=False, auth=auth)
+        if name in upstream_http.UPSTREAMS:
+            response = upstream_http.get(name, url, timeout=PROBE_TIMEOUT_S,
+                                         allow_redirects=False, auth=auth)
+        else:  # Qdrant is not one of the three upstreams that share a session
+            response = requests.get(url, timeout=PROBE_TIMEOUT_S, allow_redirects=False, auth=auth)
     except Exception as exc:  # noqa: BLE001 - any fault means "not answering"
         log_fault(log, exc, f"health probe failed: {name}")
         return NOT_ANSWERING

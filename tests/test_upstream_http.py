@@ -269,3 +269,95 @@ def test_operations_and_a_join_reach_victoriametrics_on_one_connection(loopback)
     join_observed_metric("Router-A", "Gi0", "latency", "5m", query_endpoint=endpoint, now=now)
     assert len(lb.calls) == 6
     assert len(lb.ports()) == 1
+
+
+# ---- TMF921 client, health probes and the direct-call check (plan 08-01 task 3) ------
+
+IID = "I1234abcd"
+URI = "http://example.org/network-ontology#Latency"
+
+
+def _tmf921_client(url):
+    from intent_management.tmf921_client import Tmf921Client
+
+    return Tmf921Client(base_url=url)
+
+
+@pytest.mark.real_sessions
+def test_tmf921_reads_arrive_on_one_tcp_connection(loopback):
+    lb = loopback(lambda call: (200, {"id": IID}, {}))
+    client = _tmf921_client(lb.url)
+    assert client.get_intent(IID) == {"id": IID}
+    assert client.get_intent(IID) == {"id": IID}
+    assert len(lb.calls) == 2
+    assert len(lb.ports()) == 1
+
+
+@pytest.mark.real_sessions
+def test_an_observation_post_whose_connection_drops_is_sent_exactly_once(loopback):
+    from intent_management.tmf921_client import Tmf921Error
+
+    lb = loopback(lambda call: (None, None, {}))
+    client = _tmf921_client(lb.url)
+    with pytest.raises(Tmf921Error):
+        client.post_observation(IID, URI, 1.0)
+    posts = [c for c in lb.calls if c["method"] == "POST"
+             and c["path"] == f"/intent/{IID}/observation"]
+    assert len(posts) == 1
+
+
+@pytest.mark.real_sessions
+def test_probes_answer_through_the_sessions_and_qdrant_stays_on_plain_requests(loopback):
+    from broker_engine import health
+
+    lb = loopback(lambda call: (200, {}, {}))
+    assert health._probe("tmf921", lb.url + "/health", None) == health.ANSWERING
+    assert health._probe("victoriametrics", lb.url + "/health", None) == health.ANSWERING
+    assert len(lb.calls) == 2
+    with patch("requests.get") as g:
+        g.return_value.status_code = 200
+        assert health._probe("qdrant", "http://127.0.0.1:1/healthz", None) == health.ANSWERING
+    g.assert_called_once()
+
+
+_HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "request"}
+
+
+def _direct_requests_calls():
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    found, sessions = [], []
+    for pkg in ("broker_engine", "intent_management"):
+        for path in sorted((root / pkg).rglob("*.py")):
+            tree = ast.parse(path.read_text())
+            owner = {}
+            for fn in ast.walk(tree):
+                if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for child in ast.walk(fn):
+                        owner[id(child)] = fn.name
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "requests"):
+                    continue
+                where = (str(path.relative_to(root)), node.lineno, owner.get(id(node)))
+                if node.func.attr in _HTTP_VERBS:
+                    found.append(where)
+                elif node.func.attr == "Session":
+                    sessions.append(where)
+    return found, sessions
+
+
+def test_direct_requests_calls_are_only_the_qdrant_probe():
+    found, _ = _direct_requests_calls()
+    assert [(f, fn) for f, _, fn in found] == [("broker_engine/health.py", "_probe")], (
+        f"a direct requests call outside the Qdrant probe (file, line, function): {found}")
+
+
+def test_direct_session_construction_is_only_in_upstream_http():
+    _, sessions = _direct_requests_calls()
+    assert [(f, fn) for f, _, fn in sessions] == [("broker_engine/upstream_http.py",
+                                                    "_new_session")], (
+        f"requests.Session( outside upstream_http (file, line, function): {sessions}")

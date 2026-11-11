@@ -16,10 +16,11 @@ import re
 from datetime import datetime, timezone
 from decimal import Decimal
 
-import requests
+import requests  # noqa: F401 -- tests patch intent_management.tmf921_client.requests.get and .post
 from rdflib import BNode, Graph, Literal, URIRef
 from rdflib.namespace import RDF
 
+from broker_engine import upstream_http
 from broker_engine.faults import log_fault
 from broker_engine.validation import REQUEST_TIMEOUT_S, ClientInputError
 from data_contracts.metric_map import ALLOWED_UNITS, broker_metric_for, check_uri
@@ -117,8 +118,8 @@ class Tmf921Client:
 
     def _get_json(self, path: str):
         try:
-            r = requests.get(f"{self.base_url}{path}", timeout=REQUEST_TIMEOUT_S,
-                             allow_redirects=False)
+            r = upstream_http.get("tmf921", f"{self.base_url}{path}",
+                                  timeout=REQUEST_TIMEOUT_S, allow_redirects=False)
             if not (200 <= r.status_code < 300):
                 raise Tmf921Error("TMF921 request failed")
             return r.json()
@@ -172,9 +173,9 @@ class Tmf921Client:
                 raise ClientInputError("Invalid obtained_at") from None
             body["obtainedAt"] = utc.isoformat(timespec="microseconds" if utc.microsecond else "seconds") + "Z"
         try:
-            r = requests.post(f"{self.base_url}/intent/{intent_id}/observation",
-                              json=body, timeout=REQUEST_TIMEOUT_S,
-                              allow_redirects=False)
+            r = upstream_http.post("tmf921", f"{self.base_url}/intent/{intent_id}/observation",
+                                   json=body, timeout=REQUEST_TIMEOUT_S,
+                                   allow_redirects=False)
             ok = r.status_code in (200, 201)
         except Exception as exc:
             log_fault(log, exc, "TMF921 request failed")
