@@ -1,0 +1,9 @@
+# The proxy image's one direct dependency. requirements.txt is generated from it with every
+# release file hash, and the image installs that file with --require-hashes. The constraint keeps
+# every pin equal to the root lock, so the proxy brings no version the API image does not have.
+# Regenerate from the repository root with
+#   pip-compile --generate-hashes --strip-extras --output-file=lodlive-proxy/requirements.txt lodlive-proxy/requirements.in
+# using pip-tools in a throwaway virtual environment outside this repository (never in venv/ and
+# never in the image).
+-c ../requirements.txt
+requests==2.34.2
