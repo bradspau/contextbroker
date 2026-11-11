@@ -12,7 +12,7 @@ from broker_engine.validation import (
     REQUEST_TIMEOUT_S,
     SAFE_WINDOW,
     ClientInputError,
-    _validate_token,
+    validate_token,
     window_seconds,
 )
 from data_contracts.envelope import ContextEnvelope, ProvenanceRecord, build_observed
@@ -44,9 +44,9 @@ def join_observed_metric(
     reference the series name, observed_at the envelope's sample time and
     retrieved_at the caller's now (when the broker read it), even when as_of
     moves the query instant into the past."""
-    _validate_token(device, "device")
-    _validate_token(interface, "interface")
-    _validate_token(metric_type, "metric_type")
+    validate_token(device, "device")
+    validate_token(interface, "interface")
+    validate_token(metric_type, "metric_type")
     if not SAFE_WINDOW.match(time_window):
         raise ClientInputError(f"Unsafe time_window: {time_window!r}")
 

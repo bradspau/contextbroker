@@ -71,7 +71,7 @@ WINDOW_SECONDS_MAX = 604800
 SITUATION_VERSION = 1
 
 # A device, interface or intent token as the request grammar allows it. The device and interface
-# pattern is validation._SAFE_TOKEN written with `$` (pydantic's pattern engine has no `\Z`; `$` is
+# pattern is validation.SAFE_TOKEN written with `$` (pydantic's pattern engine has no `\Z`; `$` is
 # end-of-string there and refuses a trailing newline). The intent pattern is the TMF921 client's.
 _TOKEN_PATTERN = r"^[A-Za-z0-9_\-/]+$"
 _INTENT_PATTERN = r"^[A-Za-z0-9-]+$"

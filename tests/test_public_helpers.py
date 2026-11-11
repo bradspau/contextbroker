@@ -16,19 +16,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SKIPPED_DIRS = {"venv", ".venv", "docs", "tests", ".git", "lodlive-proxy", "__pycache__",
                 "node_modules", ".planning", ".sdd", ".beads"}
 
-# The offences that stay until plan 08-12 renames them. Each entry is (file, module, name).
+# The offences that stay until plan 08-12 renames them (the token, intent-id and short-name helpers). Each entry is (file, module, name).
 PENDING = {
-    ("broker.py", "agent_harness.tools", "_TOOL_ALLOWED_ARGS"),
-    ("broker.py", "agent_harness.workflow", "_build_client"),
-    ("broker.py", "agent_harness.workflow", "_build_lmstudio_client"),
-    ("broker.py", "agent_harness.workflow", "_run_claude"),
-    ("broker.py", "agent_harness.workflow", "_run_lmstudio"),
-    ("broker.py", "broker_engine.validation", "_SAFE_TOKEN"),
-    ("broker.py", "broker_engine.validation", "_validate_token"),
-    ("broker_engine/auth.py", "broker_engine.validation", "_SAFE_TOKEN"),
-    ("data_contracts/metric_map.py", "broker_engine.validation", "_SAFE_TOKEN"),
-    ("broker_engine/operations.py", "broker_engine.validation", "_validate_token"),
-    ("broker_engine/tsdb_joiner.py", "broker_engine.validation", "_validate_token"),
     ("broker_engine/binding_resolver.py", "data_contracts.metric_map", "_check_token"),
     ("broker_engine/context_graph.py", "data_contracts.metric_map", "_check_token"),
     ("ingestion/bind_intent.py", "data_contracts.metric_map", "_check_token"),
@@ -100,7 +89,8 @@ def test_the_scan_covers_the_broker_packages_and_the_top_level_files():
     assert not any(n.startswith(("tests/", "venv/")) for n in names)
 
 
-@pytest.mark.parametrize("old", ["_SAFE_WINDOW", "_UNIT_SECONDS", "_SAFE_RETENTION"])
+@pytest.mark.parametrize("old", ["_SAFE_TOKEN", "_SAFE_WINDOW", "_UNIT_SECONDS", "_SAFE_RETENTION",
+                                 "_validate_token"])
 def test_the_old_validation_names_are_gone_not_aliased(old):
     from broker_engine import validation
     assert not hasattr(validation, old)

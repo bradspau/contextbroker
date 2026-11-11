@@ -16,7 +16,7 @@ from broker_engine.validation import (
     SAFE_WINDOW,
     REQUEST_TIMEOUT_S,
     ClientInputError,
-    _validate_token,
+    validate_token,
     tsdb_series_limit,
     window_seconds,
 )
@@ -89,9 +89,9 @@ def metric_history(device, interface, metric_type, time_window, as_of=None, *,
                    query_endpoint=VM_QUERY_ENDPOINT, now=None) -> dict:
     """min / max / last and sample count of one metric over the window ending at
     ``as_of`` ago (now if omitted)."""
-    _validate_token(device, "device")
-    _validate_token(interface, "interface")
-    _validate_token(metric_type, "metric_type")
+    validate_token(device, "device")
+    validate_token(interface, "interface")
+    validate_token(metric_type, "metric_type")
     _check_window(time_window)
     at, extra = _evaluation_time(as_of, now)
     selector = (f'{MEASUREMENT_NAME}_{metric_type}'
@@ -139,8 +139,8 @@ def interfaces_with_nonzero(device, metric_type, time_window, as_of=None,
 
     Only interfaces that reported at least once are examined. If none did,
     ``quality.missing`` is true: that is "no data", not "all zero"."""
-    _validate_token(device, "device")
-    _validate_token(metric_type, "metric_type")
+    validate_token(device, "device")
+    validate_token(metric_type, "metric_type")
     _check_window(time_window)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_INTERFACES:
         raise ClientInputError(f"limit must be an integer from 1 to {MAX_INTERFACES}")
@@ -228,8 +228,8 @@ def interface_neighbours(device, interface, *, query_endpoint=FUSEKI_QUERY_ENDPO
     back from now for the knowledge time (the latest record if omitted). An interface that
     is not in the graph is ``quality.missing``; one that is but had no link valid then has
     an empty list. ``valid_at`` and ``known_at`` appear in the result only when asked."""
-    _validate_token(device, "device")
-    _validate_token(interface, "interface")
+    validate_token(device, "device")
+    validate_token(interface, "interface")
     now = now or datetime.now(timezone.utc)
     valid_s = window_seconds(as_of, "as_of") if as_of is not None else 0
     known_s = window_seconds(known_at, "known_at") if known_at is not None else None

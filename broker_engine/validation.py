@@ -11,12 +11,12 @@ class ClientInputError(ValueError):
     """Caller-supplied input failed validation (maps to HTTP 400)."""
 
 
-_SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_\-/]+\Z")
+SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_\-/]+\Z")
 SAFE_WINDOW = re.compile(r"^[0-9]+[smhd]\Z")
 
 
-def _validate_token(value: str, label: str) -> str:
-    if not _SAFE_TOKEN.match(value):
+def validate_token(value: str, label: str) -> str:
+    if not SAFE_TOKEN.match(value):
         raise ClientInputError(f"Unsafe {label!r}: {value!r}")
     return value
 

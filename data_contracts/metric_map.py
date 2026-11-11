@@ -28,7 +28,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
-from broker_engine.validation import _SAFE_TOKEN
+from broker_engine.validation import SAFE_TOKEN
 
 URI_RE = re.compile(r"^https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+\Z")
 ALLOWED_UNITS = frozenset({"Mbps", "Gbps", "ms", "us", "percent"})
@@ -47,7 +47,7 @@ class MetricMapping:
 
 
 def _check_token(value, label: str) -> str:
-    if not isinstance(value, str) or not _SAFE_TOKEN.match(value):
+    if not isinstance(value, str) or not SAFE_TOKEN.match(value):
         raise ValueError(f"unsafe {label}: {value!r}")
     return value
 

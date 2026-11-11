@@ -35,7 +35,7 @@ CONTEXT_CLASSES = ("topology", "goals", "observations", "events", "knowledge")
 CLAIM_AUTHORITY = "authority"
 KEY_ENTITIES, KEY_PURPOSES, KEY_CLASSES = "entities", "purposes", "classes"
 MAX_ENTITY_LENGTH = 128
-# The same pattern as broker_engine.validation._SAFE_TOKEN (standalone copy).
+# The same pattern as broker_engine.validation.SAFE_TOKEN (standalone copy).
 _SAFE_ENTITY = re.compile(r"^[A-Za-z0-9_\-/]+\Z")
 MIN_RSA_BITS = 2048
 REPO = Path(__file__).resolve().parent.parent

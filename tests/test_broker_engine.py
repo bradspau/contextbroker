@@ -142,9 +142,9 @@ def test_graph_intent_resolver_and_not_found_are_gone():
 
 def test_safe_token_and_window_reject_trailing_newline():
     import pytest
-    from broker_engine.validation import _validate_token, SAFE_WINDOW, ClientInputError
+    from broker_engine.validation import validate_token, SAFE_WINDOW, ClientInputError
     with pytest.raises(ClientInputError):
-        _validate_token("input_drops\n", "metric")
+        validate_token("input_drops\n", "metric")
     assert not SAFE_WINDOW.match("30m\n")
 
 

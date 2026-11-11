@@ -288,5 +288,5 @@ def test_an_unknown_purpose_or_class_is_rejected_by_the_command_line(tmp_path, k
 def test_the_script_entity_pattern_equals_the_broker_pattern():
     from broker_engine import validation
     module = _load_script()
-    assert module._SAFE_ENTITY.pattern == validation._SAFE_TOKEN.pattern
+    assert module._SAFE_ENTITY.pattern == validation.SAFE_TOKEN.pattern
     assert module.MAX_ENTITY_LENGTH == auth.MAX_ENTITY_LENGTH

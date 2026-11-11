@@ -22,7 +22,7 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from broker_engine.faults import log_fault
-from broker_engine.validation import _SAFE_TOKEN
+from broker_engine.validation import SAFE_TOKEN
 from data_contracts.context_contract import CONTEXT_CLASSES, ENTITY_WILDCARD, PURPOSES, Authority
 
 log = logging.getLogger(__name__)
@@ -141,7 +141,7 @@ def scopes_of(claims: dict) -> frozenset[str]:
 def _usable_entity(item) -> bool:
     return isinstance(item, str) and (
         item == ENTITY_WILDCARD
-        or (len(item) <= MAX_ENTITY_LENGTH and _SAFE_TOKEN.match(item) is not None))
+        or (len(item) <= MAX_ENTITY_LENGTH and SAFE_TOKEN.match(item) is not None))
 
 
 def authority_of(claims: dict) -> Authority | None:
