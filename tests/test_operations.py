@@ -1,4 +1,5 @@
 """Operations queries: metric history, non-zero interfaces, interface neighbours."""
+import re
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
@@ -27,8 +28,12 @@ class FakeVM:
     def __call__(self, url, params=None, timeout=None):
         self.calls.append(params)
         q = params["query"]
-        fn = "tlast_over_time" if "tlast_over_time" in q else q.split("(")[0]
+        # tlast is tried first: "last_over_time" is also inside "tlast_over_time"
+        fn = re.search(r"(tlast|max|min|last|count)_over_time", q).group(0)
         rows = self.series.get(fn, [])
+        cut = re.match(r"limitk\((\d+),", q)
+        if cut:  # the engine returns at most K series; which K is not the point here
+            rows = rows[:int(cut.group(1))]
         return _resp({"data": {"result": [{"metric": lab, "value": [T, str(v)]} for lab, v in rows]}})
 
 
@@ -399,3 +404,96 @@ def test_nonzero_top_level_stale_only_when_every_examined_interface_is_stale():
     some_old = dict(SERIES, tlast_over_time=[(lab("e0"), T - 9000)] +
                     [(lab(i), T - 10) for i in ("e1", "e2", "e3")])
     assert nz(some_old)[0]["quality"]["stale"] is False  # per-interface flags carry the detail
+
+
+# ---------- the series limit (PERF-03, D-68, D-70, D-86) ----------
+THREE = ("e0", "e1", "e2")
+
+
+def three(value=5):
+    return {fn: [(lab(i), value if fn != "tlast_over_time" else T - 10) for i in THREE]
+            for fn in ("max_over_time", "min_over_time", "last_over_time", "tlast_over_time")}
+
+
+def test_the_limited_rollup_form_and_conflict_text_are_pinned():
+    assert ops.LIMITED_ROLLUP.format(n=501, fn="max_over_time", selector="s") == \
+        'limitk(501, label_del(max_over_time(s), "__name__"))'
+    assert ops.SERIES_LIMIT_CONFLICT.format(limit=2) == "series limit reached (2)"
+
+
+def test_every_query_asks_for_the_limit_plus_one_by_default(monkeypatch):
+    monkeypatch.delenv("BROKER_TSDB_SERIES_LIMIT", raising=False)
+    _, vm = nz(SERIES, window="5m")
+    selector = 'interface_metrics_input_drops{device="r1"}[5m]'
+    assert [c["query"] for c in vm.calls] == [
+        ops.LIMITED_ROLLUP.format(n=501, fn=fn, selector=selector)
+        for fn in ("max_over_time", "min_over_time", "last_over_time", "tlast_over_time")]
+    assert vm.calls[0]["query"] == (
+        'limitk(501, label_del(max_over_time(interface_metrics_input_drops{device="r1"}[5m]),'
+        ' "__name__"))')
+
+
+def test_a_cut_by_the_series_limit_keeps_n_says_so_and_drops_the_same_one_everywhere(monkeypatch):
+    monkeypatch.setenv("BROKER_TSDB_SERIES_LIMIT", "2")
+    # the engine's order is not label order: the kept two are the first two label sets sorted
+    shuffled = {fn: list(reversed(rows)) for fn, rows in three().items()}
+    out, vm = nz(shuffled)
+    assert all(c["query"].startswith("limitk(3, ") for c in vm.calls) and len(vm.calls) == 4
+    assert out["series_truncated"] is True and out["truncated"] is False
+    assert "series limit reached (2)" in out["quality"]["conflicts"]
+    assert out["interfaces_examined"] == 2
+    assert sorted(i["interface"] for i in out["interfaces"]) == ["e0", "e1"]
+
+
+def test_the_dropped_series_is_the_same_when_the_rollups_come_back_in_different_orders(monkeypatch):
+    monkeypatch.setenv("BROKER_TSDB_SERIES_LIMIT", "2")
+    s = three()
+    s["min_over_time"] = list(reversed(s["min_over_time"]))
+    s["tlast_over_time"] = s["tlast_over_time"][1:] + s["tlast_over_time"][:1]
+    out, _ = nz(s)
+    assert sorted(i["interface"] for i in out["interfaces"]) == ["e0", "e1"]
+    assert out["interfaces_examined"] == 2 and out["quality"]["stale"] is False
+
+
+def test_at_exactly_the_limit_nothing_is_cut(monkeypatch):
+    monkeypatch.setenv("BROKER_TSDB_SERIES_LIMIT", "3")
+    out, _ = nz(three())
+    assert out["series_truncated"] is False
+    assert out["quality"]["conflicts"] == []
+    assert [i["interface"] for i in out["interfaces"]] == ["e0", "e1", "e2"]
+
+
+def test_the_output_limit_and_the_series_limit_are_separate_cuts(monkeypatch):
+    monkeypatch.setenv("BROKER_TSDB_SERIES_LIMIT", "500")
+    two = {fn: rows[:2] for fn, rows in three().items()}
+    out, _ = nz(two, limit=1)
+    assert out["truncated"] is True and out["series_truncated"] is False
+    monkeypatch.setenv("BROKER_TSDB_SERIES_LIMIT", "2")
+    out, _ = nz(three(), limit=1)
+    assert out["truncated"] is True and out["series_truncated"] is True
+    out, _ = nz(three(), limit=2)
+    assert out["truncated"] is False and out["series_truncated"] is True
+
+
+def test_series_truncated_is_always_present_including_the_missing_path():
+    out, _ = nz({})
+    assert out["quality"]["missing"] is True and out["series_truncated"] is False
+    assert nz(SERIES)[0]["series_truncated"] is False
+
+
+def test_two_series_for_one_interface_are_a_conflict_and_the_interface_is_still_listed():
+    second = {"device": "r1", "interface": "e0", "x": "2"}
+    s = dict(SERIES, max_over_time=SERIES["max_over_time"] + [(second, 3)],
+             min_over_time=SERIES["min_over_time"] + [(second, 1)])
+    out, _ = nz(s)
+    assert "multiple series for e0" in out["quality"]["conflicts"]
+    e0 = next(i for i in out["interfaces"] if i["interface"] == "e0")
+    assert (e0["min"], e0["max"], e0["last"]) == (0.0, 3.0, 0.0)
+    assert out["interfaces_examined"] == 4
+
+
+def test_the_series_limit_is_read_on_each_call(monkeypatch):
+    monkeypatch.setenv("BROKER_TSDB_SERIES_LIMIT", "2")
+    assert nz(three())[0]["series_truncated"] is True
+    monkeypatch.setenv("BROKER_TSDB_SERIES_LIMIT", "3")
+    assert nz(three())[0]["series_truncated"] is False

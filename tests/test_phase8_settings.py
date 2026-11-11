@@ -11,9 +11,13 @@ import pytest
 from broker_engine import telemetry_reads
 from broker_engine.validation import (
     DEFAULT_TELEMETRY_WORKERS,
+    DEFAULT_TSDB_SERIES_LIMIT,
     MAX_TELEMETRY_WORKERS,
+    MAX_TSDB_SERIES_LIMIT,
     TELEMETRY_WORKERS_ENV,
+    TSDB_SERIES_LIMIT_ENV,
     telemetry_workers,
+    tsdb_series_limit,
 )
 
 MESSAGE = "BROKER_TELEMETRY_WORKERS must be a whole number from 1 to 8"
@@ -102,3 +106,31 @@ def test_the_setting_is_read_on_each_call(monkeypatch):
         return threading.get_ident()
 
     assert main not in telemetry_reads.read_in_order(meet, [1, 2])
+
+
+# ---------- BROKER_TSDB_SERIES_LIMIT ----------
+SERIES_MESSAGE = "BROKER_TSDB_SERIES_LIMIT must be a whole number from 1 to 100000"
+
+
+def test_series_limit_names_and_defaults():
+    assert TSDB_SERIES_LIMIT_ENV == "BROKER_TSDB_SERIES_LIMIT"
+    assert DEFAULT_TSDB_SERIES_LIMIT == 500 and MAX_TSDB_SERIES_LIMIT == 100000
+
+
+@pytest.mark.parametrize("environ", [{}, {TSDB_SERIES_LIMIT_ENV: ""}])
+def test_series_limit_unset_or_blank_gives_the_default(environ):
+    assert tsdb_series_limit(environ) == 500
+
+
+@pytest.mark.parametrize("raw", ["1", "500", "100000"])
+def test_series_limit_whole_numbers_in_range_are_accepted(raw):
+    assert tsdb_series_limit({TSDB_SERIES_LIMIT_ENV: raw}) == int(raw)
+
+
+@pytest.mark.parametrize("raw", ["0", "100001", "abc", " 5", "-1", "1e3", "canary99", "5\n"])
+def test_series_limit_a_bad_value_is_refused_naming_the_variable_and_never_the_value(raw):
+    with pytest.raises(ValueError) as info:
+        tsdb_series_limit({TSDB_SERIES_LIMIT_ENV: raw})
+    assert str(info.value) == SERIES_MESSAGE
+    if raw.strip() not in SERIES_MESSAGE:  # "0" and "1" are in the range text itself
+        assert raw.strip() not in str(info.value)

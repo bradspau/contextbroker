@@ -66,6 +66,25 @@ def telemetry_workers(environ=os.environ) -> int:
                      f"{MAX_TELEMETRY_WORKERS}")
 
 
+# How many series one interfaces-nonzero rollup may read from VictoriaMetrics (operations.py).
+TSDB_SERIES_LIMIT_ENV = "BROKER_TSDB_SERIES_LIMIT"
+DEFAULT_TSDB_SERIES_LIMIT = 500
+MAX_TSDB_SERIES_LIMIT = 100000
+
+
+def tsdb_series_limit(environ=os.environ) -> int:
+    """The cap on series one interfaces-nonzero query reads: BROKER_TSDB_SERIES_LIMIT, a whole
+    number from 1 to 100000 (default 500; blank means the default). ValueError, naming the
+    variable but never its value, for anything else."""
+    raw = environ.get(TSDB_SERIES_LIMIT_ENV)
+    if not raw:
+        return DEFAULT_TSDB_SERIES_LIMIT
+    if _DIGITS.match(raw) and 1 <= int(raw) <= MAX_TSDB_SERIES_LIMIT:
+        return int(raw)
+    raise ValueError(f"{TSDB_SERIES_LIMIT_ENV} must be a whole number from 1 to "
+                     f"{MAX_TSDB_SERIES_LIMIT}")
+
+
 def window_seconds(value, label: str) -> int:
     """Seconds in a "5m"/"1h" style duration; ClientInputError if malformed or further
     back than the retention period (max_as_of_seconds). Used for as_of, an offset back from

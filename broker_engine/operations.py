@@ -3,6 +3,7 @@
 Nothing here judges compliance. Each result carries ``quality`` (stale, missing,
 conflicts) so "no data" is never mistaken for "zero" or "none".
 """
+import json
 import math
 from datetime import datetime, timedelta, timezone
 
@@ -16,6 +17,7 @@ from broker_engine.validation import (
     REQUEST_TIMEOUT_S,
     ClientInputError,
     _validate_token,
+    tsdb_series_limit,
     window_seconds,
 )
 from data_contracts.envelope import DEFAULT_MAX_AGE_S
@@ -24,6 +26,13 @@ from ingestion.telemetry_simulator import MEASUREMENT_NAME
 
 MAX_INTERFACES = 200
 DEFAULT_INTERFACES = 50
+
+# The one place the interfaces-nonzero query form is written. limitk keeps at most n series;
+# label_del drops __name__ so all four rollups (tlast_over_time drops it on its own) rank, and
+# so keep, the same series. n is always the validated integer plus one.
+LIMITED_ROLLUP = 'limitk({n}, label_del({fn}({selector}), "__name__"))'
+SERIES_LIMIT_CONFLICT = "series limit reached ({limit})"
+_ROLLUPS = ("max_over_time", "min_over_time", "last_over_time", "tlast_over_time")
 
 
 def _evaluation_time(as_of, now):
@@ -137,27 +146,49 @@ def interfaces_with_nonzero(device, metric_type, time_window, as_of=None,
         raise ClientInputError(f"limit must be an integer from 1 to {MAX_INTERFACES}")
     at, extra = _evaluation_time(as_of, now)
     selector = f'{MEASUREMENT_NAME}_{metric_type}{{device="{device}"}}[{time_window}]'
+    series_limit = tsdb_series_limit()  # read on each call
 
-    def by_interface(fn):
-        rows = {}
-        for r in _vector(query_endpoint, f"{fn}({selector})", extra):
+    def raw(fn):
+        # one more than the limit, so a result that was cut can be told from one that was not
+        return _vector(query_endpoint,
+                       LIMITED_ROLLUP.format(n=series_limit + 1, fn=fn, selector=selector), extra)
+
+    def label_key(row):
+        return json.dumps(row.get("metric", {}), sort_keys=True)
+
+    def by_interface(rows, keep):
+        grouped = {}
+        for r in rows:
             name = r.get("metric", {}).get("interface")
-            if name:
-                rows.setdefault(name, []).append(r["value"][1])
-        return rows
+            if name and (keep is None or label_key(r) in keep):
+                grouped.setdefault(name, []).append(r["value"][1])
+        return grouped
 
-    maxs, mins = by_interface("max_over_time"), by_interface("min_over_time")
+    fetched = {fn: raw(fn) for fn in _ROLLUPS[:2]}
     out = {
         "device": device, "metric": metric_type, "time_window": time_window, "as_of": as_of,
         "evaluated_at": at.isoformat(), "state": "observed", "source": "victoriametrics",
-        "interfaces_examined": 0, "interfaces": [], "truncated": False, "stale_interfaces": 0,
+        "interfaces_examined": 0, "interfaces": [], "truncated": False,
+        "series_truncated": False, "stale_interfaces": 0,
     }
-    if not mins and not maxs:
+    if not fetched["max_over_time"] and not fetched["min_over_time"]:
         out["quality"] = _quality(missing=True)
         return out
-    lasts, times = by_interface("last_over_time"), by_interface("tlast_over_time")
+    fetched.update({fn: raw(fn) for fn in _ROLLUPS[2:]})
+
+    # More than the limit came back: keep the first `series_limit` label sets in sorted order,
+    # the same ones in every rollup, and say so.
+    keep = None
+    over = next((fetched[fn] for fn in _ROLLUPS if len(fetched[fn]) > series_limit), None)
+    if over is not None:
+        keep = set(sorted({label_key(r) for r in over})[:series_limit])
+        out["series_truncated"] = True
+    maxs, mins = (by_interface(fetched[fn], keep) for fn in _ROLLUPS[:2])
+    lasts, times = (by_interface(fetched[fn], keep) for fn in _ROLLUPS[2:])
 
     conflicts, found, stale_count = [], [], 0
+    if out["series_truncated"]:
+        conflicts.append(SERIES_LIMIT_CONFLICT.format(limit=series_limit))
     for name in sorted(set(maxs) | set(mins)):
         if len(maxs.get(name, [])) > 1 or len(mins.get(name, [])) > 1:
             conflicts.append(f"multiple series for {name}")
