@@ -154,35 +154,55 @@ engine serves bounded, quality-labelled context; it never decides or acts.
 ```mermaid
 flowchart TB
     User(["User or operator"])
-    Client(["REST client"])
-    Requester(["Intent requester<br/>asks for a service with goals and constraints<br/>(outside this repo)"])
+    Client(["REST client or agent<br/>bearer JWT, signed authority claims"])
+    Requester(["Intent requester<br/>(outside this repo)"])
+    Operator(["Operator<br/>docker exec CLIs"])
 
     subgraph Agent["Agent harness (agent_harness)"]
-        Harness["broker.py CLI and tool-calling loop<br/>tools: assess_intent, 3 operations queries,<br/>query_tsdb_metrics"]
+        Harness["broker.py CLI and tool-calling loop<br/>names the backend that answered"]
     end
-    LLM["LLM_BACKEND=claude: Claude API<br/>(LM Studio only on a connection error)<br/>LLM_BACKEND=lmstudio: LM Studio only"]
+    LLM["LLM_BACKEND=claude: Claude API<br/>(LM Studio on a connection error)<br/>LLM_BACKEND=lmstudio: LM Studio only"]
 
-    subgraph Broker["Context broker (broker_engine, in contextbroker-api :8080)"]
+    subgraph Broker["Context broker (broker_engine, contextbroker-api :8080)"]
         direction TB
-        Ops["Operations queries, no intent needed<br/>metric history, non-zero interfaces, neighbours<br/>(operations.py)"]
-        AssessT["assess_intent (TMF921)<br/>modes: now (push), as_of, within (read-only)<br/>(tmf921_source.py)"]
-        Join["tsdb_joiner and sparql_resolver<br/>ContextEnvelope with quality labels"]
+        Auth["auth.py<br/>RS256/ES256 JWT, scopes,<br/>authority claims, /health open"]
+        Req["POST /context/request<br/>context_request.py<br/>purpose, scope, classes, as_of, known_at"]
+        Sit["GET /context/situation/{id}<br/>original requester only"]
+        Ops["Operations routes and assess<br/>metric, metric-history, interfaces-nonzero,<br/>neighbours, assess (operations.py, tmf921_source.py)"]
+        Reads["telemetry_reads and tsdb_joiner<br/>parallel per-metric reads, ContextEnvelope"]
+        Graph["context_graph and binding_resolver<br/>bitemporal fluents (valid and known time)"]
+        Elig["context_eligibility<br/>eligible, ineligible, gap per class<br/>never feeds the verdict"]
         Assure["outcome_assurance<br/>deterministic success, failure, inconclusive"]
-        Bind["metric_map.json and the binding in the network graph"]
-        BindCli["bind_intent CLI<br/>reads goals from TMF921, writes :ServiceBinding"]
-        MCP["MCP server<br/>built, not served<br/>optional extra"]
+        Prof["exchange_profile<br/>JSON-LD on Accept, same data"]
+        Sess["upstream_http<br/>one reused session per upstream"]
+        MCP["MCP server<br/>built, not served, optional extra"]
     end
 
-    subgraph Net["Network side"]
-        Fuseki[("Jena Fuseki server :3030, instance 1<br/>NETWORK GRAPH, TDB2 store<br/>persistent volume fuseki-data<br/>resources and service bindings")]
-        VM[("VictoriaMetrics :8428<br/>telemetry")]
-        Sim["telemetry_simulator"]
+    subgraph State["State file (SQLite, volume broker-state, /data)"]
+        Store[("outcomes, marks, situations,<br/>events, event_devices, promoted")]
+    end
+
+    subgraph Know["Knowledge (okf_retrieval)"]
+        KFiles[/"knowledge/ bundles<br/>reviewed in git, mounted read-only"/]
+        Qdrant[("Qdrant :6333<br/>derived index, identity and vectors only")]
+    end
+
+    subgraph Ing["Operator commands (ingestion, in the API container)"]
+        Syslog["syslog_ingest<br/>RFC 5424 and 3164 lines"]
+        Promote["promote<br/>conflicts and hypotheses, SELECT only on Fuseki"]
+        BindCli["bind_intent<br/>writes :ServiceBinding fluents"]
         Load["load_ontologies<br/>SHACL-gated"]
-        Lod["LodLive :8888 via lodlive-proxy :8081"]
+    end
+
+    subgraph Net["Network side (127.0.0.1 only)"]
+        Fuseki[("Jena Fuseki :3030, instance 1<br/>NETWORK GRAPH, TDB2, basic auth<br/>volume fuseki-data")]
+        VM[("VictoriaMetrics :8428<br/>telemetry, volume vm-data")]
+        Sim["telemetry_simulator"]
+        Lod["LodLive :8888 via lodlive-proxy :8081<br/>read-only SPARQL only"]
     end
 
     subgraph Svc["Service intent side (compose profile tmf921)"]
-        T921[("tmf921-server :8000, Jena instance 2<br/>Java app with embedded Jena, TDB2 store<br/>persistent volume tdb2-tmf921<br/>TMF921 GRAPH: TIO ontology and service intents")]
+        T921[("tmf921-server :8000, Jena instance 2<br/>TMF921 GRAPH: service intents")]
         Handler["Intent handler: provisioning<br/>not in either repo, not built"]
         Onto[/"licensed TIO ontology files<br/>read-only mount, never in an image or this repo"/]
     end
@@ -194,24 +214,47 @@ flowchart TB
     User -->|"question"| Harness
     Harness <-->|"tool calls"| LLM
     Harness -->|"in-process import"| Broker
-    Client -->|"HTTP, bearer token"| Broker
+    Client -->|"HTTP"| Auth
+    Auth --> Req
+    Auth --> Sit
+    Auth --> Ops
 
-    Ops --> Join
-    AssessT --> Join
-    AssessT --> Bind
-    AssessT -->|"binding lookup"| Fuseki
+    Req --> Reads
+    Req --> Graph
+    Req --> Elig
+    Req --> Assure
+    Req -->|"events and promoted classes"| Store
+    Req -->|"knowledge class, references only"| Qdrant
+    Req -->|"one situation row per answer"| Store
+    Req -.-> Prof
+    Sit --> Store
+    Ops --> Reads
+    Ops --> Assure
+    Reads --> Sess
+    Graph --> Sess
+    Sess -->|"PromQL"| VM
+    Sess -->|"SPARQL, SELECT"| Fuseki
+    Ops -->|"REST: read intent and reports,<br/>push observations (assess now only)"| T921
+
+    KFiles -->|"rebuilt at start"| Qdrant
+
+    Operator --> Syslog
+    Operator --> Promote
+    Syslog -->|"device names"| Fuseki
+    Syslog -->|"events"| Store
+    Promote -->|"reads a stored situation"| Store
+    Promote -->|"writes promoted records"| Store
+    Promote -->|"configured links"| Fuseki
+    Operator --> BindCli
     BindCli -->|"reads current goals"| T921
     BindCli -->|"writes :ServiceBinding"| Fuseki
-    Join -->|"SPARQL"| Fuseki
-    Join -->|"PromQL"| VM
+    Load -->|"tbox, shacl, abox"| Fuseki
 
-    Requester -->|"POST /intent<br/>goals and constraints"| T921
-    T921 -.->|"stored intent<br/>(future)"| Handler
-    AssessT -->|"REST: read intent and reports,<br/>push observations"| T921
+    Requester -->|"POST /intent"| T921
+    T921 -.->|"stored intent (future)"| Handler
     Onto -.->|"bind mount :ro"| T921
 
     Sim -->|"writes every 5s"| VM
-    Load -->|"tbox, shacl, abox"| Fuseki
     User -->|"browses"| Lod --> Fuseki
 ```
 
