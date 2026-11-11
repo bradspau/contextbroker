@@ -4,8 +4,9 @@ import math
 import os
 from datetime import datetime, timedelta, timezone
 
-import requests
+import requests  # noqa: F401 -- tests patch broker_engine.tsdb_joiner.requests.get
 
+from broker_engine import upstream_http
 from broker_engine.faults import log_fault
 from broker_engine.validation import (
     REQUEST_TIMEOUT_S,
@@ -64,8 +65,9 @@ def join_observed_metric(
     selector = f'{series}{{device="{device}", interface="{interface}"}}'
     promql = f'{aggregate}_over_time({selector}[{time_window}])'
 
-    response = requests.get(query_endpoint, params={"query": promql, **params_extra},
-                            timeout=REQUEST_TIMEOUT_S)
+    response = upstream_http.get("victoriametrics", query_endpoint,
+                                 params={"query": promql, **params_extra},
+                                 timeout=REQUEST_TIMEOUT_S)
     response.raise_for_status()
     result = response.json()["data"]["result"]
 
@@ -111,12 +113,10 @@ def _oldest_sample_time(
     the caller treats as stale (fail closed).
     """
     try:
-        response = requests.get(
-            query_endpoint,
-            params={"query": f"min(tlast_over_time({selector}[{time_window}]))",
-                    **(params_extra or {})},
-            timeout=REQUEST_TIMEOUT_S,
-        )
+        response = upstream_http.get("victoriametrics", query_endpoint,
+                                     params={"query": f"min(tlast_over_time({selector}[{time_window}]))",
+                                             **(params_extra or {})},
+                                     timeout=REQUEST_TIMEOUT_S)
         response.raise_for_status()
         result = response.json()["data"]["result"]
         if not result:

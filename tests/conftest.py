@@ -26,3 +26,45 @@ def _per_test_state_files(tmp_path, monkeypatch):
     yield
     reset_service()
     reset_store()
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "real_sessions: use the real per-upstream HTTP sessions, not the shim "
+        "that routes broker_engine.upstream_http to requests.get and requests.post",
+    )
+
+
+class _PassThroughSession:
+    """What the shim hands out: get and post call requests.get and requests.post
+    looked up at call time, so every patch of those functions still intercepts."""
+
+    def get(self, url, **kwargs):
+        import requests
+
+        return requests.get(url, **kwargs)
+
+    def post(self, url, **kwargs):
+        import requests
+
+        return requests.post(url, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _upstream_sessions(request, monkeypatch):
+    """Unless a test is marked real_sessions, broker_engine.upstream_http routes to
+    requests.get and requests.post (D-87a). Sessions are reset after every test."""
+    from broker_engine import upstream_http
+
+    if request.node.get_closest_marker("real_sessions") is None:
+        shim = _PassThroughSession()
+
+        def fake_session(upstream):
+            if upstream not in upstream_http.UPSTREAMS:
+                raise ValueError("unknown upstream")
+            return shim
+
+        monkeypatch.setattr(upstream_http, "session", fake_session)
+    yield
+    upstream_http.reset_sessions()

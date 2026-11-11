@@ -1,0 +1,203 @@
+"""One reused HTTP session per upstream (PERF-01, D-71, D-87a).
+
+Tests marked real_sessions talk to a loopback server over a real socket, so reuse,
+retries, cookies and credentials are proved on the wire. Unmarked tests see the
+autouse shim in conftest, which routes the helper to the patched requests functions.
+"""
+import json
+import threading
+import time
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from broker_engine import upstream_http
+from broker_engine.tsdb_joiner import join_observed_metric
+
+
+class _Loopback:
+    """An HTTP/1.1 keep-alive server on 127.0.0.1 that records every request."""
+
+    def __init__(self, responder=None):
+        self.calls = []
+        outer = self
+        self.responder = responder or (lambda call: (200, {}, {}))
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def _handle(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(n).decode() if n else ""
+                call = {"method": self.command, "path": self.path,
+                        "headers": {k.lower(): v for k, v in self.headers.items()},
+                        "body": body, "client_port": self.client_address[1]}
+                outer.calls.append(call)
+                status, payload, extra = outer.responder(call)
+                if status is None:
+                    # Read the request, then drop the connection without answering.
+                    self.close_connection = True
+                    self.connection.close()
+                    return
+                data = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                for k, v in extra.items():
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(data)
+
+            do_GET = _handle
+            do_POST = _handle
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def ports(self):
+        return {c["client_port"] for c in self.calls}
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.fixture
+def loopback():
+    made = []
+
+    def make(responder=None):
+        lb = _Loopback(responder)
+        made.append(lb)
+        return lb
+
+    yield make
+    upstream_http.reset_sessions()
+    for lb in made:
+        lb.close()
+
+
+def _vm_payload(now):
+    def responder(call):
+        if "tlast_over_time" in call["path"] or "tlast_over_time" in call["body"]:
+            value = now.timestamp() - 10
+        else:
+            value = 42.5
+        return 200, {"data": {"result": [{"value": [now.timestamp(), str(value)]}]}}, {}
+    return responder
+
+
+def test_session_is_one_object_per_upstream_and_refuses_unknown_names():
+    first = upstream_http.session("fuseki")
+    assert first is upstream_http.session("fuseki")
+    with pytest.raises(ValueError, match="unknown upstream"):
+        upstream_http.session("qdrant")
+    with pytest.raises(ValueError, match="unknown upstream"):
+        upstream_http.session("")
+
+
+@pytest.mark.real_sessions
+def test_session_is_one_object_across_eight_threads():
+    got = []
+    barrier = threading.Barrier(8)
+
+    def run():
+        barrier.wait()
+        got.append(upstream_http.session("victoriametrics"))
+
+    threads = [threading.Thread(target=run) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(got) == 8 and all(s is got[0] for s in got)
+    assert upstream_http.session("fuseki") is not got[0]
+    assert upstream_http.session("tmf921") is not upstream_http.session("fuseki")
+
+
+@pytest.mark.real_sessions
+def test_reset_sessions_closes_and_forgets():
+    old = upstream_http.session("fuseki")
+    closed = []
+    old.close = lambda: closed.append(True)
+    upstream_http.reset_sessions()
+    assert closed == [True]
+    assert upstream_http.session("fuseki") is not old
+
+
+@pytest.mark.real_sessions
+def test_two_metric_joins_arrive_on_one_tcp_connection(loopback):
+    now = datetime.now(timezone.utc)
+    lb = loopback(_vm_payload(now))
+    endpoint = f"{lb.url}/api/v1/query"
+    envs = [join_observed_metric("Router-A", "Gi0", "latency", "5m",
+                                 query_endpoint=endpoint, now=now) for _ in range(2)]
+    assert len(lb.calls) == 4
+    assert len(lb.ports()) == 1
+
+    def fake_get(url, params=None, timeout=None):
+        r = MagicMock()
+        r.raise_for_status.return_value = None
+        status, payload, _ = _vm_payload(now)({"path": params["query"], "body": ""})
+        r.json.return_value = payload
+        return r
+
+    with patch("requests.get", side_effect=fake_get):
+        expected = join_observed_metric("Router-A", "Gi0", "latency", "5m",
+                                        query_endpoint=endpoint, now=now)
+    assert envs[0].to_dict() == envs[1].to_dict() == expected.to_dict()
+
+
+@pytest.mark.real_sessions
+def test_sessions_never_retry():
+    s = upstream_http.session("tmf921")
+    for prefix in ("http://", "https://"):
+        assert s.get_adapter(prefix + "x").max_retries.total == 0
+
+
+@pytest.mark.real_sessions
+def test_no_cookie_is_kept_and_no_credential_is_held(loopback):
+    lb = loopback(lambda call: (200, {}, {"Set-Cookie": "sid=abc123; Path=/"}))
+    upstream_http.get("tmf921", lb.url + "/a", timeout=5)
+    upstream_http.get("tmf921", lb.url + "/b", timeout=5)
+    assert len(lb.calls) == 2
+    assert "cookie" not in lb.calls[1]["headers"]
+    s = upstream_http.session("tmf921")
+    assert s.auth is None
+    assert "Authorization" not in s.headers
+
+
+def test_shim_passes_keyword_arguments_to_the_patched_function_unchanged():
+    with patch("requests.get") as g:
+        upstream_http.get("victoriametrics", "http://x/q", params={"query": "q"}, timeout=10)
+    g.assert_called_once_with("http://x/q", params={"query": "q"}, timeout=10)
+    with patch("requests.post") as p:
+        upstream_http.post("fuseki", "http://x/s", data="d", headers={"A": "b"}, timeout=3)
+    p.assert_called_once_with("http://x/s", data="d", headers={"A": "b"}, timeout=3)
+
+
+def test_shim_works_with_a_fake_that_has_a_fixed_signature():
+    seen = []
+
+    def fake(url, params=None, timeout=None):
+        seen.append((url, params, timeout))
+        return "ok"
+
+    with patch("requests.get", fake):
+        assert upstream_http.get("victoriametrics", "http://x", params={"a": 1},
+                                 timeout=2) == "ok"
+    assert seen == [("http://x", {"a": 1}, 2)]
+
+
+def test_shim_still_refuses_an_unknown_upstream():
+    with patch("requests.get") as g:
+        with pytest.raises(ValueError, match="unknown upstream"):
+            upstream_http.get("nope", "http://x")
+    g.assert_not_called()
