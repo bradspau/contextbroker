@@ -41,7 +41,7 @@ from data_contracts.metric_map import load_metric_map  # noqa: E402
 from ingestion.telemetry_simulator import HSI_COMPLIANT_RANGES  # noqa: E402
 from intent_management.tmf921_client import Tmf921Client, intent_bounds  # noqa: E402
 from outcome_assurance.evaluate import evaluate_intent  # noqa: E402
-from outcome_assurance.tmf921_report import _short_name, interpret_report  # noqa: E402
+from outcome_assurance.tmf921_report import short_name, interpret_report  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "create_demo_intent.sh"
@@ -88,7 +88,7 @@ def _newest(reports):
 
 
 @pytest.mark.parametrize("probe", PROBES)
-@pytest.mark.parametrize("uri", sorted(METRIC_MAP), ids=lambda u: _short_name(u))
+@pytest.mark.parametrize("uri", sorted(METRIC_MAP), ids=lambda u: short_name(u))
 def test_server_and_local_operator_agree(uri, probe):
     client = Tmf921Client(BASE)
     mapping = METRIC_MAP[uri]
@@ -109,7 +109,7 @@ def test_server_and_local_operator_agree(uri, probe):
         pre = _newest(before)
         # Only the probed metric is missing and its bound is still the original.
         assert pre["intentHandlingReason"].count("no observation") == 1, pre
-        assert _short_name(uri) in pre["intentHandlingReason"], pre
+        assert short_name(uri) in pre["intentHandlingReason"], pre
         assert intent_bounds(client.get_intent(intent_id))[uri] == bound
 
         value = _probe_value(bound, probe)
@@ -127,7 +127,7 @@ def test_server_and_local_operator_agree(uri, probe):
         env = build_observed("probe:probe", value, "probe", stamps[uri], now)
         local = evaluate_intent(spec, {("probe", "probe"): env}).outcome
 
-        evidence = (f"{_short_name(uri)} bound={bound} value={value} ({probe}); "
+        evidence = (f"{short_name(uri)} bound={bound} value={value} ({probe}); "
                     f"map operator {mapping.operator!r} -> local {local.value}; "
                     f"server {report['intentHandlingState']} "
                     f"({report.get('intentHandlingReason')!r}) -> {server.value}")

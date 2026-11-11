@@ -1,8 +1,8 @@
 """No module imports another repository module's underscore name (HYG-02, D-81).
 
 An AST walk over every non-test .py file reports each `from <repository module> import _name`
-as (file, module, name). The found set must equal PENDING exactly, so PENDING can only shrink
-by being edited: a new offence fails the test, and so does fixing one without removing its entry.
+as (file, module, name). The found set must equal PENDING exactly, and PENDING is empty: any private
+import between modules fails the test.
 Tests may use private names of the module they test, so tests/ is not scanned.
 """
 import ast
@@ -16,13 +16,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SKIPPED_DIRS = {"venv", ".venv", "docs", "tests", ".git", "lodlive-proxy", "__pycache__",
                 "node_modules", ".planning", ".sdd", ".beads"}
 
-# The offences that stay until plan 08-12 renames them (the token, intent-id and short-name helpers). Each entry is (file, module, name).
-PENDING = {
-    ("broker_engine/context_eligibility.py", "outcome_assurance.tmf921_report", "_short_name"),
-    ("broker_engine/context_request.py", "outcome_assurance.tmf921_report", "_short_name"),
-    ("ingestion/bind_intent.py", "outcome_assurance.tmf921_report", "_short_name"),
-    ("intent_management/tmf921_source.py", "outcome_assurance.tmf921_report", "_short_name"),
-}
+# Empty since plan 08-12: no module imports another repository module's underscore name. Each entry would be (file, module, name).
+PENDING = set()
 
 
 def repository_modules(root=ROOT):
@@ -71,10 +66,9 @@ def test_the_rule_ignores_relative_imports_and_other_packages():
     assert private_imports(source, "demo.py", {"broker_engine"}) == set()
 
 
-def test_dropping_an_entry_from_pending_makes_the_comparison_fail():
-    shrunk = set(PENDING)
-    shrunk.discard(next(iter(sorted(PENDING))))
-    assert found_offences() != shrunk
+def test_an_entry_in_pending_that_is_not_an_offence_makes_the_comparison_fail():
+    grown = set(PENDING) | {("broker.py", "broker_engine.validation", "_x")}
+    assert found_offences() != grown
 
 
 def test_the_scan_covers_the_broker_packages_and_the_top_level_files():
@@ -96,3 +90,12 @@ def test_the_token_and_intent_id_checks_are_public_not_aliased():
     import intent_management.tmf921_client as client
     assert hasattr(metric_map, "check_token") and not hasattr(metric_map, "_check_token")
     assert hasattr(client, "check_intent_id") and not hasattr(client, "_check_intent_id")
+
+
+def test_the_short_name_helper_is_public_not_aliased():
+    import outcome_assurance.tmf921_report as report
+    assert hasattr(report, "short_name") and not hasattr(report, "_short_name")
+
+
+def test_the_pending_set_is_empty():
+    assert PENDING == set()

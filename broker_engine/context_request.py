@@ -101,7 +101,7 @@ from data_contracts.situation_record import (
 )
 from intent_management.tmf921_source import assess_tmf921_as_of
 from okf_retrieval.service import ApplicableRef, get_service
-from outcome_assurance.tmf921_report import _short_name
+from outcome_assurance.tmf921_report import short_name
 from state_reconciliation.event_reconciler import (
     CONFIGURED_LINK_IN_FORCE,
     ConfiguredSide,
@@ -328,7 +328,7 @@ def _fluent_value(metric, kind, fluent, device_interface, valid_at, retrieved_at
     """One goal or placement fluent as a response value. A placement's value is its node id."""
     value = fluent.value if kind == "goal" else "/".join(device_interface)
     return FluentValue(
-        context_class="goals", kind=kind, subject=_short_name(metric), value=value,
+        context_class="goals", kind=kind, subject=short_name(metric), value=value,
         in_force=fluent.covers(valid_at), valid_from=_iso(fluent.start), valid_to=_iso(fluent.end),
         recorded_at=_iso(fluent.recorded), superseded_at=_iso(fluent.superseded),
         provenance=Provenance(source_system="fuseki", reference=fluent.iri,
@@ -470,7 +470,7 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
                     sorted({metric for metric, _kind in fluents}), observed,
                     valid_at=times.valid_at, limit_s=times.limit_s)
                 for uri, envelope in observed.items():
-                    envelopes.append(EnvelopeOut(metric=_short_name(uri), node=nodes[uri],
+                    envelopes.append(EnvelopeOut(metric=short_name(uri), node=nodes[uri],
                                                  **envelope.to_dict()))
                     if envelope.observed_at is not None:
                         observation_times.append(envelope.observed_at)

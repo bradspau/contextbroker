@@ -26,7 +26,7 @@ def _inconclusive(reason: str) -> Verdict:
                    [reason])
 
 
-def _short_name(uri) -> str:
+def short_name(uri) -> str:
     s = str(uri)
     s = s.split("#")[-1] if "#" in s else s.rstrip("/").split("/")[-1]
     return _SAFE.sub("_", s)[:64] or "unknown"
@@ -112,7 +112,7 @@ def _stale_metric(observed_at, now, max_age_s) -> str | None:
     if not isinstance(observed_at, dict) or not observed_at:
         return "no-freshness-evidence"
     for uri, ts in observed_at.items():
-        name = _short_name(uri)
+        name = short_name(uri)
         if not isinstance(ts, datetime) or ts.tzinfo is None or ts.utcoffset() is None:
             return name
         age = now - ts

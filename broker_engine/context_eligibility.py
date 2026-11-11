@@ -12,7 +12,7 @@ classes the request asked for appear, so a topology-only request is never made i
 stale metric it did not ask for.
 
 Reasons are fixed strings. The only variable part is the short name of a pinned metric URI
-(`_short_name`, letters, digits, dot, underscore, hyphen, at most 64 characters), never text from
+(`short_name`, letters, digits, dot, underscore, hyphen, at most 64 characters), never text from
 a server or a caller (D-15).
 
 Eligibility grants no execution authority (the action-readiness check is a separate component) and
@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 
 from data_contracts.context_contract import ClassEligibility, Eligibility
 from data_contracts.fluents import Fluent, select_in_force
-from outcome_assurance.tmf921_report import _short_name
+from outcome_assurance.tmf921_report import short_name
 
 # A sample stamped this far past the valid time is future-dated (same tolerance as the joiner).
 FUTURE_TOLERANCE_S = 5
@@ -63,7 +63,7 @@ SCOPE_IDENTITIES = ("resolved", "missing", "ambiguous")
 
 
 def _reason(prefix: str, metric: str) -> str:
-    return f"{prefix}: {_short_name(metric)}"
+    return f"{prefix}: {short_name(metric)}"
 
 
 def overlapping(fluents, lo: datetime, hi: datetime, known_at: datetime | None) -> list[Fluent]:

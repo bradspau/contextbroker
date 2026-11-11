@@ -58,7 +58,7 @@ from intent_management.tmf921_client import (
     intent_bounds,
 )
 from outcome_assurance.evaluate import OPERATORS, Outcome, evaluate_intent
-from outcome_assurance.tmf921_report import _short_name, interpret_report
+from outcome_assurance.tmf921_report import short_name, interpret_report
 
 log = logging.getLogger(__name__)
 
@@ -168,7 +168,7 @@ def _goal_changes(doc, binding) -> tuple[list[str], list[dict]]:
     reasons, changes = [], []
     for uri, pinned in binding.bounds.items():
         if uri in current and current[uri] != pinned:
-            name = _short_name(uri)
+            name = short_name(uri)
             reasons.append(f"goal changed: {name} pinned {format(pinned, '.15g')}, "
                            f"now {format(current[uri], '.15g')}")
             changes.append({"metric": name, "pinned": float(pinned),
@@ -184,7 +184,7 @@ def _gap_reasons(binding) -> list[str]:
     A gap is a metric the broker recorded no goal or no placement for at the requested
     time; the assess is inconclusive for the whole intent, never partial.
     """
-    return [f"no {kind} in force: {_short_name(uri)}" for uri, kind in binding.gaps]
+    return [f"no {kind} in force: {short_name(uri)}" for uri, kind in binding.gaps]
 
 
 def _binding_for(intent_id: str, bindings=None, *, valid_at=None,
@@ -307,7 +307,7 @@ def _prepare(intent_id, time_window, binding, client, join, now, metric_map, clo
     for uri in uris:
         m = metric_map.get(uri)
         if m is None or uri not in binding.sources:
-            return _EarlyExit(Outcome.INCONCLUSIVE, [f"unmapped metric: {_short_name(uri)}"])
+            return _EarlyExit(Outcome.INCONCLUSIVE, [f"unmapped metric: {short_name(uri)}"])
         mappings[uri] = m
 
     def read(uri):
@@ -324,7 +324,7 @@ def _prepare(intent_id, time_window, binding, client, join, now, metric_map, clo
     all_envs = tuple(results)
 
     ref = now or clock()
-    problems = [f"{why}: {_short_name(u)}" for u, e in envs.items()
+    problems = [f"{why}: {short_name(u)}" for u, e in envs.items()
                 if (why := _unpushable(e, ref))]
     if problems:  # all-or-nothing: never push a partial set
         return _EarlyExit(Outcome.INCONCLUSIVE, problems, envs=all_envs)
@@ -357,7 +357,7 @@ def _assess_locked(intent_id, plan, binding, client, now, poll_interval_s, poll_
                         or (envs[u].observed_at == m[0] and envs[u].value == m[1]))]
     if regress:
         return done(Outcome.INCONCLUSIVE,
-                    [f"observation not newer than last pushed: {_short_name(u)}" for u in regress],
+                    [f"observation not newer than last pushed: {short_name(u)}" for u in regress],
                     envs=all_envs)
 
     # Goal guard: an assess that waited for the lock may find the goal rewritten by a
@@ -380,7 +380,7 @@ def _assess_locked(intent_id, plan, binding, client, now, poll_interval_s, poll_
     limit = timedelta(seconds=DEFAULT_MAX_AGE_S)
     old = [u for u in uris if ref - envs[u].observed_at > limit]
     if old:
-        return done(Outcome.INCONCLUSIVE, [f"stale observation: {_short_name(u)}" for u in old],
+        return done(Outcome.INCONCLUSIVE, [f"stale observation: {short_name(u)}" for u in old],
                     envs=all_envs)
 
     observed_at = {u: envs[u].observed_at for u in uris}
@@ -402,20 +402,20 @@ def _assess_locked(intent_id, plan, binding, client, now, poll_interval_s, poll_
                 log_fault(log, exc, "partial push")
                 return done(Outcome.INCONCLUSIVE,
                             ["partial push: pushed " + ", ".join(pushed)
-                             + "; failed " + _short_name(u)],
+                             + "; failed " + short_name(u)],
                             envs=all_envs)
             # Only after the post succeeded: a failed post leaves no mark.
             try:
                 if not TMF921_STORE.advance_mark(intent_id, u, envs[u].observed_at,
                                                  envs[u].value):
-                    log.warning("high-water mark not advanced: %s", _short_name(u))
+                    log.warning("high-water mark not advanced: %s", short_name(u))
             except StateUnavailable as exc:
                 # The post cannot be undone and is not retried: leave the pinned
                 # names of what was pushed for the operator (D-R4).
                 log_fault(log, exc, "state store unavailable after push: pushed "
-                          + ", ".join([*pushed, _short_name(u)]))
+                          + ", ".join([*pushed, short_name(u)]))
                 raise
-            pushed.append(_short_name(u))
+            pushed.append(short_name(u))
         report = None
         waited = 0.0
         start = monotonic()
@@ -476,7 +476,7 @@ def _goal_entries(binding) -> list[dict]:
     entries = []
     for uri, value in binding.bounds.items():
         start, end = binding.goal_intervals.get(uri, (None, None))
-        entries.append({"metric": _short_name(uri), "value": float(value),
+        entries.append({"metric": short_name(uri), "value": float(value),
                         "valid_from": start, "valid_to": end})
     return sorted(entries, key=lambda e: e["metric"])
 
@@ -595,7 +595,7 @@ def assess_tmf921_as_of(
     # First pass, in metric order, reads nothing: each metric gets its problem or its spec.
     plan = []  # (name, device, interface, problem, spec)
     for uri, bound in binding.bounds.items():
-        name = _short_name(uri)
+        name = short_name(uri)
         device, interface = binding.sources.get(uri, (None, None))
         mapping = metric_map.get(uri)
         goal_start = binding.goal_intervals.get(uri, (None, None))[0]

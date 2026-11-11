@@ -63,7 +63,7 @@ from intent_management.tmf921_client import (
     check_intent_id,
     intent_bounds,
 )
-from outcome_assurance.tmf921_report import _short_name
+from outcome_assurance.tmf921_report import short_name
 
 NS = "http://example.org/network-ontology#"
 
@@ -88,7 +88,7 @@ def _ms(dt: datetime) -> datetime:
 
 
 def _binding_name(intent_id: str, metric_uri: str) -> str:
-    return f"binding-{intent_id}-{_short_name(metric_uri)}"
+    return f"binding-{intent_id}-{short_name(metric_uri)}"
 
 
 def _parse_valid_from(text: str) -> datetime:
@@ -133,10 +133,10 @@ def plan_changes(intent_id, bounds, placements, interface_iris, stored, now, *,
         except ValueError:
             raise BindError("a metric URI is not usable") from None
         if uri not in placements:
-            raise BindError(f"no placement for {_short_name(uri)}")
+            raise BindError(f"no placement for {short_name(uri)}")
         iri = interface_iris.get(placements[uri])
         if iri is None:
-            raise BindError(f"no interface for {_short_name(uri)}")
+            raise BindError(f"no interface for {short_name(uri)}")
         try:
             check_uri(iri, "interface iri")
         except ValueError:
@@ -293,11 +293,11 @@ def bind(intent_id, place_specs, *, abox_dir=DEFAULT_ABOX_DIR, write_only=False,
         raise BindError("the metric map could not be read") from None
     for metric in sorted({m for m, _kind in stored}):
         if metric not in bounds:
-            raise BindError(f"the intent no longer has {_short_name(metric)}; "
+            raise BindError(f"the intent no longer has {short_name(metric)}; "
                             "bind it under a new intent id")
     by_short: dict[str, list[str]] = {}
     for uri in bounds:
-        by_short.setdefault(_short_name(uri), []).append(uri)
+        by_short.setdefault(short_name(uri), []).append(uri)
     placements: dict[str, tuple[str, str]] = {}
     for spec in place_specs:
         short, device, iface = parse_place(spec)
@@ -309,9 +309,9 @@ def bind(intent_id, place_specs, *, abox_dir=DEFAULT_ABOX_DIR, write_only=False,
         placements[uris[0]] = (device, iface)
     for uri in bounds:
         if uri not in placements:
-            raise BindError(f"no placement for {_short_name(uri)}")
+            raise BindError(f"no placement for {short_name(uri)}")
         if uri not in mmap:
-            raise BindError(f"{_short_name(uri)} is not in the metric map")
+            raise BindError(f"{short_name(uri)} is not in the metric map")
     iris = {}
     for device, iface in set(placements.values()):
         iris[(device, iface)] = find_interface(device, iface, query_endpoint)

@@ -19,7 +19,7 @@ import rdflib
 from rdflib import BNode, URIRef
 
 from data_contracts import fluents as _f
-from outcome_assurance.tmf921_report import _short_name
+from outcome_assurance.tmf921_report import short_name
 
 NS = "http://example.org/network-ontology#"
 LAT = "http://broadband-forum.org/Intent#LatencyMetric"
@@ -99,7 +99,7 @@ def bind(fx, intent_id="i1", metric=LAT, goal=100.0, place=IF0, at=T0) -> str:
 
     Returns the binding node IRI, which names the fluents (so two metrics get two nodes).
     """
-    binding = f"{NS}binding-{intent_id}-{_short_name(metric)}"
+    binding = f"{NS}binding-{intent_id}-{short_name(metric)}"
     g = rdflib.Graph()
     _f.add_binding(g, binding, intent_id, metric)
     _f.add_goal(g, binding, goal, at, at)

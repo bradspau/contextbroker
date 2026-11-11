@@ -496,7 +496,7 @@ def test_eligibility_imports_nothing_from_the_verdict_path():
     found = imported(ce.__file__)
     assert [m for m, _ in found if m and m.startswith(FORBIDDEN)] == []
     from_report = [names for m, names in found if m == "outcome_assurance.tmf921_report"]
-    assert from_report == [["_short_name"]]
+    assert from_report == [["short_name"]]
 
 
 def test_eligibility_neither_takes_nor_returns_a_verdict():
