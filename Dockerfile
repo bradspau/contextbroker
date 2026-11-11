@@ -1,8 +1,8 @@
-FROM python:3.14-slim
+FROM python:3.14-slim@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --require-hashes --only-binary=:all: -r requirements.txt
 # The two embedding models for knowledge retrieval, fetched once at build time by commit, so the
 # running container never reaches out for one (HF_HUB_OFFLINE below). Each repository's README
 # carries its licence and stays with the files. okf_retrieval/config.py holds the same revisions

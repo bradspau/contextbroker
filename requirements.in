@@ -1,0 +1,27 @@
+# The human list of direct dependencies. requirements.txt is generated from it, with every
+# release file hash, and the API image installs that file with --require-hashes. Regenerate with
+#   pip-compile --generate-hashes --strip-extras --output-file=requirements.txt requirements.in
+# using pip-tools in a throwaway virtual environment outside this repository (never in venv/ and
+# never in the image). Keep the versions already in requirements.txt unless you mean to upgrade.
+#
+# Audit (phase 8, 2026-11-11): every pin below is imported by non-test code or run by the
+# Dockerfile (uvicorn is the CMD; huggingface_hub is the model download RUN). httpx2 and httpcore2
+# are not listed here: they are required by anthropic 1.4.0, openai 3.11.0 and mcp 2.3.0 (kept as
+# dependencies, maintained by Pydantic). Nothing was removed.
+#
+# PyJWT and cryptography are imported directly by broker_engine/auth.py and scripts/mint_token.py
+anthropic==1.4.0
+cryptography==50.0.2
+fastapi==0.162.0
+fastembed==0.9.1
+huggingface_hub==1.33.0
+openai==3.11.0
+pydantic==2.13.5
+PyJWT==2.15.1
+pyshacl==0.40.1
+python-dotenv==1.2.3
+PyYAML==6.0.3
+qdrant-client==1.20.0
+rdflib==7.6.0
+requests==2.34.2
+uvicorn==0.54.0
