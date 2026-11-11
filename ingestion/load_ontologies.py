@@ -4,6 +4,7 @@ Only allow-listed TBox files load. An ABox file loads only if its name is on
 ABOX_STATIC_ALLOWLIST (the tracked demo topology) or its first line is ABOX_MARKER, which
 ingestion.bind_intent writes; any other file is refused before validation and before any POST."""
 import argparse
+import os
 import pathlib
 from pathlib import Path
 
@@ -19,7 +20,10 @@ DEFAULT_TBOX_DIR = REPO_ROOT / "ontologies" / "tbox"
 DEFAULT_SHACL_DIR = REPO_ROOT / "ontologies" / "shacl"
 DEFAULT_ABOX_DIR = REPO_ROOT / "ontologies" / "abox"
 DEFAULT_TTL_PATH = DEFAULT_TBOX_DIR / "topology.ttl"
-DEFAULT_DATA_ENDPOINT = "http://localhost:3030/network-dataset/data"
+# Read once at import, like FUSEKI_QUERY_ENDPOINT; the shell environment supplies it. The binder
+# and seed_graph.py import this constant.
+DEFAULT_DATA_ENDPOINT = os.environ.get(
+    "FUSEKI_DATA_ENDPOINT", "http://localhost:3030/network-dataset/data")
 # Only our own TBox loads; licensed ontology files are refused even if copied into the directory.
 TBOX_ALLOWLIST = ("topology.ttl",)
 # The first line of every ABox file ingestion.bind_intent writes. An ABox file loads only when its
@@ -137,7 +141,8 @@ def main() -> None:
     ap.add_argument("--tbox-dir", type=pathlib.Path, default=DEFAULT_TBOX_DIR)
     ap.add_argument("--shacl-dir", type=pathlib.Path, default=DEFAULT_SHACL_DIR)
     ap.add_argument("--abox-dir", type=pathlib.Path, default=DEFAULT_ABOX_DIR)
-    ap.add_argument("--endpoint", default=DEFAULT_DATA_ENDPOINT)
+    ap.add_argument("--endpoint", default=DEFAULT_DATA_ENDPOINT,
+                    help="Fuseki data endpoint (default FUSEKI_DATA_ENDPOINT)")
     args = ap.parse_args()
     fuseki_credentials()
     load_ontologies(args.tbox_dir, args.shacl_dir, args.endpoint, abox_dir=args.abox_dir)

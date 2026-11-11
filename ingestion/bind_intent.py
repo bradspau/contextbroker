@@ -383,7 +383,8 @@ def main(argv=None) -> int:
                          "the old goal)")
     ap.add_argument("--abox-dir", type=Path, default=DEFAULT_ABOX_DIR)
     ap.add_argument("--endpoint", default=DEFAULT_DATA_ENDPOINT,
-                    help="Fuseki data endpoint (the update endpoint is derived from it)")
+                    help="Fuseki data endpoint (default FUSEKI_DATA_ENDPOINT; the update endpoint "
+                         "is derived from it)")
     ap.add_argument("--query-endpoint", default=FUSEKI_QUERY_ENDPOINT,
                     help="Fuseki query endpoint (default FUSEKI_QUERY_ENDPOINT)")
     ap.add_argument("--update-endpoint", default=None,
