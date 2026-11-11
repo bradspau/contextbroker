@@ -47,7 +47,7 @@ from data_contracts.fluents import (
     parse_dt,
     supersede,
 )
-from data_contracts.metric_map import _check_token, check_uri, load_metric_map
+from data_contracts.metric_map import check_token, check_uri, load_metric_map
 from ingestion.load_ontologies import (
     ABOX_MARKER,
     DEFAULT_ABOX_DIR,
@@ -60,7 +60,7 @@ from ingestion.load_ontologies import (
 from intent_management.tmf921_client import (
     Tmf921Client,
     Tmf921Error,
-    _check_intent_id,
+    check_intent_id,
     intent_bounds,
 )
 from outcome_assurance.tmf921_report import _short_name
@@ -118,7 +118,7 @@ def plan_changes(intent_id, bounds, placements, interface_iris, stored, now, *,
     A goal is compared as float and a placement by interface IRI. An empty graph means the
     binding already matches. Every recordedAt is `now`.
     """
-    _check_intent_id(intent_id)
+    check_intent_id(intent_id)
     if not bounds:
         raise BindError("no readable goals")
     known = {m for m, _kind in stored}
@@ -201,9 +201,9 @@ def parse_place(spec: str) -> tuple[str, str, str]:
     if not (eq and slash and short and device and iface):
         raise BindError(f"bad --place, expected Metric=device/interface: {spec!r}")
     try:
-        _check_token(short, "metric")
-        _check_token(device, "device")
-        _check_token(iface, "interface")
+        check_token(short, "metric")
+        check_token(device, "device")
+        check_token(iface, "interface")
     except ValueError:
         raise BindError(f"unsafe value in --place: {spec!r}") from None
     return short, device, iface
@@ -211,8 +211,8 @@ def parse_place(spec: str) -> tuple[str, str, str]:
 
 def find_interface(device: str, iface: str, query_endpoint: str) -> str:
     """The interface node's IRI, or BindError if absent or ambiguous."""
-    _check_token(device, "device")
-    _check_token(iface, "interface")
+    check_token(device, "device")
+    check_token(iface, "interface")
     sparql = f"""
     PREFIX : <{NS}>
     SELECT ?i WHERE {{
@@ -263,7 +263,7 @@ def bind(intent_id, place_specs, *, abox_dir=DEFAULT_ABOX_DIR, write_only=False,
     confirmed it (or at once with write_only, which posts nothing). `now` is the one
     instant of the run: every recordedAt, and the end of a replaced fluent, is `now`.
     """
-    _check_intent_id(intent_id)
+    check_intent_id(intent_id)
     if replace and correct:
         raise BindError("--replace and --correct cannot be used together")
     if valid_from is not None and (not replace or correct):

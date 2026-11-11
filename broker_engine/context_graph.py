@@ -16,7 +16,7 @@ node, only to learn whether depth cut something allowed.
 This module returns findings as flags (``scope_identity``, ``conflicting_links``,
 ``colliding_ids``, ``malformed``) and never reason text; plan 03-04's ``topology_eligibility`` turns
 them into fixed reasons. It reads and never writes. A device string or IRI reaches a query only
-after ``_check_token`` or ``check_uri``, including values read back from Fuseki before they are
+after ``check_token`` or ``check_uri``, including values read back from Fuseki before they are
 reused in the next level's query; a value that fails is reported as a fixed
 ``malformed topology result`` and is never echoed.
 """
@@ -40,7 +40,7 @@ from data_contracts.context_contract import (
     Provenance,
 )
 from data_contracts.fluents import NS, Fluent, parse_dt
-from data_contracts.metric_map import _check_token, check_uri
+from data_contracts.metric_map import check_token, check_uri
 
 MALFORMED = "malformed topology result"
 _ACCEPT = {"Accept": "application/sparql-results+json"}
@@ -112,7 +112,7 @@ def _time(value):
 def read_device_interfaces(devices, query_endpoint=FUSEKI_QUERY_ENDPOINT) -> list[tuple[str, str, str]]:
     """One SELECT for every interface of the given devices: ``(iri, device, interfaceName)`` rows
     sorted by IRI. An empty list of devices sends no query."""
-    devices = sorted({_check_token(d, "device") for d in devices})
+    devices = sorted({check_token(d, "device") for d in devices})
     if not devices:
         return []
     values = " ".join(f'"{d}"' for d in devices)
@@ -125,8 +125,8 @@ def read_device_interfaces(devices, query_endpoint=FUSEKI_QUERY_ENDPOINT) -> lis
     out = []
     for binding in _select(query_endpoint, sparql):
         iri = _checked(check_uri, _value(binding, "i"), "interface iri")
-        device = _checked(_check_token, _value(binding, "d"), "device")
-        name = _checked(_check_token, _value(binding, "n"), "interface")
+        device = _checked(check_token, _value(binding, "d"), "device")
+        name = _checked(check_token, _value(binding, "n"), "interface")
         if device not in devices:
             raise MalformedTopology()
         out.append((iri, device, name))
@@ -144,7 +144,7 @@ def read_device_names(query_endpoint=FUSEKI_QUERY_ENDPOINT) -> list[str]:
     }}"""
     names = set()
     for binding in _select(query_endpoint, sparql):
-        names.add(_checked(_check_token, _value(binding, "d"), "device"))
+        names.add(_checked(check_token, _value(binding, "d"), "device"))
     return sorted(names)
 
 
@@ -183,11 +183,11 @@ def read_links(interface_iris, query_endpoint=FUSEKI_QUERY_ENDPOINT) -> list[dic
             "fluent": _checked(check_uri, _value(binding, "lf"), "fluent iri"),
             "link": _checked(check_uri, _value(binding, "link"), "link iri"),
             "self": own,
-            "self_device": _checked(_check_token, _value(binding, "sd"), "device"),
-            "self_name": _checked(_check_token, _value(binding, "sn"), "interface"),
+            "self_device": _checked(check_token, _value(binding, "sd"), "device"),
+            "self_name": _checked(check_token, _value(binding, "sn"), "interface"),
             "other": _checked(check_uri, _value(binding, "other", required=False), "interface iri"),
-            "other_device": _checked(_check_token, _value(binding, "od", required=False), "device"),
-            "other_name": _checked(_check_token, _value(binding, "on", required=False), "interface"),
+            "other_device": _checked(check_token, _value(binding, "od", required=False), "device"),
+            "other_name": _checked(check_token, _value(binding, "on", required=False), "interface"),
             "start": _time(_value(binding, "vs")),
             "end": _time(_value(binding, "ve", required=False)),
             "recorded": _time(_value(binding, "ra")),
@@ -509,9 +509,9 @@ def build_graph(device, interface, *, max_depth, relationship_types, valid_at, k
     authorised before any upstream call. ``priority`` holds the node ids that carry envelopes: when
     the node cap bites they are kept before others at the same level. A request for more than
     MAX_DEPTH never reaches here (the request model refuses it)."""
-    _check_token(device, "device")
+    check_token(device, "device")
     if interface is not None:
-        _check_token(interface, "interface")
+        check_token(interface, "interface")
     if isinstance(max_depth, bool) or not isinstance(max_depth, int) or not 0 <= max_depth <= MAX_DEPTH:
         raise ValueError("max_depth out of range")
     if isinstance(node_cap, bool) or not isinstance(node_cap, int) or node_cap < 1:
@@ -558,7 +558,7 @@ def device_links_in_force(device, *, valid_at: datetime, known_at: datetime | No
     shown nor counted (D-26). An end on the device itself is always covered. A malformed read back
     or a conflicting selection is ``invalid``; a Fuseki failure propagates as ``requests``'s error.
     It reads and never writes."""
-    _check_token(device, "device")
+    check_token(device, "device")
     for moment in (valid_at, known_at):
         if moment is not None and (not isinstance(moment, datetime) or moment.utcoffset() is None):
             raise ValueError("timestamp needs a zone")

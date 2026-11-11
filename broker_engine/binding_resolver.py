@@ -25,15 +25,15 @@ from broker_engine.sparql_resolver import FUSEKI_QUERY_ENDPOINT, fuseki_auth
 from broker_engine.validation import REQUEST_TIMEOUT_S
 from data_contracts.fluents import Fluent, parse_dt, select_in_force
 from data_contracts.intent_bindings import IntentBinding
-from data_contracts.metric_map import _check_token, check_uri
-from intent_management.tmf921_client import _check_intent_id
+from data_contracts.metric_map import check_token, check_uri
+from intent_management.tmf921_client import check_intent_id
 
 _KINDS = ("goal", "placement")
 
 
 def _build_binding_sparql(intent_id: str) -> str:
     # Only the validated intent id (letters, digits, hyphen) enters the query.
-    _check_intent_id(intent_id)
+    check_intent_id(intent_id)
     return f"""
     PREFIX : <http://example.org/network-ontology#>
     SELECT ?metric ?kind ?f ?val ?vs ?ve ?ra ?sa ?device ?iface WHERE {{
@@ -119,7 +119,7 @@ def fetch_fluents(intent_id: str, query_endpoint: str = FUSEKI_QUERY_ENDPOINT):
             value = check_uri(row["val"], "interface iri")
             if row["device"] is None or row["iface"] is None:
                 raise ValueError("malformed binding result")
-            where = (_check_token(row["device"], "device"), _check_token(row["iface"], "interface"))
+            where = (check_token(row["device"], "device"), check_token(row["iface"], "interface"))
             if interfaces.setdefault(value, where) != where:
                 raise ValueError("duplicate binding for metric")
         start, recorded = _time(row["vs"]), _time(row["ra"])

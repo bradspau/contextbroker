@@ -54,7 +54,7 @@ from data_contracts.metric_map import load_metric_map
 from intent_management.store import IntentStore
 from intent_management.tmf921_client import (
     Tmf921Client,
-    _check_intent_id,
+    check_intent_id,
     intent_bounds,
 )
 from outcome_assurance.evaluate import OPERATORS, Outcome, evaluate_intent
@@ -238,7 +238,7 @@ def assess_via_tmf921(
     monotonic=time.monotonic,
 ) -> dict:
     # Caller input first: a bad value is a client error before any HTTP.
-    _check_intent_id(intent_id)
+    check_intent_id(intent_id)
     if not isinstance(time_window, str) or not SAFE_WINDOW.match(time_window):
         raise ClientInputError(f"Unsafe time_window: {time_window!r}")
     join = join or join_observed_metric
@@ -525,7 +525,7 @@ def assess_tmf921_as_of(
     strings; server text never reaches the result.
     """
     # Caller input first: a bad value is a client error before any I/O.
-    _check_intent_id(intent_id)
+    check_intent_id(intent_id)
     if not isinstance(time_window, str) or not SAFE_WINDOW.match(time_window):
         raise ClientInputError(f"Unsafe time_window: {time_window!r}")
     if mode not in (None, "at", "within"):

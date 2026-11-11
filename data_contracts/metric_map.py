@@ -46,7 +46,7 @@ class MetricMapping:
     operator: str | None = None
 
 
-def _check_token(value, label: str) -> str:
+def check_token(value, label: str) -> str:
     if not isinstance(value, str) or not SAFE_TOKEN.match(value):
         raise ValueError(f"unsafe {label}: {value!r}")
     return value
@@ -123,7 +123,7 @@ def _parse(path: Path) -> dict[str, MetricMapping]:
         if not isinstance(item, dict):
             raise ValueError("metric map entries must be objects")
         uri = check_uri(item.get("metric_uri"))
-        broker = _check_token(item.get("broker_metric"), "broker_metric")
+        broker = check_token(item.get("broker_metric"), "broker_metric")
         unit = item.get("unit")
         if unit is not None and (not isinstance(unit, str) or unit not in ALLOWED_UNITS):
             raise ValueError(f"unit not allowed: {unit!r}")

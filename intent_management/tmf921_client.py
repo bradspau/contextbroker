@@ -46,7 +46,7 @@ class Tmf921Error(Exception):
     """TMF921 server unavailable or returned something unusable (generic text)."""
 
 
-def _check_intent_id(intent_id) -> str:
+def check_intent_id(intent_id) -> str:
     if not isinstance(intent_id, str) or not _INTENT_ID.fullmatch(intent_id):
         raise ClientInputError("Invalid intent_id")
     return intent_id
@@ -151,13 +151,13 @@ class Tmf921Client:
             raise Tmf921Error("TMF921 request failed") from None
 
     def get_intent(self, intent_id: str) -> dict:
-        data = self._get_json(f"/intent/{_check_intent_id(intent_id)}")
+        data = self._get_json(f"/intent/{check_intent_id(intent_id)}")
         if not isinstance(data, dict):
             raise Tmf921Error("TMF921 response unusable")
         return data
 
     def list_reports(self, intent_id: str) -> list[dict]:
-        data = self._get_json(f"/intent/{_check_intent_id(intent_id)}/intentReport")
+        data = self._get_json(f"/intent/{check_intent_id(intent_id)}/intentReport")
         if not isinstance(data, list) or not all(isinstance(d, dict) for d in data):
             raise Tmf921Error("TMF921 response unusable")
         return data
@@ -165,7 +165,7 @@ class Tmf921Client:
     def post_observation(self, intent_id: str, metric_uri: str, value: float,
                          unit: str | None = None,
                          obtained_at: datetime | None = None) -> None:
-        _check_intent_id(intent_id)
+        check_intent_id(intent_id)
         try:
             check_uri(metric_uri)
         except ValueError:

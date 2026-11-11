@@ -18,12 +18,6 @@ SKIPPED_DIRS = {"venv", ".venv", "docs", "tests", ".git", "lodlive-proxy", "__py
 
 # The offences that stay until plan 08-12 renames them (the token, intent-id and short-name helpers). Each entry is (file, module, name).
 PENDING = {
-    ("broker_engine/binding_resolver.py", "data_contracts.metric_map", "_check_token"),
-    ("broker_engine/context_graph.py", "data_contracts.metric_map", "_check_token"),
-    ("ingestion/bind_intent.py", "data_contracts.metric_map", "_check_token"),
-    ("broker_engine/binding_resolver.py", "intent_management.tmf921_client", "_check_intent_id"),
-    ("ingestion/bind_intent.py", "intent_management.tmf921_client", "_check_intent_id"),
-    ("intent_management/tmf921_source.py", "intent_management.tmf921_client", "_check_intent_id"),
     ("broker_engine/context_eligibility.py", "outcome_assurance.tmf921_report", "_short_name"),
     ("broker_engine/context_request.py", "outcome_assurance.tmf921_report", "_short_name"),
     ("ingestion/bind_intent.py", "outcome_assurance.tmf921_report", "_short_name"),
@@ -95,3 +89,10 @@ def test_the_old_validation_names_are_gone_not_aliased(old):
     from broker_engine import validation
     assert not hasattr(validation, old)
     assert hasattr(validation, old.lstrip("_"))
+
+
+def test_the_token_and_intent_id_checks_are_public_not_aliased():
+    import data_contracts.metric_map as metric_map
+    import intent_management.tmf921_client as client
+    assert hasattr(metric_map, "check_token") and not hasattr(metric_map, "_check_token")
+    assert hasattr(client, "check_intent_id") and not hasattr(client, "_check_intent_id")
