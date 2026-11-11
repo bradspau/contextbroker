@@ -26,5 +26,6 @@ CLAUDE.md
 AGENTS.md
 planning.md
 requirements-mcp.txt
+requirements-mcp.in
 *.pem
 *.key

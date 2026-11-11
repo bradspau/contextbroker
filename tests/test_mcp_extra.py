@@ -43,12 +43,27 @@ BLOCK_MCP = (
 )
 
 
+def _logical(path):
+    """The file's requirement lines with backslash continuations joined and comments dropped."""
+    out = []
+    pending = ""
+    for raw in path.read_text().splitlines():
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        if line.endswith("\\"):
+            pending += line[:-1].strip() + " "
+            continue
+        out.append((pending + line.strip()).strip())
+        pending = ""
+    return out
+
+
 def _pins(path):
-    """name -> version for every name==version line; comments and blanks are skipped."""
+    """name -> version for every name==version requirement, hashed or not."""
     pins = {}
-    for line in path.read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        match = re.fullmatch(r"([A-Za-z0-9_.\-]+)==(\S+)", line)
+    for line in _logical(path):
+        match = re.match(r"([A-Za-z0-9_.\-]+)==(\S+)(?: |$)", line)
         if match:
             pins[canonicalize_name(match.group(1))] = match.group(2)
     return pins
@@ -63,15 +78,34 @@ def _lines(path):
     return out
 
 
+def test_the_default_lock_is_read_and_is_not_empty():
+    assert len(_pins(ROOT / "requirements.txt")) > 50
+
+
 def test_the_default_install_list_holds_none_of_the_nine_mcp_pins():
-    assert set(_pins(ROOT / "requirements.txt")) & set(MOVED) == set()
+    default = _pins(ROOT / "requirements.txt")
+    assert len(default) > 50
+    assert set(default) & set(MOVED) == set()
 
 
-def test_the_extra_includes_the_default_list_first_and_holds_exactly_the_nine_pins():
-    lines = _lines(ROOT / "requirements-mcp.txt")
-    assert lines[0] == "-r requirements.txt"
-    assert len(lines) == 1 + len(MOVED)
-    assert _pins(ROOT / "requirements-mcp.txt") == MOVED
+def test_the_extra_is_the_default_lock_plus_exactly_the_nine_pins():
+    default = _pins(ROOT / "requirements.txt")
+    extra = _pins(ROOT / "requirements-mcp.txt")
+    assert len(default) > 50
+    for name, version in default.items():
+        assert extra.get(name) == version, name
+    for name, version in MOVED.items():
+        assert extra.get(canonicalize_name(name)) == version, name
+    assert set(extra) == set(default) | set(MOVED)
+
+
+def test_the_extra_is_generated_from_its_inputs_with_the_default_lock_as_a_constraint():
+    inputs = _lines(ROOT / "requirements-mcp.in")
+    assert inputs[:3] == ["-c requirements.txt", "-r requirements.in", "mcp==2.3.0"]
+    assert len(inputs) == 3
+    assert all(line for line in _logical(ROOT / "requirements-mcp.txt"))
+    for line in _logical(ROOT / "requirements-mcp.txt"):
+        assert "--hash=sha256:" in line, line[:60]
 
 
 def test_no_default_package_requires_one_of_the_nine():
@@ -116,7 +150,9 @@ def test_the_dockerfile_installs_the_default_list_only():
 
 
 def test_the_build_context_excludes_the_extra():
-    assert "requirements-mcp.txt" in _lines(ROOT / ".dockerignore")
+    ignored = _lines(ROOT / ".dockerignore")
+    assert "requirements-mcp.txt" in ignored
+    assert "requirements-mcp.in" in ignored
 
 
 def test_importing_the_broker_module_loads_no_mcp_module(tmp_path):
