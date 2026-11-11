@@ -18,8 +18,9 @@ text is never put into an exception message.
 import math
 from datetime import datetime, timezone
 
-import requests
+import requests  # noqa: F401 -- tests patch broker_engine.binding_resolver.requests.post
 
+from broker_engine import upstream_http
 from broker_engine.sparql_resolver import FUSEKI_QUERY_ENDPOINT, fuseki_auth
 from broker_engine.validation import REQUEST_TIMEOUT_S
 from data_contracts.fluents import Fluent, parse_dt, select_in_force
@@ -86,13 +87,11 @@ def fetch_fluents(intent_id: str, query_endpoint: str = FUSEKI_QUERY_ENDPOINT):
     (device, interface name). No binding node at all gives ({}, {}).
     """
     sparql = _build_binding_sparql(intent_id)
-    response = requests.post(
-        query_endpoint,
-        data={"query": sparql},
-        headers={"Accept": "application/sparql-results+json"},
-        auth=fuseki_auth(),
-        timeout=REQUEST_TIMEOUT_S,
-    )
+    response = upstream_http.post("fuseki", query_endpoint,
+                                  data={"query": sparql},
+                                  headers={"Accept": "application/sparql-results+json"},
+                                  auth=fuseki_auth(),
+                                  timeout=REQUEST_TIMEOUT_S)
     response.raise_for_status()
     try:
         rows = response.json()["results"]["bindings"]

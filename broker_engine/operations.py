@@ -6,8 +6,9 @@ conflicts) so "no data" is never mistaken for "zero" or "none".
 import math
 from datetime import datetime, timedelta, timezone
 
-import requests
+import requests  # noqa: F401 -- tests patch broker_engine.operations.requests.get and .post
 
+from broker_engine import upstream_http
 from broker_engine.sparql_resolver import FUSEKI_QUERY_ENDPOINT, fuseki_auth
 from broker_engine.tsdb_joiner import VM_QUERY_ENDPOINT
 from broker_engine.validation import (
@@ -39,8 +40,9 @@ def _check_window(time_window):
 
 
 def _vector(endpoint, promql, extra):
-    response = requests.get(endpoint, params={"query": promql, **extra},
-                            timeout=REQUEST_TIMEOUT_S)
+    response = upstream_http.get("victoriametrics", endpoint,
+                                 params={"query": promql, **extra},
+                                 timeout=REQUEST_TIMEOUT_S)
     response.raise_for_status()
     return response.json()["data"]["result"]
 
@@ -226,9 +228,9 @@ def interface_neighbours(device, interface, *, query_endpoint=FUSEKI_QUERY_ENDPO
         OPTIONAL {{ ?link rdfs:label ?label }}
       }}
     }}"""
-    response = requests.post(query_endpoint, data={"query": sparql},
-                             headers={"Accept": "application/sparql-results+json"},
-                             auth=fuseki_auth(), timeout=REQUEST_TIMEOUT_S)
+    response = upstream_http.post("fuseki", query_endpoint, data={"query": sparql},
+                                  headers={"Accept": "application/sparql-results+json"},
+                                  auth=fuseki_auth(), timeout=REQUEST_TIMEOUT_S)
     response.raise_for_status()
     rows = response.json()["results"]["bindings"]
     out = {"entity_id": f"{device}:{interface}", "state": "configured", "source": "fuseki",

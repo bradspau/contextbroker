@@ -23,8 +23,9 @@ reused in the next level's query; a value that fails is reported as a fixed
 from dataclasses import dataclass
 from datetime import datetime
 
-import requests
+import requests  # noqa: F401 -- tests patch broker_engine.context_graph.requests.post
 
+from broker_engine import upstream_http
 from broker_engine.sparql_resolver import FUSEKI_QUERY_ENDPOINT, fuseki_auth
 from broker_engine.validation import REQUEST_TIMEOUT_S
 from data_contracts.context_contract import (
@@ -63,8 +64,9 @@ def local_name(iri: str) -> str:
 
 
 def _select(query_endpoint, sparql) -> list[dict]:
-    response = requests.post(query_endpoint, data={"query": sparql}, headers=_ACCEPT,
-                             auth=fuseki_auth(), timeout=REQUEST_TIMEOUT_S)
+    response = upstream_http.post("fuseki", query_endpoint, data={"query": sparql},
+                                  headers=_ACCEPT, auth=fuseki_auth(),
+                                  timeout=REQUEST_TIMEOUT_S)
     response.raise_for_status()
     try:
         bindings = response.json()["results"]["bindings"]

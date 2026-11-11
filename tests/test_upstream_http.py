@@ -201,3 +201,71 @@ def test_shim_still_refuses_an_unknown_upstream():
         with pytest.raises(ValueError, match="unknown upstream"):
             upstream_http.get("nope", "http://x")
     g.assert_not_called()
+
+
+# ---- Fuseki and operations reads (plan 08-01 task 2) ---------------------------------
+
+
+def _fuseki_empty(call):
+    return 200, {"head": {"vars": []}, "results": {"bindings": []}}, {}
+
+
+def _basic_credential(call):
+    import base64
+
+    header = call["headers"].get("authorization", "")
+    assert header.startswith("Basic ")
+    return base64.b64decode(header[6:]).decode()
+
+
+@pytest.mark.real_sessions
+def test_graph_reads_share_one_fuseki_connection_with_basic_auth(loopback, monkeypatch):
+    from broker_engine.binding_resolver import fetch_fluents
+    from broker_engine.context_graph import read_device_names
+    from broker_engine.operations import interface_neighbours
+
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "first0value")
+    lb = loopback(_fuseki_empty)
+    endpoint = f"{lb.url}/ds/query"
+    interface_neighbours("Router-A", "Gi0", query_endpoint=endpoint)
+    fetch_fluents("intent-1", query_endpoint=endpoint)
+    read_device_names(query_endpoint=endpoint)
+    assert len(lb.calls) == 3
+    assert len(lb.ports()) == 1
+    assert {_basic_credential(c) for c in lb.calls} == {"admin:first0value"}
+
+
+@pytest.mark.real_sessions
+def test_a_rotated_fuseki_credential_is_sent_on_the_next_call(loopback, monkeypatch):
+    from broker_engine.operations import interface_neighbours
+
+    lb = loopback(_fuseki_empty)
+    endpoint = f"{lb.url}/ds/query"
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "first0value")
+    interface_neighbours("Router-A", "Gi0", query_endpoint=endpoint)
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "second0value")
+    interface_neighbours("Router-A", "Gi0", query_endpoint=endpoint)
+    assert [_basic_credential(c) for c in lb.calls] == ["admin:first0value",
+                                                         "admin:second0value"]
+    assert upstream_http.session("fuseki").auth is None
+
+
+@pytest.mark.real_sessions
+def test_operations_and_a_join_reach_victoriametrics_on_one_connection(loopback):
+    from broker_engine.operations import interfaces_with_nonzero
+
+    now = datetime.now(timezone.utc)
+
+    def responder(call):
+        ts = now.timestamp() - 10 if "tlast_over_time" in call["path"] else 5
+        series = {"metric": {"interface": "Gi0"}, "value": [now.timestamp(), str(ts)]}
+        return 200, {"data": {"result": [series]}}, {}
+
+    lb = loopback(responder)
+    endpoint = f"{lb.url}/api/v1/query"
+    out = interfaces_with_nonzero("Router-A", "latency", "5m", query_endpoint=endpoint, now=now)
+    assert out["interfaces_examined"] == 1
+    assert len(lb.calls) == 4
+    join_observed_metric("Router-A", "Gi0", "latency", "5m", query_endpoint=endpoint, now=now)
+    assert len(lb.calls) == 6
+    assert len(lb.ports()) == 1
