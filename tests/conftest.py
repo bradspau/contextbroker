@@ -52,6 +52,16 @@ class _PassThroughSession:
 
 
 @pytest.fixture(autouse=True)
+def _empty_caches():
+    """Every test starts with an empty metric map cache (D-72): a map rewritten in
+    place within one filesystem timestamp tick must not be served stale."""
+    from data_contracts.metric_map import clear_metric_map_cache
+
+    clear_metric_map_cache()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _upstream_sessions(request, monkeypatch):
     """Unless a test is marked real_sessions, broker_engine.upstream_http routes to
     requests.get and requests.post (D-87a). Sessions are reset after every test."""

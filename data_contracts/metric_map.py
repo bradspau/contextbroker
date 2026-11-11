@@ -23,6 +23,8 @@ ValueError (the metric map fails closed).
 import json
 import os
 import re
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,12 +58,60 @@ def check_uri(value, label: str = "metric_uri") -> str:
     return value
 
 
-def load_metric_map(path: Path | None = None) -> dict[str, MetricMapping]:
+def _resolve(path) -> Path:
     if path is None:
         path = Path(os.environ.get("METRIC_MAP_PATH") or DEFAULT_PATH)
-    path = Path(path)
-    if not path.exists():
+    return Path(path)
+
+
+def metric_map_key(path: Path | None = None) -> tuple:
+    """Identity of the metric map file as it is now (D-72).
+
+    (resolved path as text, inode, size, modification time in ns) from one
+    os.stat, or (resolved path as text, None) when the file does not exist. A
+    rewritten or replaced file has a different key; a missing one has its own.
+    """
+    resolved = _resolve(path).resolve()
+    try:
+        st = os.stat(resolved)
+    except (FileNotFoundError, NotADirectoryError):
+        return (str(resolved), None)
+    return (str(resolved), st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+# Only successful loads are kept, so a malformed file raises on every call.
+_CACHE_MAX = 16
+_cache: "OrderedDict[tuple, dict[str, MetricMapping]]" = OrderedDict()
+_cache_lock = threading.Lock()
+
+
+def clear_metric_map_cache() -> None:
+    with _cache_lock:
+        _cache.clear()
+
+
+def load_metric_map(path: Path | None = None) -> dict[str, MetricMapping]:
+    path = _resolve(path)
+    # The key is taken before the read: if the file changes in between, the map
+    # is filed under the older key, which the next call no longer matches.
+    key = metric_map_key(path)
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit is not None:
+            _cache.move_to_end(key)
+            return dict(hit)
+    if len(key) == 2:  # the file does not exist
         return {}
+    out = _parse(path)
+    with _cache_lock:
+        _cache[key] = out
+        _cache.move_to_end(key)
+        while len(_cache) > _CACHE_MAX:
+            _cache.popitem(last=False)
+    return dict(out)
+
+
+def _parse(path: Path) -> dict[str, MetricMapping]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
