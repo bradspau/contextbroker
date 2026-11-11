@@ -591,6 +591,9 @@ def assess_tmf921_as_of(
     # goal, so that metric is inconclusive.
     window_start = at - timedelta(seconds=int(time_window[:-1]) * _UNIT_SECONDS[time_window[-1]])
     per, reasons, envs, outcomes = [], [], [], set()
+
+    # First pass, in metric order, reads nothing: each metric gets its problem or its spec.
+    plan = []  # (name, device, interface, problem, spec)
     for uri, bound in binding.bounds.items():
         name = _short_name(uri)
         device, interface = binding.sources.get(uri, (None, None))
@@ -607,6 +610,31 @@ def assess_tmf921_as_of(
             problem = f"placement not in force for the whole window: {name}"
         else:
             problem = None
+        spec = None
+        if not problem:
+            spec = {"metric": mapping.broker_metric, "operator": mapping.operator,
+                    "target_value": bound,
+                    "interfaces": [{"device": device, "interface_name": interface}]}
+        plan.append((name, device, interface, problem, spec))
+
+    # One bounded pool reads the metrics that need telemetry (BROKER_TELEMETRY_WORKERS);
+    # a metric's own one to three reads stay on one worker, and the results come back in
+    # metric order, so the answer is the one a single worker gives.
+    def read_metric(entry):
+        _, device, interface, _, spec = entry
+        try:
+            return temporal_observation(join, device, interface, spec, time_window, mode,
+                                        as_of, now)
+        except ClientInputError:
+            # A binding identifier the joiner refuses: this metric is inconclusive.
+            env = build_observed(f"{device}:{interface}", None, "victoriametrics", None, at)
+            env.quality.conflicts.append("invalid interface identifier")
+            return env
+
+    read = iter(read_in_order(read_metric, [e for e in plan if e[3] is None]))
+
+    # Second pass, in metric order: judge and append.
+    for name, device, interface, problem, spec in plan:
         if problem:
             outcomes.add(Outcome.INCONCLUSIVE)
             reasons.append(problem)
@@ -614,16 +642,7 @@ def assess_tmf921_as_of(
                         "outcome": Outcome.INCONCLUSIVE.value, "observed": None,
                         "reason": problem})
             continue
-        spec = {"metric": mapping.broker_metric, "operator": mapping.operator,
-                "target_value": bound,
-                "interfaces": [{"device": device, "interface_name": interface}]}
-        try:
-            env = temporal_observation(join, device, interface, spec, time_window, mode,
-                                       as_of, now)
-        except ClientInputError:
-            # A binding identifier the joiner refuses: this metric is inconclusive.
-            env = build_observed(f"{device}:{interface}", None, "victoriametrics", None, at)
-            env.quality.conflicts.append("invalid interface identifier")
+        env = next(read)
         if isinstance(env.value, float) and not math.isfinite(env.value):
             env.quality.conflicts.append("invalid observation")  # e.g. +Inf from the TSDB
         envs.append(env)

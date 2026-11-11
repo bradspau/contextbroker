@@ -615,3 +615,126 @@ def test_window_applies_to_a_within_question_about_now(real_resolver):
 def test_window_an_injected_binding_without_intervals_is_not_checked():
     join = make_join({("latency_ms", "max"): 50.0})
     assert run(join=join, mode="within", window="2h")["verdict"] == "success"
+
+
+# ---------- parallel metric reads (plan 08-06) ----------
+UP = "http://broadband-forum.org/Intent#UpstreamBandwidthMetric"
+LOSS = "http://broadband-forum.org/Intent#PacketLossMetric"
+MMAP5 = {**MMAP,
+         UP: MetricMapping("upstream_bandwidth_mbps", UP, "Mbps", ">="),
+         LOSS: MetricMapping("packet_loss_percent", LOSS, "percent", "<")}
+PLACES5 = {LAT: ("olt1", "pon0/1"), JIT: ("olt1", "pon0/2"), DOWN: ("olt1", "pon0/3"),
+           UP: ("olt1", "pon0/4"), LOSS: ("olt1", "pon0/5")}
+GOALS5 = {LAT: 100.0, JIT: 10.0, DOWN: 100.0, UP: 50.0, LOSS: 1.0}
+B_FIVE = {IID: IntentBinding(IID, PLACES5, GOALS5)}
+FIVE_DOC = intent((LAT, 100), (JIT, 10), (DOWN, 100), (UP, 50), (LOSS, 1))
+# One value per (metric, aggregate): latency and loss pass, jitter fails, downstream passes,
+# upstream is missing, so the five slots differ from each other.
+VALUES5 = {}
+for _agg in ("last", "max", "min"):
+    VALUES5.update({("latency_ms", _agg): 42.0, ("jitter_ms", _agg): 25.0,
+                    ("downstream_bandwidth_mbps", _agg): 500.0,
+                    ("packet_loss_percent", _agg): 0.1})
+
+
+def keyed_join(values, refuse=(), fail_on=None, barrier=None):
+    """A join answering by (device, interface, metric), never by call order, safe to call
+    from several threads. `refuse` is interfaces the joiner rejects as identifiers;
+    `fail_on` is an interface whose read raises a VictoriaMetrics fault."""
+    import threading
+    lock = threading.Lock()
+    calls, threads = [], set()
+
+    def join(device, interface, metric, window, **kw):
+        with lock:
+            calls.append((device, interface, metric, kw["aggregate"]))
+            threads.add(threading.get_ident())
+        if barrier is not None:
+            barrier.wait(timeout=5)
+        if interface in refuse:
+            raise ClientInputError("Unsafe interface")
+        if interface == fail_on:
+            raise requests.ConnectionError("vm down")
+        ref = kw["now"] - (timedelta(seconds=window_seconds(kw["as_of"], "as_of"))
+                           if kw.get("as_of") else timedelta(0))
+        v = values.get((metric, kw["aggregate"]))
+        obs = None if v is None else ref - timedelta(seconds=10)
+        return build_observed(f"{device}:{interface}", v, "victoriametrics", obs, ref)
+    join.calls, join.threads = calls, threads
+    return join
+
+
+def five(workers, monkeypatch, mode=None, as_of="10m", **join_kw):
+    monkeypatch.setenv("BROKER_TELEMETRY_WORKERS", str(workers))
+    join = keyed_join(VALUES5, **join_kw)
+    out = run(FakeClient(FIVE_DOC), join, bindings=B_FIVE, mmap=MMAP5, mode=mode, as_of=as_of)
+    return out, join
+
+
+@pytest.mark.parametrize("mode", ["at", "within"])
+@pytest.mark.parametrize("as_of", ["10m", None])
+def test_five_metrics_answer_the_same_with_one_worker_and_eight(monkeypatch, mode, as_of):
+    one, join1 = five(1, monkeypatch, mode=mode, as_of=as_of)
+    eight, join8 = five(8, monkeypatch, mode=mode, as_of=as_of)
+    assert one == eight
+    assert one["verdict"] == "failure"
+    assert len(join1.threads) == 1
+    assert sorted(join1.calls) == sorted(join8.calls) and len(join8.calls) == 5
+
+
+def test_five_metrics_are_read_at_once_with_eight_workers(monkeypatch):
+    import threading
+    barrier = threading.Barrier(5)  # each read waits for the other four: only a pool passes
+    out, join = five(8, monkeypatch, barrier=barrier)
+    assert len(join.threads) == 5 and out["verdict"] == "failure"
+
+
+def test_five_metric_results_follow_the_order_of_the_binding(monkeypatch):
+    out, _ = five(8, monkeypatch)
+    names = ["LatencyMetric", "JitterMetric", "DownstreamBandwidthMetric",
+             "UpstreamBandwidthMetric", "PacketLossMetric"]
+    assert [p["condition"] for p in out["per_interface"]] == names
+    assert [p["interface_name"] for p in out["per_interface"]] == [
+        "pon0/1", "pon0/2", "pon0/3", "pon0/4", "pon0/5"]
+    assert out["reasons"] == [
+        "JitterMetric: olt1/pon0/2: observed 25.0 does not satisfy < 10.0",
+        "UpstreamBandwidthMetric: olt1/pon0/4: missing observation"]
+    assert [e["entity_id"] for e in out["context"]] == [
+        f"olt1:pon0/{n}" for n in range(1, 6)]
+    assert [p["outcome"] for p in out["per_interface"]] == [
+        "success", "failure", "success", "inconclusive", "success"]
+
+
+@pytest.mark.parametrize("workers", [1, 8])
+def test_a_refused_identifier_keeps_its_own_slot(monkeypatch, workers):
+    out, join = five(workers, monkeypatch, refuse={"pon0/3"})
+    by = {p["condition"]: p for p in out["per_interface"]}
+    assert by["DownstreamBandwidthMetric"]["outcome"] == "inconclusive"
+    assert out["context"][2]["entity_id"] == "olt1:pon0/3"
+    assert out["context"][2]["quality"]["conflicts"] == ["invalid interface identifier"]
+    assert [e["quality"]["conflicts"] for e in out["context"]].count([]) == 4
+    assert [p["condition"] for p in out["per_interface"]][2] == "DownstreamBandwidthMetric"
+    assert len(join.calls) == 5
+
+
+@pytest.mark.parametrize("workers", [1, 8])
+def test_a_metric_with_a_problem_is_never_read_and_keeps_its_slot(monkeypatch, workers):
+    monkeypatch.setenv("BROKER_TELEMETRY_WORKERS", str(workers))
+    mmap = {u: m for u, m in MMAP5.items() if u != JIT}  # jitter unmapped
+    join = keyed_join(VALUES5)
+    out = run(FakeClient(FIVE_DOC), join, bindings=B_FIVE, mmap=mmap)
+    assert [p["condition"] for p in out["per_interface"]] == [
+        "LatencyMetric", "JitterMetric", "DownstreamBandwidthMetric",
+        "UpstreamBandwidthMetric", "PacketLossMetric"]
+    assert out["per_interface"][1]["reason"] == "unmapped metric: JitterMetric"
+    assert out["per_interface"][1]["observed"] is None
+    assert ("olt1", "pon0/2", "jitter_ms", "last") not in join.calls
+    assert len(join.calls) == 4
+
+
+@pytest.mark.parametrize("workers", [1, 8])
+def test_a_metric_that_cannot_be_read_raises_the_same_fault(monkeypatch, workers):
+    monkeypatch.setenv("BROKER_TELEMETRY_WORKERS", str(workers))
+    join = keyed_join(VALUES5, fail_on="pon0/3")  # the third of five
+    with pytest.raises(requests.ConnectionError):
+        run(FakeClient(FIVE_DOC), join, bindings=B_FIVE, mmap=MMAP5)
