@@ -20,7 +20,12 @@ from broker_engine.faults import log_fault
 from broker_engine.health import probe_upstreams
 from broker_engine import context_request, operations
 from broker_engine.pruner import prune  # noqa: F401
-from broker_engine.validation import ClientInputError, max_as_of_seconds, telemetry_workers
+from broker_engine.validation import (
+    ClientInputError,
+    max_as_of_seconds,
+    telemetry_workers,
+    tsdb_series_limit,
+)
 from broker_state.process import load_settings, open_process_store, reset_store
 from broker_state.store import STATE_UNAVAILABLE, StateUnavailable
 from okf_retrieval.service import get_service, reset_service
@@ -36,6 +41,8 @@ log = logging.getLogger(__name__)
 max_as_of_seconds()
 # A bad BROKER_TELEMETRY_WORKERS stops start-up here instead of failing every assess.
 telemetry_workers()
+# A bad BROKER_TSDB_SERIES_LIMIT stops start-up here instead of failing every interfaces-nonzero query.
+tsdb_series_limit()
 
 
 def assess(intent_id: str, time_window: str, source: str = "tmf921",
