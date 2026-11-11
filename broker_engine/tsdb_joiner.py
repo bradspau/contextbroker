@@ -16,7 +16,7 @@ from broker_engine.validation import (
     window_seconds,
 )
 from data_contracts.envelope import ContextEnvelope, ProvenanceRecord, build_observed
-from ingestion.telemetry_simulator import MEASUREMENT_NAME
+from data_contracts.telemetry import MEASUREMENT_NAME
 
 log = logging.getLogger(__name__)
 

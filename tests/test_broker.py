@@ -7,8 +7,9 @@ import pytest
 
 import broker
 import ingestion.telemetry_simulator as telemetry_simulator
-from broker_engine import tsdb_joiner
+from broker_engine import operations, tsdb_joiner
 from broker_engine.validation import ClientInputError
+from data_contracts import telemetry
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -105,5 +106,39 @@ def test_agent_tool_is_the_public_function():
     assert tools.query_tsdb_metrics is tsdb_joiner.query_tsdb_metrics
 
 
-def test_measurement_name_constant_matches_telemetry_simulator():
-    assert broker.MEASUREMENT_NAME == telemetry_simulator.MEASUREMENT_NAME == "interface_metrics"
+def test_measurement_name_has_one_home_in_data_contracts():
+    assert telemetry.MEASUREMENT_NAME == "interface_metrics"
+    assert telemetry_simulator.MEASUREMENT_NAME is telemetry.MEASUREMENT_NAME
+    assert tsdb_joiner.MEASUREMENT_NAME is telemetry.MEASUREMENT_NAME
+    assert operations.MEASUREMENT_NAME is telemetry.MEASUREMENT_NAME
+
+
+def test_no_measurement_name_assignment_outside_data_contracts_telemetry():
+    for path in _non_test_python_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            for t in targets:
+                if isinstance(t, ast.Name) and t.id == "MEASUREMENT_NAME":
+                    assert str(path.relative_to(ROOT)) == "data_contracts/telemetry.py"
+
+
+def test_broker_engine_and_broker_shim_import_nothing_from_ingestion():
+    paths = list((ROOT / "broker_engine").rglob("*.py")) + [ROOT / "broker.py"]
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                assert not (node.module or "").split(".")[0] == "ingestion", path
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert alias.name.split(".")[0] != "ingestion", path
+
+
+def test_data_contracts_telemetry_imports_nothing():
+    tree = ast.parse((ROOT / "data_contracts/telemetry.py").read_text(encoding="utf-8"))
+    assert not [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]

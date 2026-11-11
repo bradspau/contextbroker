@@ -7,10 +7,10 @@ import time
 import requests
 
 from broker_engine.validation import REQUEST_TIMEOUT_S
+from data_contracts.telemetry import MEASUREMENT_NAME
 
 # Read once at import, like VM_QUERY_ENDPOINT; the shell environment supplies it.
 WRITE_ENDPOINT = os.environ.get("VM_WRITE_ENDPOINT", "http://localhost:8428/write")
-MEASUREMENT_NAME = "interface_metrics"
 ROUTERS = [
     ("Router-A", "GigabitEthernet0/0/0"),
     ("Router-B", "GigabitEthernet0/0/1"),

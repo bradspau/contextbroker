@@ -22,7 +22,7 @@ from broker_engine.validation import (
 )
 from data_contracts.envelope import DEFAULT_MAX_AGE_S
 from data_contracts.fluents import iso_ms
-from ingestion.telemetry_simulator import MEASUREMENT_NAME
+from data_contracts.telemetry import MEASUREMENT_NAME
 
 MAX_INTERFACES = 200
 DEFAULT_INTERFACES = 50
