@@ -34,6 +34,90 @@ DEFAULT_JSONP_CALLBACK = "_jqjsp"
 # directly in the response as executable JavaScript.
 _SAFE_CALLBACK = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 
+# Replies are fixed text: nothing from the query, the callback or an upstream error is echoed.
+REFUSED_QUERY = "Only read-only SPARQL queries are accepted"
+UNSAFE_CALLBACK = "Unsafe 'callback' parameter"
+UPSTREAM_FAILED = "Upstream Fuseki request failed"
+
+# The read-only filter. A query is forwarded only when, after comments, string literals and
+# IRIs are removed, its first keyword after any PREFIX and BASE declarations is a query form
+# and no SERVICE or update keyword appears anywhere. FROM and FROM NAMED stay allowed.
+READ_FORMS = frozenset({"SELECT", "ASK", "DESCRIBE", "CONSTRUCT"})
+FORBIDDEN_KEYWORDS = frozenset({
+    "SERVICE", "INSERT", "DELETE", "LOAD", "CLEAR", "CREATE", "DROP",
+    "COPY", "MOVE", "ADD", "WITH", "USING",
+})
+# SPARQL IRIREF: no space and none of < > " { } | ^ ` \
+_IRI = re.compile(r'<[^<>"{}|^`\\\x00-\x20]*>')
+# SPARQL reads codepoint escapes before it tokenises, so a keyword can hide behind one.
+_ESCAPE = re.compile(r"\\[uU][0-9A-Fa-f]")
+# variable | prefixed name | word
+_TOKEN = re.compile(r"[?$][A-Za-z0-9_]+|[A-Za-z0-9_.\-]*:[A-Za-z0-9_.:%\-]*|[A-Za-z]+")
+
+
+def _strip(text):
+    """Comments dropped, string literals and IRIs replaced by a placeholder; None if malformed."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "#":
+            while i < n and text[i] not in "\r\n":
+                i += 1
+            out.append(" ")
+        elif c in "\"'":
+            long_form = text.startswith(c * 3, i)
+            quote = c * 3 if long_form else c
+            i += len(quote)
+            while True:
+                if i >= n:
+                    return None  # unterminated literal
+                if text[i] == "\\":
+                    i += 2
+                    continue
+                if text.startswith(quote, i):
+                    i += len(quote)
+                    break
+                if not long_form and text[i] in "\r\n":
+                    return None
+                i += 1
+            out.append(" S ")
+        elif c == "<":
+            match = _IRI.match(text, i)  # a '<' that is not an IRIREF is an operator
+            if match:
+                out.append(" I ")
+                i = match.end()
+            else:
+                out.append(c)
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def is_read_only(query) -> bool:
+    """True only for a query that reads: see the filter rules above."""
+    if not isinstance(query, str) or not query.strip() or _ESCAPE.search(query):
+        return False
+    stripped = _strip(query)
+    if stripped is None:
+        return False
+    tokens = [t.upper() for t in _TOKEN.findall(stripped)]
+    pos = 0
+    while pos < len(tokens):  # PREFIX p: <iri>   and   BASE <iri>
+        if tokens[pos] == "PREFIX":
+            pos += 2
+            if pos < len(tokens) and tokens[pos] == "I":
+                pos += 1
+        elif tokens[pos] == "BASE":
+            pos += 1
+            if pos < len(tokens) and tokens[pos] == "I":
+                pos += 1
+        else:
+            break
+    return (pos < len(tokens) and tokens[pos] in READ_FORMS
+            and not any(t in FORBIDDEN_KEYWORDS for t in tokens))
+
 
 def fuseki_auth():
     """("admin", value) from FUSEKI_ADMIN_PASSWORD, or None when it is unset or empty.
@@ -56,7 +140,10 @@ class JsonpProxyHandler(BaseHTTPRequestHandler):
             self.send_error(400, "Missing 'query' parameter")
             return
         if not _SAFE_CALLBACK.match(callback):
-            self.send_error(400, f"Unsafe 'callback' parameter: {callback!r}")
+            self.send_error(400, UNSAFE_CALLBACK)
+            return
+        if not is_read_only(query):
+            self.send_error(400, REFUSED_QUERY)
             return
 
         try:
@@ -68,8 +155,8 @@ class JsonpProxyHandler(BaseHTTPRequestHandler):
                 timeout=10,
             )
             response.raise_for_status()
-        except requests.RequestException as exc:
-            self.send_error(502, f"Upstream Fuseki request failed: {exc}")
+        except requests.RequestException:
+            self.send_error(502, UPSTREAM_FAILED)
             return
 
         body = f"{callback}({response.text});".encode("utf-8")
