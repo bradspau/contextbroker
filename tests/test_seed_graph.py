@@ -83,8 +83,11 @@ def test_a_link_node_that_still_carries_the_interface_pair_does_not_conform(tmp_
     assert "hasInterface" in report
 
 
-def test_load_ontologies_validates_and_posts_the_tbox_and_the_demo_file():
-    abox_dir = Path(__file__).resolve().parent.parent / "ontologies" / "abox"
+def test_load_ontologies_validates_and_posts_the_tbox_and_the_demo_file(tmp_path):
+    # Tracked file only: the operator's binding files in ontologies/abox are not under test.
+    abox_dir = tmp_path / "abox"
+    abox_dir.mkdir()
+    shutil.copy(DEMO_PATH, abox_dir)
     resp = Mock()
     resp.raise_for_status = Mock()
     with patch("ingestion.load_ontologies.requests.post", return_value=resp) as post:

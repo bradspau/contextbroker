@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -495,9 +496,14 @@ def test_a_symlink_in_the_abox_dir_to_a_file_outside_is_refused(tmp_path):
     post.assert_not_called()
 
 
-def test_repository_abox_directory_loads_with_the_tbox_one_post_each_plus_the_demo():
+def test_repository_abox_directory_loads_with_the_tbox_one_post_each_plus_the_demo(tmp_path):
+    # A copy holding the tracked file only: the operator's binding files (written by
+    # bind_intent into ontologies/abox, gitignored) must not change what this pins.
+    abox = tmp_path / "abox"
+    abox.mkdir()
+    shutil.copy(ROOT / "ontologies" / "abox" / "topology-demo.ttl", abox)
     with _ok_post() as post:
-        load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=ROOT / "ontologies" / "abox")
+        load_ontologies(TBOX_DIR, SHACL_DIR, ENDPOINT, abox_dir=abox)
     assert post.call_count == len(list(TBOX_DIR.glob("*.ttl"))) + 1
 
 
