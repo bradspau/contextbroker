@@ -99,6 +99,21 @@ def first_window(times, min_events: int, window_s: int) -> int | None:
     return None
 
 
+def window_support(items, start: int, window_s: int, key, ids) -> tuple:
+    """The ids of the events inside the qualifying window that begins at ``items[start]``.
+
+    ``items`` is sorted ascending by ``key``. The window holds every item whose time is within
+    ``window_s`` seconds of the first one, and the ids are the first ``PROMOTED_SUPPORT_MAX`` of them in
+    order, so a late burst after many older events is supported by the burst, never by the older events."""
+    begin = key(items[start])
+    inside = []
+    for item in items[start:]:
+        if (key(item) - begin).total_seconds() > window_s:
+            break
+        inside.append(ids(item))
+    return tuple(inside[:PROMOTED_SUPPORT_MAX])
+
+
 def select_conflicts(events, *, device: str, configured: ConfiguredSide, min_events: int,
                      window_s: int, now: datetime) -> tuple[PromotedRecord, ...]:
     """The conflict to promote for ``device``, or ``()``.
@@ -106,7 +121,7 @@ def select_conflicts(events, *, device: str, configured: ConfiguredSide, min_eve
     The qualifying events are those of ``device`` with kind ``link_down``, one per event id, ordered
     by (placed_at, event_id). The inputs are not changed. ``valid_from`` is the first event of the
     first qualifying window, never after ``now``; ``event_ids`` are the first
-    ``PROMOTED_SUPPORT_MAX`` qualifying ids in that order."""
+    ``PROMOTED_SUPPORT_MAX`` ids of the events inside that window, in that order."""
     _aware(now, "now")
     _check_thresholds(min_events, window_s)
     seen = {}
@@ -125,7 +140,8 @@ def select_conflicts(events, *, device: str, configured: ConfiguredSide, min_eve
         body={"device": device, "event": _LINK_DOWN, "configured": CONFIGURED_LINK_IN_FORCE,
               "text": conflict_text(_LINK_DOWN, CONFIGURED_LINK_IN_FORCE)},
         valid_from=min(qualifying[start].placed_at, now),
-        event_ids=tuple(e.event_id for e in qualifying[:PROMOTED_SUPPORT_MAX])),)
+        event_ids=window_support(qualifying, start, window_s, lambda e: e.placed_at,
+                                 lambda e: e.event_id)),)
 
 
 @dataclass(frozen=True)
@@ -158,7 +174,7 @@ def select_hypotheses(observations, *, known_interfaces: frozenset, linked_inter
     ``linked_interfaces`` (a configured link in force). One event id counts once. A selected group
     needs ``min_events`` of its events inside ``window_s``; ``valid_from`` is the first event of the
     first such window, never after ``now``; ``event_ids`` are the first ``PROMOTED_SUPPORT_MAX`` of the
-    group in (placed_at, event_id) order. The inputs are not changed."""
+    group's events inside that window, in (placed_at, event_id) order. The inputs are not changed."""
     _aware(now, "now")
     _check_thresholds(min_events, window_s)
     groups: dict[tuple[str, str], dict[str, AdjacencyObservation]] = {}
@@ -180,5 +196,6 @@ def select_hypotheses(observations, *, known_interfaces: frozenset, linked_inter
             kind="hypothesis", rule=RULE_ADJACENCY, device_a=_device_of(first),
             device_b=_device_of(second), body={"from": first, "to": second},
             valid_from=min(qualifying[start].placed_at, now),
-            event_ids=tuple(o.event_id for o in qualifying[:PROMOTED_SUPPORT_MAX])))
+            event_ids=window_support(qualifying, start, window_s, lambda o: o.placed_at,
+                                     lambda o: o.event_id)))
     return tuple(sorted(records, key=lambda r: r.promoted_id))

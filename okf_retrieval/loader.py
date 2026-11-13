@@ -158,6 +158,10 @@ def _load_yaml(text: str):
         raise LoadError("duplicate key") from None
     except yaml.YAMLError:
         raise LoadError("not yaml") from None
+    except (ValueError, OverflowError):
+        # PyYAML's timestamp resolver raises a plain ValueError for an impossible date such as
+        # 2026-13-45. One bad file must block its own identifier, not the whole knowledge class.
+        raise LoadError("not yaml") from None
 
 
 def _split(text: str) -> tuple[str, str]:

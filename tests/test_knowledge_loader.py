@@ -103,6 +103,8 @@ def _cases():
         ("no front matter", b"Just text, no front matter.\n", "no front matter"),
         ("unterminated front matter", good.replace("\n---\n", "\n").encode(), "no front matter"),
         ("not yaml", good.replace("scope:", "scope: [unclosed").encode(), "not yaml"),
+        ("impossible date", good.replace("scope:", "reviewed: 2026-13-45\nscope:").encode(), "not yaml"),
+        ("impossible date, day", good.replace("scope:", "reviewed: 2026-02-31\nscope:").encode(), "not yaml"),
         ("empty front matter", b"---\n---\nbody\n", "invalid front matter"),
         ("whitespace body", (good.split("\n---\n")[0] + "\n---\n   \n\n").encode(), "no body"),
         ("body too long", _good(body="x" * (MAX_BODY_CHARS + 1)).encode(), "body too long"),

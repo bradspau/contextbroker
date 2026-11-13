@@ -888,13 +888,9 @@ class StateStore:
                     "repeat_count, written_seq, situation_id, situation_requester, "
                     "event_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?) "
                     "ON CONFLICT(promoted_id) DO UPDATE SET "
-                    "valid_from_us = MIN(valid_from_us, excluded.valid_from_us), "
                     "last_promoted_at_us = excluded.last_promoted_at_us, "
                     "repeat_count = repeat_count + 1, "
-                    "written_seq = excluded.written_seq, "
-                    "situation_id = excluded.situation_id, "
-                    "situation_requester = excluded.situation_requester, "
-                    "event_ids = excluded.event_ids, body = excluded.body",
+                    "written_seq = excluded.written_seq",
                     (r.promoted_id, r.kind, r.rule, r.device_a, r.device_b, r.body,
                      valid_us, now_us, now_us, seq, r.situation_id,
                      r.situation_requester, support))

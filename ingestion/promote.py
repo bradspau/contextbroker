@@ -97,6 +97,15 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _placed_at(row) -> datetime:
+    """The time a rule counts an event at: the time the device wrote, never later than the time the broker
+    received it. Syslog origin is unauthenticated, so a future-dated line would otherwise sit in any
+    window; clamped to the ingest time it counts as received. An event with no time counts at ingest."""
+    if row.event_time is None:
+        return row.ingest_time
+    return min(row.event_time, row.ingest_time)
+
+
 def _instant(text: str | None) -> datetime | None:
     return None if text is None else datetime.fromisoformat(text)
 
@@ -185,7 +194,7 @@ def promote_situation(situation_id: str, *, store, query_endpoint, min_events: i
         rows = store.events_by_ids(ids, now=now) if ids else []
         # Mapped events of the situation's device only; an ambiguous or unmapped event has no
         # device to count. The kind may be None: plan 07-07 reads the unrecognised ones too.
-        counted = [CountedEvent(r.event_id, r.device, r.kind, r.event_time or r.ingest_time)
+        counted = [CountedEvent(r.event_id, r.device, r.kind, _placed_at(r))
                    for r in rows if r.mapping == "mapped" and r.device == device
                    and (r.kind is None or r.kind in EVENT_KINDS)]
         configured = ConfiguredSide(device, None)

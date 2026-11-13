@@ -160,7 +160,9 @@ def test_a_phase4_file_gains_both_the_event_tables_and_the_promoted_table(path):
         assert name in rows
 
 
-def test_a_re_run_never_resets_valid_from_and_takes_the_newest_support(path):
+def test_a_re_run_keeps_the_first_record_and_only_counts(path):
+    # Bead contextbroker-5re: the first promotion's valid_from, support, situation and requester stay, so a
+    # read as known at an earlier time never shows support that did not exist then.
     store = store_at(path)
     early = datetime(2026, 11, 6, 10, 0, tzinfo=timezone.utc)
     late = datetime(2026, 11, 6, 11, 0, tzinfo=timezone.utc)
@@ -172,16 +174,37 @@ def test_a_re_run_never_resets_valid_from_and_takes_the_newest_support(path):
     batch = store.promote([again], now=T + H)
     assert (batch.written, batch.refreshed) == (0, 1)
     row = read(store, "conflict", "Router-A", now=T + H, valid_at=T + H)[0]
-    assert row.valid_from == early  # the earlier of the two
+    assert row.valid_from == late
+    assert row.situation_id == SID and row.situation_requester == "alice"
+    assert row.event_ids == (EVENT(1),)
     assert row.promoted_at == T and row.last_promoted_at == T + H
     assert row.repeat_count == 2
-    assert row.situation_id == sid2 and row.situation_requester == "bob"
-    assert row.event_ids == (EVENT(7), EVENT(8))
-    # a later valid_from on a third run keeps the first
     store.promote([new_promoted(1, valid_from=T)], now=T + 2 * H)
     row = read(store, "conflict", "Router-A", now=T + 2 * H, valid_at=T + 2 * H)[0]
-    assert row.valid_from == early and row.repeat_count == 3
+    assert row.valid_from == late and row.repeat_count == 3 and row.last_promoted_at == T + 2 * H
     assert store.promoted_count() == 1
+    store.close()
+
+
+def test_a_read_as_known_before_a_re_run_sees_what_was_known_then(path):
+    store = store_at(path)
+    store.promote([new_promoted(1, event_ids=(EVENT(1),))], now=T)
+    store.promote([new_promoted(1, situation_id="sit-" + "c" * 32, requester="mallory",
+                                event_ids=(EVENT(9),))], now=T + H)
+    [then] = read(store, "conflict", "Router-A", now=T + 2 * H, valid_at=T + 2 * H, known_at=T + timedelta(seconds=1))
+    assert then.event_ids == (EVENT(1),) and then.situation_requester == "alice"
+    [now_] = read(store, "conflict", "Router-A", now=T + 2 * H, valid_at=T + 2 * H)
+    assert now_.event_ids == (EVENT(1),) and now_.situation_requester == "alice"
+    store.close()
+
+
+def test_a_record_past_retention_that_is_promoted_again_starts_over_with_the_new_support(path):
+    store = store_at(path)
+    store.promote([new_promoted(1, event_ids=(EVENT(1),))], now=T)
+    far = T + timedelta(seconds=store.promoted_retention_s + 1)
+    store.promote([new_promoted(1, requester="bob", event_ids=(EVENT(5),))], now=far)
+    [row] = read(store, "conflict", "Router-A", now=far, valid_at=far)
+    assert row.repeat_count == 1 and row.event_ids == (EVENT(5),) and row.situation_requester == "bob"
     store.close()
 
 

@@ -217,6 +217,46 @@ def test_a_rerun_refreshes_the_record_instead_of_adding_one(rig, capsys):
     assert row.promoted_at == RUN_AT and row.last_promoted_at == later
 
 
+# ---- a device-authored time never counts later than the broker received the line (bead contextbroker-s90) ----
+
+def test_placed_at_is_the_device_time_clamped_to_the_ingest_time():
+    from types import SimpleNamespace
+    ingest = NOW - 100 * S
+    row = lambda event_time: SimpleNamespace(event_time=event_time, ingest_time=ingest)  # noqa: E731
+    assert promote._placed_at(row(NOW - 500 * S)) == NOW - 500 * S  # an honest or replayed time stands
+    assert promote._placed_at(row(NOW + 900 * S)) == ingest  # a future-dated time is clamped
+    assert promote._placed_at(row(ingest)) == ingest
+    assert promote._placed_at(row(None)) == ingest
+
+
+def test_lines_dated_ahead_when_received_do_not_form_a_window_once_their_time_arrives(
+        rig, monkeypatch, capsys):
+    monkeypatch.setenv("BROKER_PROMOTE_WINDOW", "5m")
+    # Three lines received 5000 s, 3000 s and 1000 s ago that all claimed the same time, 100 s ago: dated
+    # ahead when they arrived. On the claimed time they sit in one window; on the time they were received
+    # (the claim cannot count later than that) they are thousands of seconds apart.
+    claimed = NOW - 100 * S
+    put(event(1, ingest=NOW - 5000 * S, at=claimed), event(2, ingest=NOW - 3000 * S, at=claimed),
+        event(3, ingest=NOW - 1000 * S, at=claimed))
+    sid = situation()
+    assert run(sid) == 0
+    assert capsys.readouterr().out == "conflicts=0 hypotheses=0 events=3 counted=3 evicted=0\n"
+    assert get_store().promoted_count() == 0
+
+
+def test_lines_received_close_together_still_promote_when_dated_slightly_ahead(
+        rig, monkeypatch, capsys):
+    monkeypatch.setenv("BROKER_PROMOTE_WINDOW", "5m")
+    claimed = NOW - 100 * S
+    put(event(1, ingest=NOW - 200 * S, at=claimed), event(2, ingest=NOW - 150 * S, at=claimed),
+        event(3, ingest=NOW - 120 * S, at=claimed))
+    sid = situation()
+    assert run(sid) == 0
+    assert capsys.readouterr().out == THREE + "\n"
+    [row] = rows()
+    assert row.valid_from == NOW - 200 * S  # counted at the time received, not the earlier claim
+
+
 # ---- what is not selected is not stored ----
 
 def test_below_the_threshold_nothing_is_stored_and_fuseki_is_not_asked(rig, capsys):

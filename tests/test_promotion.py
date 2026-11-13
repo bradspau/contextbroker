@@ -41,6 +41,30 @@ def pick(events, configured=HELD, **kw):
     return select_conflicts(events, **args)
 
 
+# ---- the support comes from the qualifying window (bead contextbroker-bnl) ----
+
+def test_support_is_the_events_of_the_qualifying_window_not_the_oldest_events():
+    older = [down(n, at=T0 + s(n * 500)) for n in range(1, 26)]  # 25 events, no three within 900 s
+    burst_start = T0 + s(15000)
+    burst = [down(100 + k, at=burst_start + s(k * 100)) for k in range(3)]
+    [record] = pick(older + burst)
+    assert record.event_ids == tuple(eid(100 + k) for k in range(3))
+    assert record.valid_from == burst_start
+
+
+def test_support_stops_at_the_end_of_the_window():
+    inside = [down(n, at=T0 + s(n * 100)) for n in range(1, 5)]  # 100..400 s
+    after = [down(50, at=T0 + s(5000)), down(51, at=T0 + s(5100))]
+    [record] = pick(inside + after, min_events=3, window_s=450)
+    assert record.event_ids == tuple(eid(n) for n in range(1, 5))
+
+
+def test_a_threshold_above_the_support_cap_lists_the_first_cap_events_of_the_window():
+    many = [down(n, at=T0 + s(n)) for n in range(1, PROMOTED_SUPPORT_MAX + 11)]
+    [record] = pick(many, min_events=PROMOTED_SUPPORT_MAX + 5, window_s=900)
+    assert record.event_ids == tuple(eid(n) for n in range(1, PROMOTED_SUPPORT_MAX + 1))
+
+
 # ---- first_window ----
 
 def test_first_window_is_inclusive_at_the_window_edge():

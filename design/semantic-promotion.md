@@ -45,7 +45,8 @@ For the situation's scope device, a conflict is selected only when all of these 
 
 1. The qualifying events are the stored events of that device with mapping `mapped` and recognised kind
    `link_down`, one per event id, ordered by `(placed time, event id)`. The placed time is the event
-   time, else the ingest time.
+   time, else the ingest time, and never later than the ingest time: syslog origin is unauthenticated, so
+   a line dated ahead when it arrived counts at the time the broker received it (bead contextbroker-s90).
 2. At least `BROKER_PROMOTE_MIN_EVENTS` of them lie within `BROKER_PROMOTE_WINDOW` of each other. The edge
    is inclusive: a window of exactly the setting still counts.
 3. A link fluent with an end on that device was in force at the situation's valid instant, as known at
@@ -54,7 +55,9 @@ For the situation's scope device, a conflict is selected only when all of these 
 Anything else selects nothing and nothing is stored. `link_up` events, other devices' events, events with
 no recognised kind, a repeated event id and a device with no configured link are all ignored. `valid_from`
 is the first event of the first qualifying window, never later than the promotion time (device times are
-device-authored). The support holds the first 20 qualifying event ids.
+device-authored). The support holds the first 20 event ids **of that window**, so a late burst after many
+older events is supported by the burst; with `BROKER_PROMOTE_MIN_EVENTS` above 20 the list is the first 20
+events of the window and cannot hold them all (bead contextbroker-bnl).
 
 ### `adjacency_without_configured_link` (kind `hypothesis`)
 
@@ -160,8 +163,11 @@ EXISTS` at schema version 1, so `PRAGMA user_version` stays 1).
 | `situation_id`, `situation_requester` | the support situation and the requester who asked it |
 | `event_ids` | the support events, at most 20 |
 
-- **Upsert.** A re-run keeps the earliest `valid_from`, takes the newest support, adds one to the count
-  and moves the row to the newest write. A row past retention that is promoted again starts over (count 1,
+- **Upsert.** A re-run keeps the first promotion's record whole (`valid_from`, support events, support
+  situation and its requester, body) and only adds one to the count, sets the last promotion time and moves
+  the row to the newest write. A read as known at an earlier time therefore never shows support that did
+  not exist then, and a later run by another requester cannot move the support situation (bead
+  contextbroker-5re). A row past retention that is promoted again starts over (count 1,
   new promotion time), so a record hidden from reads is never revived with an old history.
 - **Cap.** `BROKER_PROMOTED_CAP` rows. When a write would exceed it, the least recently written rows go,
   inside the write. The count is kept in `counters` as `evicted_promoted` and announced by one fixed line,

@@ -285,6 +285,13 @@ def test_support_is_capped_in_placed_order():
     assert record.event_ids == tuple("evt-" + f"{n:032x}" for n in range(1, PROMOTED_SUPPORT_MAX + 1))
 
 
+def test_support_is_the_events_of_the_qualifying_window_not_the_oldest_events():
+    older = [obs(n, 100000 - 2000 * n) for n in range(1, 26)]  # 25 events, 2000 s apart
+    burst = [obs(100 + k, 300 - 100 * k) for k in range(3)]
+    [record] = pick(older + burst)
+    assert record.event_ids == tuple("evt-" + f"{100 + k:032x}" for k in range(3))
+
+
 def test_a_naive_now_or_a_bad_threshold_raises_and_a_naive_observation_is_refused():
     with pytest.raises(ValueError):
         pick(THREE, now=datetime(2026, 11, 6, 12, 0, 0))
