@@ -258,8 +258,14 @@ Every refusal is the same fixed 400 with the text `Only read-only SPARQL queries
 are fixed too: `Unsafe 'callback' parameter` (400, `UNSAFE_CALLBACK`) and `Upstream Fuseki request failed`
 (502, `UPSTREAM_FAILED`, no exception text).
 
-What this does not change: the proxy still adds the Fuseki credential to anonymous requests and still sends the
-CORS header for any origin. That is bead `contextbroker-7i2`, which is open and is not part of Phase 8.
+What Phase 8 left open, and a later change closed (beads `contextbroker-7i2` and `contextbroker-oiq`): the proxy
+used to add the admin credential to anonymous requests and send the CORS header for any origin. It now holds the
+query-only Fuseki user (`reader`, which Fuseki lets query and ping and nothing else), sends no CORS header, and
+answers only a request whose `Origin` (or `Referer`) names the LodLive page, with a fixed 403
+(`Request not from the LodLive page`) otherwise, before Fuseki is asked. LodLive reads results through a script
+tag, which no CORS header governs, so the origin check, not the header, is what keeps other pages out. A client
+that is not a browser can send any header, so this does not defend against another program on the machine; the
+reader user is what limits that to reading.
 
 ## Stopping the simulator
 
@@ -301,5 +307,4 @@ nothing from `ingestion`.
 
 - One PromQL query for all the metrics of an intent, instead of one set of queries per metric.
 - Automatic updates of the base image digests.
-- Bead `contextbroker-7i2` (the proxy's credential and CORS header).
 - Bead `contextbroker-lln` (the three compose images pinned by tag only).

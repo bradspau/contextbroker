@@ -39,7 +39,7 @@ from data_contracts.syslog_events import (
     event_id,
     recognise,
 )
-from ingestion.load_ontologies import MissingCredential, fuseki_credentials
+from ingestion.load_ontologies import MissingCredential, fuseki_read_credentials
 from ingestion.syslog_parser import map_host, parse_line
 
 BATCH_SIZE = 200
@@ -165,7 +165,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     nothing = ". Nothing was stored."
     try:
-        fuseki_credentials()  # before any network call
+        fuseki_read_credentials()  # before any network call
     except MissingCredential as exc:
         return _refuse(f"{exc}{nothing}")
     try:

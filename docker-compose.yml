@@ -18,21 +18,27 @@ services:
       - "127.0.0.1:3030:3030"
     environment:
       - ADMIN_PASSWORD=${FUSEKI_ADMIN_PASSWORD:?set FUSEKI_ADMIN_PASSWORD in .env (letters and digits only)}
+      - READER_PASSWORD=${FUSEKI_READER_PASSWORD:?set FUSEKI_READER_PASSWORD in .env (letters and digits only, not the admin one)}
     # Authenticated launch, verified on the real image (design/fuseki-auth.md): the wrapper writes
-    # a private one-line password file from the container's own ADMIN_PASSWORD, then starts Fuseki
-    # with --passwd and --auth=basic so every endpoint (update, query, ping) demands the credential.
+    # a private password file with two users from the container's own variables (admin, and reader
+    # for queries only), then starts Fuseki with --passwd and --auth=basic so every endpoint demands
+    # a credential. docker/fuseki/config.ttl names the endpoints and who may use each: query for both
+    # users, update and the graph store for admin only (bead contextbroker-oiq). The config's database
+    # directory is the one --loc named before, so the stored graph is unchanged.
     # $$ keeps compose from interpolating the variable meant for the container shell.
     command:
       - sh
       - -c
       - >-
         umask 077;
-        printf 'admin: %s\n' "$$ADMIN_PASSWORD" > /tmp/fuseki-passwd;
+        [ "$$ADMIN_PASSWORD" != "$$READER_PASSWORD" ] || { echo "FUSEKI_READER_PASSWORD must differ from FUSEKI_ADMIN_PASSWORD" >&2; exit 1; };
+        printf 'admin: %s\nreader: %s\n' "$$ADMIN_PASSWORD" "$$READER_PASSWORD" > /tmp/fuseki-passwd;
         exec java -cp '*:/javalibs/*' org.apache.jena.fuseki.main.cmds.FusekiServerCmd
-        --update --tdb2 --loc=/fuseki-base/databases
-        --passwd=/tmp/fuseki-passwd --auth=basic /network-dataset
+        --conf=/etc/fuseki/config.ttl
+        --passwd=/tmp/fuseki-passwd --auth=basic
     volumes:
       - fuseki-data:/fuseki-base/databases
+      - ./docker/fuseki/config.ttl:/etc/fuseki/config.ttl:ro
     restart: unless-stopped
 
   lodlive-proxy:
@@ -42,7 +48,8 @@ services:
       - "127.0.0.1:8081:8081"
     environment:
       - FUSEKI_QUERY_ENDPOINT=http://fuseki:3030/network-dataset/query
-      - FUSEKI_ADMIN_PASSWORD=${FUSEKI_ADMIN_PASSWORD:?set FUSEKI_ADMIN_PASSWORD in .env}
+      - FUSEKI_READER_PASSWORD=${FUSEKI_READER_PASSWORD:?set FUSEKI_READER_PASSWORD in .env}
+      - LODLIVE_ALLOWED_ORIGINS=${LODLIVE_ALLOWED_ORIGINS:-http://localhost:8888,http://127.0.0.1:8888}
     depends_on:
       - fuseki
     restart: unless-stopped
@@ -84,7 +91,7 @@ services:
       - FUSEKI_DATA_ENDPOINT=http://fuseki:3030/network-dataset/data
       - VM_QUERY_ENDPOINT=http://victoriametrics:8428/api/v1/query
       - TMF921_BASE_URL=http://tmf921-server:8000/tmf-api/intentManagement/v5
-      - FUSEKI_ADMIN_PASSWORD=${FUSEKI_ADMIN_PASSWORD:?set FUSEKI_ADMIN_PASSWORD in .env}
+      - FUSEKI_READER_PASSWORD=${FUSEKI_READER_PASSWORD:?set FUSEKI_READER_PASSWORD in .env}
       - BROKER_JWT_PUBLIC_KEY_FILE=/run/secrets/broker_jwt_public.pem
       - BROKER_JWT_ISSUER=${BROKER_JWT_ISSUER:-}
       - BROKER_JWT_AUDIENCE=${BROKER_JWT_AUDIENCE:-context-broker}

@@ -26,8 +26,10 @@ import requests
 FUSEKI_QUERY_ENDPOINT = os.environ.get(
     "FUSEKI_QUERY_ENDPOINT", "http://fuseki:3030/network-dataset/query"
 )
-FUSEKI_USER = "admin"
-FUSEKI_PASSWORD_ENV = "FUSEKI_ADMIN_PASSWORD"
+# The proxy holds the query-only Fuseki user: it can read the graph and cannot update it (bead
+# contextbroker-oiq). It is never given the admin variable.
+FUSEKI_USER = "reader"
+FUSEKI_PASSWORD_ENV = "FUSEKI_READER_PASSWORD"
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8081"))
 DEFAULT_JSONP_CALLBACK = "_jqjsp"
 # Only allow valid JS identifiers as the callback name — it gets embedded
@@ -38,6 +40,15 @@ _SAFE_CALLBACK = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 REFUSED_QUERY = "Only read-only SPARQL queries are accepted"
 UNSAFE_CALLBACK = "Unsafe 'callback' parameter"
 UPSTREAM_FAILED = "Upstream Fuseki request failed"
+ORIGIN_REFUSED = "Request not from the LodLive page"
+
+# The pages allowed to ask. LodLive loads results through a <script> tag, which no CORS header governs,
+# so any web page in the browser could otherwise read the graph through this proxy. A browser always
+# sends the page's origin in Origin or Referer and a page cannot forge either, so a request is answered
+# only when one of them names an allowed origin; a request that sends neither is refused. The default is
+# the LodLive container as published on this machine (docker-compose.yml, port 8888).
+DEFAULT_ALLOWED_ORIGINS = "http://localhost:8888,http://127.0.0.1:8888"
+ALLOWED_ORIGINS_ENV = "LODLIVE_ALLOWED_ORIGINS"
 
 # The read-only filter. A query is forwarded only when, after comments, string literals and
 # IRIs are removed, its first keyword after any PREFIX and BASE declarations is a query form
@@ -119,8 +130,26 @@ def is_read_only(query) -> bool:
             and not any(t in FORBIDDEN_KEYWORDS for t in tokens))
 
 
+def allowed_origins() -> frozenset[str]:
+    """The allowed page origins from LODLIVE_ALLOWED_ORIGINS (comma separated), read on each call."""
+    raw = os.environ.get(ALLOWED_ORIGINS_ENV) or DEFAULT_ALLOWED_ORIGINS
+    return frozenset(o.strip().rstrip("/").lower() for o in raw.split(",") if o.strip())
+
+
+def request_origin_allowed(origin, referer) -> bool:
+    """True when the page's origin (Origin, else the origin part of Referer) is an allowed one."""
+    seen = None
+    if origin and origin != "null":
+        seen = origin.strip().rstrip("/").lower()
+    elif referer:
+        parts = urllib.parse.urlsplit(referer.strip())
+        if parts.scheme and parts.netloc:
+            seen = f"{parts.scheme}://{parts.netloc}".lower()
+    return seen is not None and seen in allowed_origins()
+
+
 def fuseki_auth():
-    """("admin", value) from FUSEKI_ADMIN_PASSWORD, or None when it is unset or empty.
+    """("reader", value) from FUSEKI_READER_PASSWORD, or None when it is unset or empty.
 
     Read on every call. The value is only ever passed as the requests auth argument;
     it is never logged or put in a response. Duplicated from the broker on purpose: this
@@ -131,6 +160,9 @@ def fuseki_auth():
 
 class JsonpProxyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if not request_origin_allowed(self.headers.get("Origin"), self.headers.get("Referer")):
+            self.send_error(403, ORIGIN_REFUSED)
+            return
         parsed = urllib.parse.urlparse(self.path)
         params = urllib.parse.parse_qs(parsed.query)
         query = params.get("query", [None])[0]
@@ -163,7 +195,9 @@ class JsonpProxyHandler(BaseHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header("Content-Type", "application/javascript; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Vary", "Origin, Referer")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

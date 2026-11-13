@@ -113,7 +113,10 @@ def test_the_note_carries_every_word_and_text_of_the_proxy(proxy):
         assert fixed in text, fixed
     assert "FROM NAMED" in text
     assert "codepoint escape" in text
-    assert "contextbroker-7i2" in text and "open" in _section(text, "The LodLive proxy")
+    # Beads 7i2 and oiq closed the credential and CORS gap the note first listed as open.
+    section = _section(text, "The LodLive proxy")
+    assert "contextbroker-7i2" in section and "contextbroker-oiq" in section
+    assert "Request not from the LodLive page" in section and "reader" in section
 
 
 # ---- sessions, reads and the lock -------------------------------------------------------------
@@ -250,7 +253,7 @@ def test_claude_md_describes_the_phase_8_facts_and_keeps_its_phase_7_lines():
     text = _text(CLAUDE)
     for needed in ("performance-and-hygiene.md", "BROKER_TSDB_SERIES_LIMIT", "BROKER_TELEMETRY_WORKERS",
                    "stop_context.sh", "requirements.in", "series_truncated", "real_sessions",
-                   "contextbroker-7i2", "FUSEKI_DATA_ENDPOINT", "VM_WRITE_ENDPOINT",
+                   "LODLIVE_ALLOWED_ORIGINS", "FUSEKI_DATA_ENDPOINT", "VM_WRITE_ENDPOINT",
                    "--require-hashes", "backend:", "eight keys"):
         assert needed in text, needed
 

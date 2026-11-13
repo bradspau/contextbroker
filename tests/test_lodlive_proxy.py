@@ -3,7 +3,8 @@
 The proxy forwards a query only when its first keyword is SELECT, ASK, DESCRIBE or CONSTRUCT and
 no SERVICE or update keyword appears outside comments, string literals and IRIs. Every refusal is
 one fixed 400 that echoes nothing from the query. The callback 400 and the upstream 502 are fixed
-texts too. The credential and the CORS header are bead contextbroker-7i2 and are not tested here.
+texts too. The credential is the query-only Fuseki user, the response carries no CORS header, and only a request
+from the LodLive page's origin is answered (beads contextbroker-7i2 and contextbroker-oiq).
 
 The proxy is its own image and imports nothing from the broker, so it is loaded from its path.
 """
@@ -22,6 +23,7 @@ import requests
 
 PROXY_PATH = Path(__file__).resolve().parent.parent / "lodlive-proxy" / "jsonp_proxy.py"
 SECRET = "proxy0secret0value"
+PAGE = "http://localhost:8888"
 
 
 @pytest.fixture(scope="module")
@@ -50,25 +52,35 @@ def _upstream(text='{"head":{},"results":{"bindings":[]}}'):
     return r
 
 
-def _call(base, query="SELECT * WHERE {?s ?p ?o}", callback="lodlive"):
+def _open(url, origin=PAGE, referer=None):
+    """GET as a browser page would: Origin (or Referer) names the page that made the request."""
+    request = urllib.request.Request(url)
+    if origin is not None:
+        request.add_header("Origin", origin)
+    if referer is not None:
+        request.add_header("Referer", referer)
+    return urllib.request.urlopen(request, timeout=10)
+
+
+def _call(base, query="SELECT * WHERE {?s ?p ?o}", callback="lodlive", **page):
     url = base + "/?" + urllib.parse.urlencode({"query": query, "callback": callback})
-    with urllib.request.urlopen(url, timeout=10) as resp:
+    with _open(url, **page) as resp:
         return resp.status, resp.read().decode("utf-8")
 
 
 def test_proxy_forwards_with_the_credential_when_set(proxy_module, server, monkeypatch):
-    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", SECRET)
+    monkeypatch.setenv("FUSEKI_READER_PASSWORD", SECRET)
     with patch.object(requests, "get", return_value=_upstream()) as get:
         status, body = _call(server)
     assert status == 200
     assert body.startswith("lodlive(") and body.endswith(");")
     assert get.call_count == 1
-    assert get.call_args.kwargs["auth"] == ("admin", SECRET)
+    assert get.call_args.kwargs["auth"] == ("reader", SECRET)
     assert SECRET not in body
 
 
 def test_proxy_forwards_without_auth_when_unset(proxy_module, server, monkeypatch):
-    monkeypatch.delenv("FUSEKI_ADMIN_PASSWORD", raising=False)
+    monkeypatch.delenv("FUSEKI_READER_PASSWORD", raising=False)
     with patch.object(requests, "get", return_value=_upstream()) as get:
         status, body = _call(server)
     assert status == 200
@@ -76,18 +88,18 @@ def test_proxy_forwards_without_auth_when_unset(proxy_module, server, monkeypatc
 
 
 def test_proxy_reads_the_environment_on_each_request(proxy_module, server, monkeypatch):
-    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "first0value")
+    monkeypatch.setenv("FUSEKI_READER_PASSWORD", "first0value")
     with patch.object(requests, "get", return_value=_upstream()) as get:
         _call(server)
-        monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "second0value")
+        monkeypatch.setenv("FUSEKI_READER_PASSWORD", "second0value")
         _call(server)
     assert [c.kwargs["auth"] for c in get.call_args_list] == [
-        ("admin", "first0value"), ("admin", "second0value")]
+        ("reader", "first0value"), ("reader", "second0value")]
 
 
 def test_credential_never_appears_in_a_failure_response_or_the_log(
         proxy_module, server, monkeypatch, capsys):
-    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", SECRET)
+    monkeypatch.setenv("FUSEKI_READER_PASSWORD", SECRET)
     with patch.object(requests, "get", side_effect=requests.ConnectionError("down")):
         with pytest.raises(urllib.error.HTTPError) as exc:
             _call(server)
@@ -101,7 +113,7 @@ def test_credential_never_appears_in_a_failure_response_or_the_log(
 def test_proxy_still_refuses_a_missing_query_without_calling_fuseki(proxy_module, server):
     with patch.object(requests, "get") as get:
         with pytest.raises(urllib.error.HTTPError) as exc:
-            urllib.request.urlopen(server + "/?callback=lodlive", timeout=10)
+            _open(server + "/?callback=lodlive")
     assert exc.value.code == 400
     get.assert_not_called()
 
@@ -240,7 +252,7 @@ def _error_body(base, query=None, callback="lodlive"):
     if query is not None:
         params["query"] = query
     with pytest.raises(urllib.error.HTTPError) as exc:
-        urllib.request.urlopen(base + "/?" + urllib.parse.urlencode(params), timeout=10)
+        _open(base + "/?" + urllib.parse.urlencode(params))
     return exc.value.code, exc.value.read().decode("utf-8", "replace")
 
 
@@ -323,3 +335,71 @@ def test_each_lodlive_template_is_read_only_and_is_forwarded(proxy_module, serve
     assert status == 200
     assert get.call_count == 1
     assert get.call_args.kwargs["params"] == {"query": query}
+
+
+# --- the credential and the origin (beads contextbroker-7i2 and contextbroker-oiq) ----------
+
+
+def test_the_proxy_never_uses_or_reads_the_admin_credential(proxy_module, server, monkeypatch):
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "admin0value")
+    monkeypatch.delenv("FUSEKI_READER_PASSWORD", raising=False)
+    with patch.object(requests, "get", return_value=_upstream()) as get:
+        _call(server)
+    assert get.call_args.kwargs["auth"] is None
+    assert "FUSEKI_ADMIN_PASSWORD" not in PROXY_PATH.read_text()
+
+
+def test_a_successful_answer_has_no_cors_header_and_cannot_be_cached(proxy_module, server):
+    with patch.object(requests, "get", return_value=_upstream()):
+        url = server + "/?" + urllib.parse.urlencode(
+            {"query": "SELECT * WHERE {?s ?p ?o}", "callback": "lodlive"})
+        with _open(url) as resp:
+            headers = {k.lower(): v for k, v in resp.getheaders()}
+    assert "access-control-allow-origin" not in headers
+    assert headers["x-content-type-options"] == "nosniff"
+    assert headers["cache-control"] == "no-store"
+    assert "Access-Control" not in PROXY_PATH.read_text()
+
+
+@pytest.mark.parametrize("origin,referer", [
+    (None, None),                           # a script request that sends neither
+    ("http://evil.example", None),
+    ("null", None),                         # a sandboxed or privacy-stripped page
+    ("http://localhost:8889", None),        # right host, wrong port
+    ("http://localhost:8888.evil.example", None),
+    (None, "http://evil.example/page"),
+    (None, "http://localhost:8888.evil.example/page"),
+    ("http://evil.example", "http://localhost:8888/"),   # Origin wins over Referer
+])
+def test_a_request_not_from_the_lodlive_page_is_refused_before_any_call(
+        proxy_module, server, origin, referer):
+    with patch.object(requests, "get") as get:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _call(server, origin=origin, referer=referer)
+    assert exc.value.code == 403
+    body = exc.value.read().decode("utf-8", "replace")
+    assert proxy_module.ORIGIN_REFUSED in body
+    assert "evil" not in body and "SELECT" not in body
+    get.assert_not_called()
+
+
+@pytest.mark.parametrize("origin,referer", [
+    ("http://localhost:8888", None),
+    ("http://127.0.0.1:8888", None),
+    (None, "http://localhost:8888/lodlive/app_en.html?x=1"),
+    ("HTTP://LOCALHOST:8888/", None),
+])
+def test_a_request_from_the_lodlive_page_is_answered(proxy_module, server, origin, referer):
+    with patch.object(requests, "get", return_value=_upstream()):
+        status, _body = _call(server, origin=origin, referer=referer)
+    assert status == 200
+
+
+def test_the_allowed_origins_come_from_the_environment_on_each_request(
+        proxy_module, server, monkeypatch):
+    monkeypatch.setenv("LODLIVE_ALLOWED_ORIGINS", "http://lodlive.internal:9000, http://other:1")
+    with patch.object(requests, "get", return_value=_upstream()):
+        assert _call(server, origin="http://lodlive.internal:9000")[0] == 200
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _call(server, origin=PAGE)
+    assert exc.value.code == 403

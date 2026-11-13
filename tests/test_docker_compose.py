@@ -2,12 +2,16 @@ from pathlib import Path
 
 import re
 
+import rdflib
 import yaml
 
 from broker_engine.validation import max_as_of_seconds
 from broker_state.process import load_settings
 
 COMPOSE_PATH = Path(__file__).resolve().parent.parent / "docker-compose.yml"
+FUSEKI_CONFIG_PATH = Path(__file__).resolve().parent.parent / "docker" / "fuseki" / "config.ttl"
+FUSEKI = rdflib.Namespace("http://jena.apache.org/fuseki#")
+TDB2 = rdflib.Namespace("http://jena.apache.org/2016/tdb#")
 
 
 def _fuseki_command_text(fuseki):
@@ -33,8 +37,9 @@ def test_docker_compose_defines_victoriametrics_and_fuseki():
     assert services["fuseki"]["image"] == "secoresearch/fuseki:6.1.0"
     command = _fuseki_command_text(services["fuseki"])
     assert "FusekiServerCmd" in command
-    assert command.rstrip().endswith("/network-dataset")
-    assert "--update" in command.split()
+    # The dataset, its endpoints and who may use each are in the mounted config (docker/fuseki/config.ttl).
+    assert "--conf=/etc/fuseki/config.ttl" in command.split()
+    assert "./docker/fuseki/config.ttl:/etc/fuseki/config.ttl:ro" in services["fuseki"]["volumes"]
 
 
 def test_fuseki_dataset_is_persistent():
@@ -43,11 +48,32 @@ def test_fuseki_dataset_is_persistent():
 
     words = _fuseki_command_text(fuseki).split()
     assert "--mem" not in words
-    assert "--tdb2" in words
-    loc = next(a for a in words if a.startswith("--loc="))[len("--loc="):]
+    config = rdflib.Graph().parse(FUSEKI_CONFIG_PATH, format="turtle")
+    locations = [str(o) for o in config.objects(None, TDB2.location)]
+    assert len(locations) == 1
     mounts = [v.split(":")[1] for v in fuseki["volumes"] if v.startswith("fuseki-data:")]
-    assert mounts and loc.rstrip("/") == mounts[0].rstrip("/")
+    assert mounts and locations[0].rstrip("/") == mounts[0].rstrip("/")
     assert "fuseki-data" in content["volumes"]
+
+
+def _allowed_users_by_operation():
+    config = rdflib.Graph().parse(FUSEKI_CONFIG_PATH, format="turtle")
+    found = {}
+    for endpoint in config.objects(None, FUSEKI.endpoint):
+        operation = config.value(endpoint, FUSEKI.operation)
+        name = str(config.value(endpoint, FUSEKI.name))
+        found[(name, str(operation).rsplit("#", 1)[-1])] = {
+            str(u) for u in config.objects(endpoint, FUSEKI.allowedUsers)}
+    return found
+
+
+def test_fuseki_lets_only_admin_change_the_graph_and_reader_query():
+    # Bead contextbroker-oiq: the API and the LodLive proxy hold the reader credential.
+    assert _allowed_users_by_operation() == {
+        ("query", "query"): {"admin", "reader"},
+        ("update", "update"): {"admin"},
+        ("data", "gsp-rw"): {"admin"},
+    }
 
 
 def _env_as_dict(env):
@@ -105,15 +131,17 @@ def test_fuseki_launches_with_authentication_enforced():
     words = command.split()
     assert any(w.startswith("--passwd=") for w in words)
     assert "--auth=basic" in words
-    # The options come before the dataset name, which stays last.
-    assert words.index("--auth=basic") < words.index("/network-dataset")
-    # The shell sees ADMIN_PASSWORD; compose must not interpolate it (written $$).
-    assert "$$ADMIN_PASSWORD" in command
-    assert "${ADMIN_PASSWORD" not in command
+    # The shell sees both passwords; compose must not interpolate them (written $$).
+    for name in ("ADMIN_PASSWORD", "READER_PASSWORD"):
+        assert f"$${name}" in command
+        assert f"${{{name}" not in command
     stripped = command.replace("$$", "")
-    assert "$ADMIN_PASSWORD" not in stripped
-    # The password file is private and holds the single admin line.
+    assert "$ADMIN_PASSWORD" not in stripped and "$READER_PASSWORD" not in stripped
+    # The password file is private and holds exactly the two users.
     assert "umask 077" in command
+    assert "printf 'admin: %s\\nreader: %s\\n'" in command
+    # The container refuses to start when both users would share one password.
+    assert '[ "$$ADMIN_PASSWORD" != "$$READER_PASSWORD" ]' in command
 
 
 def test_no_default_fuseki_credential():
@@ -123,23 +151,27 @@ def test_no_default_fuseki_credential():
         assert env.get("ADMIN_PASSWORD") != "admin", name
         assert "admin" not in [v for v in env.values()], name
         for value in env.values():
-            if "FUSEKI_ADMIN_PASSWORD" in value:
-                assert "FUSEKI_ADMIN_PASSWORD:?" in value, (name, "needs the :? form, no default")
+            for variable in ("FUSEKI_ADMIN_PASSWORD", "FUSEKI_READER_PASSWORD"):
+                if variable in value:
+                    assert f"{variable}:?" in value, (name, "needs the :? form, no default")
     fuseki_env = _env_as_dict(services["fuseki"]["environment"])
     assert fuseki_env["ADMIN_PASSWORD"].startswith("${FUSEKI_ADMIN_PASSWORD:?")
+    assert fuseki_env["READER_PASSWORD"].startswith("${FUSEKI_READER_PASSWORD:?")
 
 
-def test_api_and_proxy_receive_the_credential_in_the_required_form():
-    # design/fuseki-auth.md records "API reads need the credential: yes", so both
-    # readers get the variable, in the same :? form as Fuseki. Nothing else does.
+def test_api_and_proxy_receive_only_the_query_only_credential():
+    # design/fuseki-auth.md records "API reads need the credential: yes". The API and the proxy get the
+    # reader variable (query only), in the same :? form as Fuseki, and never the admin one, so neither
+    # can change the network graph (bead contextbroker-oiq). Nothing else gets either.
     services = yaml.safe_load(COMPOSE_PATH.read_text())["services"]
     for name in ("contextbroker-api", "lodlive-proxy"):
         env = _env_as_dict(services[name]["environment"])
-        assert env["FUSEKI_ADMIN_PASSWORD"].startswith("${FUSEKI_ADMIN_PASSWORD:?"), name
+        assert env["FUSEKI_READER_PASSWORD"].startswith("${FUSEKI_READER_PASSWORD:?"), name
+        assert "FUSEKI_ADMIN_PASSWORD" not in env and "ADMIN_PASSWORD" not in env, name
     for name in ("victoriametrics", "lodlive", "tmf921-server"):
         env = _env_as_dict(services[name].get("environment", []))
-        assert "FUSEKI_ADMIN_PASSWORD" not in env, name
-        assert "ADMIN_PASSWORD" not in env, name
+        for variable in ("FUSEKI_ADMIN_PASSWORD", "ADMIN_PASSWORD", "FUSEKI_READER_PASSWORD", "READER_PASSWORD"):
+            assert variable not in env, (name, variable)
 
 
 def test_compose_holds_no_literal_password_value():

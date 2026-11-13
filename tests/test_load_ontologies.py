@@ -595,6 +595,41 @@ def test_fuseki_auth_reads_the_environment_each_call(monkeypatch):
     assert fuseki_auth() == ("admin", "def456")
 
 
+# --- the query-only credential (bead contextbroker-oiq) ---
+
+
+def test_the_read_pair_prefers_the_query_only_user_and_the_write_pair_is_admin_only(monkeypatch):
+    from broker_engine.sparql_resolver import fuseki_auth, fuseki_write_auth
+    monkeypatch.setenv("FUSEKI_ADMIN_PASSWORD", "admin0value")
+    monkeypatch.delenv("FUSEKI_READER_PASSWORD", raising=False)
+    assert fuseki_auth() == ("admin", "admin0value")  # an operator shell with only the admin variable
+    monkeypatch.setenv("FUSEKI_READER_PASSWORD", "reader0value")
+    assert fuseki_auth() == ("reader", "reader0value")
+    assert fuseki_write_auth() == ("admin", "admin0value")
+    monkeypatch.delenv("FUSEKI_ADMIN_PASSWORD")
+    assert fuseki_auth() == ("reader", "reader0value")  # the API container: reader only
+    assert fuseki_write_auth() is None
+    monkeypatch.setenv("FUSEKI_READER_PASSWORD", "")
+    assert fuseki_auth() is None
+
+
+def test_a_command_that_writes_never_accepts_the_query_only_credential(monkeypatch):
+    monkeypatch.delenv("FUSEKI_ADMIN_PASSWORD", raising=False)
+    monkeypatch.setenv("FUSEKI_READER_PASSWORD", "reader0value")
+    with pytest.raises(loader.MissingCredential) as exc:
+        loader.fuseki_credentials()
+    assert "FUSEKI_ADMIN_PASSWORD" in str(exc.value) and "reader0value" not in str(exc.value)
+    assert loader.fuseki_read_credentials() == ("reader", "reader0value")
+
+
+def test_a_command_that_reads_names_both_variables_when_neither_is_set(monkeypatch):
+    monkeypatch.delenv("FUSEKI_ADMIN_PASSWORD", raising=False)
+    monkeypatch.delenv("FUSEKI_READER_PASSWORD", raising=False)
+    with pytest.raises(loader.MissingCredential) as exc:
+        loader.fuseki_read_credentials()
+    assert "FUSEKI_READER_PASSWORD" in str(exc.value) and "FUSEKI_ADMIN_PASSWORD" in str(exc.value)
+
+
 # --- retiring the graph intent vocabulary (D-09) ---
 
 MIGRATION = ROOT / "ontologies" / "migrations" / "001-retire-operational-intent.ru"

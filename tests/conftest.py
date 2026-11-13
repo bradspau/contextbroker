@@ -13,6 +13,8 @@ def _per_test_state_files(tmp_path, monkeypatch):
     state with another and none can touch /data."""
     from broker_state.process import reset_store
 
+    # A developer shell may hold the query-only credential; no test should pick it up by accident.
+    monkeypatch.delenv("FUSEKI_READER_PASSWORD", raising=False)
     monkeypatch.setenv("BROKER_STATE_PATH", str(tmp_path / "broker-state.sqlite3"))
     monkeypatch.setenv("BROKER_DECISION_RECORDS_PATH", str(tmp_path / "decision-records.sqlite3"))
     # No test can probe or write a real Qdrant: the URL points at a closed loopback port.

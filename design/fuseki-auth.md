@@ -105,3 +105,45 @@ Health ping needs the credential: yes
 `scripts/check_fuseki_auth.sh [DATASET_URL]` sends one no-credential no-op
 update and prints one fixed line. Exit 0 means refused (401 or 403), exit 1
 means a 2xx was accepted, exit 2 is anything else, including no connection.
+
+## Two users and per-endpoint access (bead contextbroker-oiq)
+
+Measured on 2026-11-13 against throwaway containers of the same image (127.0.0.1:3039, in-container or
+copied database, random passwords, removed afterwards). The persistent `fuseki` container and the
+`contextbroker_fuseki-data` volume were not used; the live graph was only copied (read-only mount, `fuseki`
+stopped) to check that the new configuration opens it.
+
+Before this change Fuseki had one user, and the API and the LodLive proxy held its password, so a fault or a
+bug in either could change the graph. Now the password file has two lines, `admin` and `reader`, and
+`docker/fuseki/config.ttl` gives each endpoint a `fuseki:allowedUsers` list. The dataset section replaces the
+`--update --tdb2 --loc=... /network-dataset` command line and names the same database directory, so the stored
+graph is unchanged (a copy of the live volume opened with the same 25 bindings and 368 triples).
+
+| Request | No credential | `reader` | `admin` |
+| --- | --- | --- | --- |
+| `GET /network-dataset/query` (`ASK`) | 401 | 200 | 200 |
+| `POST /network-dataset/update` | 401 | 403 | 204 |
+| `POST /network-dataset/data` | 401 | 403 | 200 |
+| `GET /network-dataset/data` | 401 | 403 | 200 |
+| `GET /$/ping` | **200** | 200 | 200 |
+| `GET /$/datasets` | 401 | 401 | 200 |
+| a wrong password | 401 | 401 | 401 |
+
+The ping is the one change from the single-user launch: it answered 401 without a credential then and answers 200
+now, because with a configuration file the access lists cover the dataset's endpoints and the ping is outside
+them. It returns liveness only and Fuseki is published on 127.0.0.1. Every route that reads or changes data, and
+every other `/$/` route, still needs a credential.
+
+The dataset URL itself (`/network-dataset` with a query parameter) is no longer an endpoint: nothing used it.
+The image's extra `/ds` path has no query or update endpoint (404 and 405 without a credential).
+
+The compose wrapper refuses to start (exit 1, one fixed line on stderr) when the two passwords are equal, since
+sharing one would make the reader user pointless. `scripts/check_fuseki_reader.sh` repeats the update and
+query rows for `reader` against a running Fuseki and exits 0 only when the update is refused and the query
+answered.
+
+Decision lines for later plans
+
+API reads need the reader credential: yes
+API writes to the graph: none
+Health ping needs a credential: no (it is open; the broker still sends the reader one)

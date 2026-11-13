@@ -114,8 +114,8 @@ situation that holds the events class (the answer to an events request returns i
 everything except the write. `--query-endpoint` defaults to `FUSEKI_QUERY_ENDPOINT`. The command reads the
 situation and its events from the state file and the configured links from Fuseki with SELECT queries only,
 and only when a rule could select (Fuseki is not asked unless enough events exist). It never updates
-Fuseki. It needs `FUSEKI_ADMIN_PASSWORD` in its environment, which the API container has; the value is
-never printed.
+Fuseki. It needs `FUSEKI_READER_PASSWORD` (or `FUSEKI_ADMIN_PASSWORD`) in its environment; the API container has the
+reader one, which is enough because the command only reads. The value is never printed.
 
 Records are written in one transaction. On success it prints one summary line of counts only, and exits 0:
 
@@ -138,8 +138,8 @@ nothing on standard output and nothing written. The texts are fixed and name no 
 | conflicting or malformed link records at the conflict read | the network graph answered with an unusable topology |
 | the state file cannot be opened, read or written | state store unavailable |
 
-Two more refusals come before the id is looked at: `FUSEKI_ADMIN_PASSWORD` unset (the text names the
-variable) and a bad promotion setting (the text names the variable, never the value). The counts are
+Two more refusals come before the id is looked at: both `FUSEKI_READER_PASSWORD` and `FUSEKI_ADMIN_PASSWORD` unset (the text names the
+variables) and a bad promotion setting (the text names the variable, never the value). The counts are
 all the command prints: no raw line, message text, host, neighbour name or requester is printed, logged or
 stored in a record.
 

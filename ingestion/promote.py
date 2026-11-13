@@ -44,7 +44,7 @@ from data_contracts.adjacency import recognise_adjacency
 from data_contracts.situation_record import SITUATION_ID_PATTERN, StoredSituation
 from data_contracts.syslog_events import EVENT_KINDS, EVENT_SOURCE
 from data_contracts.syslog_events import Quarantined
-from ingestion.load_ontologies import MissingCredential, fuseki_credentials
+from ingestion.load_ontologies import MissingCredential, fuseki_read_credentials
 from ingestion.syslog_parser import map_host, parse_line
 from state_reconciliation.event_reconciler import CONFIGURED_LINK_IN_FORCE, ConfiguredSide
 from state_reconciliation.promotion import (
@@ -243,7 +243,7 @@ def main(argv=None) -> int:
                     help="Fuseki query endpoint (default FUSEKI_QUERY_ENDPOINT)")
     args = ap.parse_args(argv)
     try:
-        fuseki_credentials()  # before any network call
+        fuseki_read_credentials()  # before any network call
     except MissingCredential as exc:
         return _refuse(str(exc).rstrip("."))
     try:

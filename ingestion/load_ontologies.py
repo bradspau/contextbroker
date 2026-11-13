@@ -12,7 +12,12 @@ import requests
 import rdflib
 from pyshacl import validate
 
-from broker_engine.sparql_resolver import FUSEKI_PASSWORD_ENV, fuseki_auth
+from broker_engine.sparql_resolver import (
+    FUSEKI_PASSWORD_ENV,
+    FUSEKI_READER_PASSWORD_ENV,
+    fuseki_auth,
+    fuseki_write_auth,
+)
 from broker_engine.validation import REQUEST_TIMEOUT_S
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -39,11 +44,24 @@ class MissingCredential(SystemExit):
 
 
 def fuseki_credentials() -> tuple[str, str]:
-    """The Fuseki credential from the environment, or exit naming the variable."""
-    auth = fuseki_auth()
+    """The Fuseki admin credential (the one that may update the graph) from the environment, or exit
+    naming the variable. For the commands that write: the loader, the binder, the seed script."""
+    auth = fuseki_write_auth()
     if auth is None:
         raise MissingCredential(
             f"{FUSEKI_PASSWORD_ENV} is not set; set it in the environment (there is no default)"
+        )
+    return auth
+
+
+def fuseki_read_credentials() -> tuple[str, str]:
+    """The Fuseki credential for a command that only reads (the query-only user, else the admin one),
+    or exit naming both variables. The check runs before any network call."""
+    auth = fuseki_auth()
+    if auth is None:
+        raise MissingCredential(
+            f"{FUSEKI_READER_PASSWORD_ENV} (or {FUSEKI_PASSWORD_ENV}) is not set; set it in the "
+            "environment (there is no default)"
         )
     return auth
 

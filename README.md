@@ -46,7 +46,7 @@ structure below by a strangler migration.
 | MCP server | Built and unit-tested, **not served** by anything, and an **optional extra**: `pip install -r requirements-mcp.txt`. The image does not install it and its tests skip without it |
 | JSON-LD exchange profile (`Accept: application/ld+json` on `POST /context/request`) | Built, unit-tested against rdflib and a known-answer fixture pair; the native JSON stays the default (see [JSON-LD](#json-ld) and [design/exchange-profile.md](design/exchange-profile.md)) |
 | Semantic promotion (promoted conflicts and hypotheses, an operator command) | Built, unit-tested; nothing promoted is ever evidence, and one neighbour-discovery wording is unverified against a real device (see [Promoted state](#promoted-state) and [design/semantic-promotion.md](design/semantic-promotion.md)) |
-| Performance and hygiene (one reused HTTP session per upstream, parallel telemetry reads, a narrower per-intent lock, a series limit on `interfaces-nonzero`, two caches, hashed dependency locks, digest-pinned base images, a read-only LodLive proxy, `stop_context.sh`, the agent's backend line) | Built, unit-tested; the real-engine VictoriaMetrics check is skipped unless `VM_PARITY_URL` is set. The proxy still adds the Fuseki credential to anonymous requests (bead `contextbroker-7i2`, open) (see [design/performance-and-hygiene.md](design/performance-and-hygiene.md)) |
+| Performance and hygiene (one reused HTTP session per upstream, parallel telemetry reads, a narrower per-intent lock, a series limit on `interfaces-nonzero`, two caches, hashed dependency locks, digest-pinned base images, a read-only LodLive proxy, `stop_context.sh`, the agent's backend line) | Built, unit-tested; the real-engine VictoriaMetrics check is skipped unless `VM_PARITY_URL` is set. The proxy holds the query-only Fuseki user and answers only the LodLive page (see [design/performance-and-hygiene.md](design/performance-and-hygiene.md)) |
 | Action-readiness check (`governance_gate`) and executor (`action_lifecycle`) | A library only. The check fails closed on evidence freshness, catalogue membership, scope and loop reservation; it does not test identity or approval. The only controller is `NullController`, so nothing is ever changed on a device. No runtime path submits a proposal. |
 | TMF921 verification (`"source":"tmf921"`, the only source) | Built. Pushes fresh observations to the intent server, reads its reports, and maps them to a verdict. The old graph intent path was removed (see [Removed: the old graph intent path](#removed-the-old-graph-intent-path)). |
 | Outcomes, high-water marks, situation records, events and decision records | Durable. Outcomes, high-water marks, situation records, syslog events and promoted records are in one SQLite file on the `broker-state` volume; decision records are a file by default; the reservation book and the action catalogue stay in memory (see [Situation records](#situation-records) and [design/durable-state.md](design/durable-state.md)) |
@@ -55,7 +55,7 @@ structure below by a strangler migration.
 | Governed knowledge (tracked OKF bundles in `knowledge/`, Qdrant hybrid index, `knowledge` context class, approved-action references) | Built, unit-tested; the four bundles are drafts, approval is a reviewed commit, and a response carries references only, never a body (see [Knowledge](#knowledge) and [design/knowledge.md](design/knowledge.md)). The suite uses a fake embedder: the real models and a live Qdrant were not part of the test run |
 | Redpanda, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 3300 tests passing and 28 skipped (`pytest`): 15 live TMF921 tests, skipped
+The test suite has 3328 tests passing and 28 skipped (`pytest`): 15 live TMF921 tests, skipped
 unless `TMF921_LIVE=1`, 11 real-engine Fuseki parity tests, skipped unless
 `FUSEKI_PARITY_URL` is set, and 2 real-engine VictoriaMetrics tests, skipped unless `VM_PARITY_URL` is set (see [Running the tests](#running-the-tests)). The work is on the `fullnetwork` branch
 (pushed to GitHub) and has not been reviewed by anyone else.
@@ -554,7 +554,15 @@ refuses to run without it). Use letters and digits only, for example the output 
 
 ```
 FUSEKI_ADMIN_PASSWORD=<generated value>
+FUSEKI_READER_PASSWORD=<a different generated value>
 ```
+
+The second one is a query-only user (see [The Fuseki credential](#the-fuseki-credential)); it must differ
+from the first, and Fuseki refuses to start if the two are equal. On an install that has only the admin
+value, add `FUSEKI_READER_PASSWORD` to `.env`, then recreate `fuseki`, `lodlive-proxy` and
+`contextbroker-api` (`docker compose up -d --no-deps fuseki lodlive-proxy contextbroker-api`, then
+`docker network connect contextbroker-arch_default contextbroker-api`). The graph is kept: the volume and
+the database directory do not change. Check it with `scripts/check_fuseki_reader.sh`.
 
 Set the Qdrant key in `.env` as well. It is also required, with no default; use letters and
 digits only (for example `openssl rand -hex 24`), and never print or commit it:
@@ -588,21 +596,37 @@ This starts:
 
 ### The Fuseki credential
 
-Fuseki starts with authentication enforced (`--passwd` and `--auth=basic`), as user
-`admin` with the password from `FUSEKI_ADMIN_PASSWORD`. Every endpoint needs it, reads
-and the `/$/ping` health ping included, so the browser UI at `http://localhost:3030/`
-asks for it too. The API, the loader, `seed_graph.py`, `bind_intent` and the LodLive
-proxy send it from the same variable. Export it in your shell before running the
-loader, `seed_graph.py` or `bind_intent`:
+Fuseki starts with authentication enforced (`--passwd` and `--auth=basic`) and two users. `docker/fuseki/config.ttl`
+names the endpoints and who may use each:
+
+| User | Password variable | May use |
+|---|---|---|
+| `admin` | `FUSEKI_ADMIN_PASSWORD` | `/network-dataset/query`, `/update` and `/data` (the graph store), and the `/$/` server routes |
+| `reader` | `FUSEKI_READER_PASSWORD` | `/network-dataset/query` and `/$/ping` only (no other `/$/` route) |
+
+Every route that reads or changes the graph needs a credential, so the browser UI at `http://localhost:3030/` asks
+for one too. The one exception is `/$/ping`, which answers 200 without a credential (liveness only; Fuseki is
+published on 127.0.0.1). The API and the LodLive proxy are given only the reader variable, so neither can change the
+network graph; the API container does not hold the admin value at all. The loader, `seed_graph.py` and
+`bind_intent` write the graph, so they need the admin value. Export it in your shell before running them, on
+the host (`bind_intent` writes `ontologies/abox`, which the API container cannot):
 
 ```bash
 export FUSEKI_ADMIN_PASSWORD=<the value from .env>
 ```
 
-`scripts/check_fuseki_auth.sh` sends one unauthenticated no-op update and exits 0 when
-Fuseki refuses it, 1 when it was accepted. Run it after any change to the Fuseki
-service. The single credential can read and write; a separate read-only credential for
-the API is not built.
+`ingestion.promote` and `ingestion.syslog_ingest` only read, so they run in the API container with the reader
+value. In a shell that holds only the admin value, the read helpers fall back to it.
+
+`scripts/check_fuseki_auth.sh` sends one unauthenticated no-op update and exits 0 when Fuseki refuses it, 1 when
+it was accepted. `FUSEKI_READER_PASSWORD=... scripts/check_fuseki_reader.sh` sends a no-op update and a query
+as the reader and exits 0 when the update is refused and the query answered. Run both after any change to the
+Fuseki service.
+
+The LodLive proxy answers only a request whose `Origin` (or, for a script tag, `Referer`) names the LodLive page,
+`http://localhost:8888` or `http://127.0.0.1:8888` by default (`LODLIVE_ALLOWED_ORIGINS` changes it). Any other
+page, and a request that sends neither header, gets a fixed 403 before Fuseki is asked. Its answers carry no CORS
+header.
 
 ### Exposure and the image
 
@@ -1421,7 +1445,8 @@ into an image).
    operator makes the metric map fail to load. The operators were checked against
    the live server on 2026-10-28 (`tests/test_tmf921_live.py`): the server's
    `quan:smaller` is strict, so a value exactly at the limit is a `failure`.
-   Export `FUSEKI_ADMIN_PASSWORD` first: the tool reads and writes the network graph with it.
+   Export `FUSEKI_ADMIN_PASSWORD` first and run it on the host: the tool writes the network graph with it and
+   writes `ontologies/abox`.
    Bindings are written only this way; there is no bindings file.
 5. Assess, with a token that has the `context:assess` scope (see [Authentication](#authentication)):
    `curl -X POST localhost:8080/context/assess -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"intent_id":"<id>","time_window":"30m"}'` (a current assess pushes observations to the intent server)
@@ -1482,7 +1507,7 @@ Docker required to run the suite:
 pytest tests/ -v
 ```
 
-The full suite is 3300 passed and 28 skipped (the 15 live TMF921 tests, the 11 real-engine
+The full suite is 3328 passed and 28 skipped (the 15 live TMF921 tests, the 11 real-engine
 Fuseki parity tests and the 2 real-engine VictoriaMetrics tests are skipped unless their variables are set).
 
 Every test gets its own state file and decision-record file from `tests/conftest.py`, so no test
