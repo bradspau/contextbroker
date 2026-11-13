@@ -209,8 +209,13 @@ curl -sI -H "Authorization: Bearer $tok" -H "Accept: application/vnd.oci.image.i
   requires a digest on every `FROM` of the three Dockerfiles.
 - The TMF921 image: `docker/tmf921/Dockerfile` now runs exactly `RUN mvn dependency:resolve -q`, with no pipe
   and no fallback, so a failing resolve fails the build. The image was not rebuilt in this phase.
-- The three compose services pinned by tag only (VictoriaMetrics, Fuseki and Qdrant in `docker-compose.yml`)
-  are bead `contextbroker-lln`.
+- The three compose images that are pulled (VictoriaMetrics, Fuseki and Qdrant in `docker-compose.yml`) are
+  pinned tag plus index digest, read with the command above on 2026-11-13 (bead `contextbroker-lln`):
+  `victoriametrics/victoria-metrics:v1.102.0` = `sha256:b51f6910c985bb146a151a44f0c877e7864b8db452c88c732d1591cbd18a5f12`,
+  `secoresearch/fuseki:6.1.0` = `sha256:684f47c04deb2d60886fb112d048b4a526992e251771a548eb6ce9e5a7d09055`,
+  `qdrant/qdrant:v1.19.2-unprivileged` = `sha256:efb96a9425a90d2d5a1a0a474156280df1892dcdf1af3e8515bd2589b1bfd88b`.
+  Refreshed by hand like the Dockerfiles; `tests/test_dockerfile_pins.py` requires a digest on every pulled
+  `image:` of the compose file (a service with a `build:` is exempt).
 - Two real-engine checks are skipped unless their URL is set, and refuse the persistent stores before any
   request. Both use a throwaway container with no volume, on a loopback port other than the persistent one:
 

@@ -285,16 +285,38 @@ def test_unconfigured_api_refuses_every_context_route(missing, method, path, mon
     _assert_denied(_call(method, path, headers=headers))
 
 
-def test_unconfigured_api_still_serves_openapi(monkeypatch):
+def test_unconfigured_api_refuses_the_documentation(monkeypatch):
     for name in ("BROKER_JWT_PUBLIC_KEY", "BROKER_JWT_PUBLIC_KEY_FILE", "BROKER_JWT_ISSUER"):
         monkeypatch.delenv(name, raising=False)
     assert auth.load_auth_config() is None
-    assert client.get("/openapi.json").status_code == 200
+    _assert_denied(client.get("/openapi.json", headers=auth_headers("context:read")))
+
+
+# --- the generated documentation needs a token too (bead contextbroker-8at) ---
+
+DOC_PATHS = ["/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"]
+
+
+@pytest.mark.parametrize("path", DOC_PATHS)
+def test_documentation_routes_need_a_token(path, no_upstream):
+    _assert_denied(client.get(path))
+    _assert_denied(client.get(path, headers={"Authorization": "Bearer not.a.token"}))
+
+
+@pytest.mark.parametrize("path", DOC_PATHS)
+def test_documentation_routes_need_the_read_scope(path):
+    r = client.get(path, headers=auth_headers("context:assess"))
+    assert r.status_code == 403 and r.json() == SCOPE_DENIED
 
 
 @pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
-def test_documentation_routes_stay_public(path):
-    assert client.get(path).status_code == 200
+def test_documentation_routes_answer_a_read_token(path):
+    assert client.get(path, headers=auth_headers("context:read")).status_code == 200
+
+
+def test_health_stays_public():
+    with patch("broker_engine.main.probe_upstreams", return_value={"status": "ok"}):
+        assert client.get("/health").status_code == 200
 
 
 # --- key file and rotation (D-06) ---

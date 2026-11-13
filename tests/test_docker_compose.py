@@ -34,7 +34,7 @@ def test_docker_compose_defines_victoriametrics_and_fuseki():
     assert "fuseki" in services
     fuseki_ports = services["fuseki"]["ports"]
     assert "127.0.0.1:3030:3030" in fuseki_ports
-    assert services["fuseki"]["image"] == "secoresearch/fuseki:6.1.0"
+    assert services["fuseki"]["image"].split("@")[0] == "secoresearch/fuseki:6.1.0"
     command = _fuseki_command_text(services["fuseki"])
     assert "FusekiServerCmd" in command
     # The dataset, its endpoints and who may use each are in the mounted config (docker/fuseki/config.ttl).
@@ -318,7 +318,7 @@ def test_env_example_documents_each_event_setting_with_a_limit_line_and_no_live_
 def test_qdrant_is_its_own_unprivileged_container_on_loopback_without_grpc():
     content = yaml.safe_load(COMPOSE_PATH.read_text())
     qdrant = content["services"]["qdrant"]
-    assert qdrant["image"] == "qdrant/qdrant:v1.19.2-unprivileged"
+    assert qdrant["image"].split("@")[0] == "qdrant/qdrant:v1.19.2-unprivileged"
     assert qdrant["container_name"] == "qdrant"
     assert qdrant["ports"] == ["127.0.0.1:6333:6333"]
     assert qdrant["volumes"] == ["qdrant-data:/qdrant/storage"]

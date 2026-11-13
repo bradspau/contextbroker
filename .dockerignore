@@ -1,40 +1,52 @@
-venv/
-.git/
-docs/
-.superpowers/
-.sdd/
-__pycache__/
-**/__pycache__/
-.pytest_cache/
-tests/
-lodlive/
-.env
+# An allow-list (bead contextbroker-3xd): the API image carries only what the running API and the
+# commands run inside it import, so an untracked file in the working tree (telemetry.log, seed_data/,
+# .env.example, stop_context.sh, a scratch directory) can never reach the image. The library-only packages
+# (governance_gate, action_lifecycle, decision_records, investigation_workers, loop_coordination and the
+# two empty ones) stay in the repository with their tests but are not listed here, so they are left out
+# too (bead contextbroker-c8g). tests/test_unwired_packages.py pins that every package the runtime imports
+# is listed and that none of those is.
+*
+!requirements.txt
+!broker.py
+!seed_graph.py
+!agent_harness
+!artefact_governance
+!broker_engine
+!broker_state
+!data_contracts
+!ingestion
+!intent_management
+!okf_retrieval
+!outcome_assurance
+!state_reconciliation
+!ontologies
+# Inside ontologies: the licensed ontology material, other TBox files and the operator's binding files stay out.
 ontologies/licensed
 **/ontology/**/*.ttl
 ontologies/tbox/*.ttl
 !ontologies/tbox/topology.ttl
+ontologies/abox/*.ttl
+!ontologies/abox/topology-demo.ttl
 ontologies/**/*.zip
-docs/spec/TR29*.pdf
-docs/spec/TMF921*.pdf
+# Named again on purpose: tracker, planning, design notes, scripts, the knowledge files (mounted read-only,
+# never copied), the optional MCP extra and the licensed documents stay out even if the allow-list changes.
 .beads/
 .planning/
 .claude/
 design/
-knowledge/
 scripts/
+knowledge/
 CLAUDE.md
 AGENTS.md
 planning.md
 requirements-mcp.txt
 requirements-mcp.in
+docs/spec/TR29*.pdf
+docs/spec/TMF921*.pdf
+# Never in an image, wherever they sit.
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
 *.pem
 *.key
-# Library-only packages: no runtime path imports them (tests/test_unwired_packages.py pins that), so the
-# image does not carry them. They stay in the repository with their tests (bead contextbroker-c8g).
-governance_gate/
-action_lifecycle/
-decision_records/
-investigation_workers/
-loop_coordination/
-platform_services/
-source_federation/
+.env

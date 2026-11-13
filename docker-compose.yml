@@ -1,6 +1,6 @@
 services:
   victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.102.0
+    image: victoriametrics/victoria-metrics:v1.102.0@sha256:b51f6910c985bb146a151a44f0c877e7864b8db452c88c732d1591cbd18a5f12
     container_name: victoriametrics
     ports:
       - "127.0.0.1:8428:8428"
@@ -12,7 +12,7 @@ services:
     restart: unless-stopped
 
   fuseki:
-    image: secoresearch/fuseki:6.1.0
+    image: secoresearch/fuseki:6.1.0@sha256:684f47c04deb2d60886fb112d048b4a526992e251771a548eb6ce9e5a7d09055
     container_name: fuseki
     ports:
       - "127.0.0.1:3030:3030"
@@ -70,7 +70,7 @@ services:
   # only data rebuilt from those files, so losing qdrant-data loses nothing. Published on loopback,
   # HTTP port only (the gRPC port is not used and not published). The key is required, with no default.
   qdrant:
-    image: qdrant/qdrant:v1.19.2-unprivileged
+    image: qdrant/qdrant:v1.19.2-unprivileged@sha256:efb96a9425a90d2d5a1a0a474156280df1892dcdf1af3e8515bd2589b1bfd88b
     container_name: qdrant
     ports:
       - "127.0.0.1:6333:6333"

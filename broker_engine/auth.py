@@ -46,6 +46,9 @@ ENV_ISSUER = "BROKER_JWT_ISSUER"
 ENV_AUDIENCE = "BROKER_JWT_AUDIENCE"
 
 _PROTECTED_PREFIX = "/context"
+# The generated documentation lists every route and schema, so it needs a token too (bead
+# contextbroker-8at): any valid token with the context:read scope. /health alone stays public.
+_DOCS_PATHS = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"})
 _BEARER = "bearer "
 
 
@@ -187,7 +190,7 @@ def authenticate(authorization_header: str | None) -> Caller:
 
 
 def _is_protected(path: str) -> bool:
-    return path == _PROTECTED_PREFIX or path.startswith(_PROTECTED_PREFIX + "/")
+    return path == _PROTECTED_PREFIX or path.startswith(_PROTECTED_PREFIX + "/") or path in _DOCS_PATHS
 
 
 _DENIED_BODY = {"detail": "authentication required"}
@@ -207,6 +210,8 @@ async def require_token(request: Request, call_next):
             request.state.caller = caller
         except AuthError:
             return _denied()
+        if request.url.path in _DOCS_PATHS and SCOPE_READ not in caller.scopes:
+            return JSONResponse(status_code=403, content={"detail": "insufficient scope"})
     return await call_next(request)
 
 

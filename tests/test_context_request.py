@@ -208,7 +208,7 @@ def test_authority_over_router_a_only_cuts_the_graph_and_stays_eligible(rig):
 # ---- the response model is wire neutral and complete ----
 
 def test_the_openapi_document_lists_the_route_and_the_response_model_without_claim_values(rig):
-    spec = client.get("/openapi.json").json()
+    spec = client.get("/openapi.json", headers=token()).json()
     operation = spec["paths"]["/context/request"]["post"]
     assert "execution authority" in operation["description"]
     assert operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
@@ -843,8 +843,8 @@ def test_changed_goal_in_a_past_request_judges_the_goal_in_force_then(olt):
     olt.get_intent.assert_not_called()
 
 
-def test_openapi_document_describes_the_contract_without_secrets_and_stays_public(rig):
-    r = client.get("/openapi.json")  # no token
+def test_openapi_document_describes_the_contract_without_secrets(rig):
+    r = client.get("/openapi.json", headers=token())
     assert r.status_code == 200
     spec = r.json()
     operation = spec["paths"]["/context/request"]["post"]
@@ -1196,7 +1196,7 @@ def test_a_request_without_the_events_class_has_no_events_key_value(rig):
 
 
 def test_the_openapi_document_lists_events_and_describes_its_result_without_names(rig):
-    spec = client.get("/openapi.json").json()
+    spec = client.get("/openapi.json", headers=token()).json()
     schemas = spec["components"]["schemas"]
     assert "events" in schemas["ContextRequest"]["properties"]["classes"]["items"]["enum"]
     assert {"EventsResult", "EventOut", "EventWindow"} <= set(schemas)
@@ -1406,7 +1406,7 @@ def test_a_conflict_never_reaches_the_verdict_or_the_assess_call(olt):
 
 
 def test_the_openapi_document_lists_knowledge_and_the_topic_without_names(rig):
-    spec = client.get("/openapi.json").json()
+    spec = client.get("/openapi.json", headers=token()).json()
     schemas = spec["components"]["schemas"]
     assert "knowledge" in schemas["ContextRequest"]["properties"]["classes"]["items"]["enum"]
     assert "topic" in schemas["ContextRequest"]["properties"]

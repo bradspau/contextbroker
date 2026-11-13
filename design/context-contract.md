@@ -321,8 +321,9 @@ outcome or records an outcome; tests spy on each.
 - Where situations and decision records are kept: see `design/durable-state.md` (Phase 4).
 - Adoption by the MCP server and the agent tool (unchanged here; the MCP server is built and
   unit-tested, not served, and an optional extra installed from `requirements-mcp.txt`).
-- `/docs` and `/openapi.json` are still public (bead `contextbroker-8at`). A test checks that the
-  OpenAPI document, which now describes the new route, holds no claim value, token or secret.
+- `/docs`, `/redoc` and `/openapi.json` need a token with the `context:read` scope (bead
+  `contextbroker-8at`, closed); only `/health` is public. A test checks that the OpenAPI document, which
+  describes the new route, holds no claim value, token or secret.
 - Events are built (Phase 5): see `design/event-store.md` for the store, the events class and
   reconciliation, and for what Phase 5 itself deferred.
 - Knowledge is built (Phase 6): see `design/knowledge.md`, including what Phase 6 itself deferred (a

@@ -195,7 +195,7 @@ def test_only_the_context_request_route_negotiates(rig):
 # ---- the published contract ----
 
 def test_the_openapi_document_lists_both_media_types_and_no_extra_route(rig):
-    spec = client.get("/openapi.json").json()
+    spec = client.get("/openapi.json", headers=token()).json()
     content = spec["paths"]["/context/request"]["post"]["responses"]["200"]["content"]
     assert set(content) == {"application/json", LD}
     assert content["application/json"]["schema"]["$ref"].endswith("/ContextResponse")

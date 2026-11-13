@@ -142,3 +142,29 @@ def test_the_proxy_input_is_constrained_to_the_root_lock():
     lines = [l.strip() for l in (ROOT / "lodlive-proxy/requirements.in").read_text().splitlines()
              if l.strip() and not l.strip().startswith("#")]
     assert lines == ["-c ../requirements.txt", "requests==2.34.2"]
+
+
+# ---- the pulled images of the compose file (bead contextbroker-lln) ----
+
+def pulled_compose_images(text):
+    """(service, image) for each compose service that names an image and has no build: it is pulled."""
+    import yaml
+    services = yaml.safe_load(text)["services"]
+    return [(name, svc["image"]) for name, svc in services.items()
+            if "image" in svc and "build" not in svc]
+
+
+def test_every_pulled_compose_image_names_a_tag_and_a_digest():
+    pulled = pulled_compose_images((ROOT / "docker-compose.yml").read_text())
+    assert {name for name, _ in pulled} >= {"victoriametrics", "fuseki", "qdrant"}
+    assert [(n, i) for n, i in pulled if not _DIGESTED.match(i)] == []
+
+
+def test_the_compose_check_names_a_service_pinned_by_tag_only():
+    text = (
+        "services:\n"
+        "  a:\n    image: x/y:1.0@sha256:" + "a" * 64 + "\n"
+        "  b:\n    image: x/z:2.0\n"
+        "  c:\n    image: local/built:local\n    build: .\n")
+    pulled = pulled_compose_images(text)
+    assert [(n, i) for n, i in pulled if not _DIGESTED.match(i)] == [("b", "x/z:2.0")]

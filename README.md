@@ -55,7 +55,7 @@ structure below by a strangler migration.
 | Governed knowledge (tracked OKF bundles in `knowledge/`, Qdrant hybrid index, `knowledge` context class, approved-action references) | Built, unit-tested; the four bundles are drafts, approval is a reviewed commit, and a response carries references only, never a body (see [Knowledge](#knowledge) and [design/knowledge.md](design/knowledge.md)). The suite uses a fake embedder: the real models and a live Qdrant were not part of the test run |
 | Redpanda, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 3379 tests passing and 28 skipped (`pytest`): 15 live TMF921 tests, skipped
+The test suite has 3391 tests passing and 28 skipped (`pytest`): 15 live TMF921 tests, skipped
 unless `TMF921_LIVE=1`, 11 real-engine Fuseki parity tests, skipped unless
 `FUSEKI_PARITY_URL` is set, and 2 real-engine VictoriaMetrics tests, skipped unless `VM_PARITY_URL` is set (see [Running the tests](#running-the-tests)). The work is on the `fullnetwork` branch
 (pushed to GitHub) and has not been reviewed by anyone else.
@@ -644,8 +644,10 @@ header.
 
 ## Authentication
 
-Every `/context/*` route needs `Authorization: Bearer <token>`. `/docs`, `/redoc`,
-`/openapi.json` and `/health` stay public.
+Every `/context/*` route needs `Authorization: Bearer <token>`, and so do `/docs`, `/redoc` and
+`/openapi.json` (a valid token with the `context:read` scope; bead `contextbroker-8at`). Only `/health` is public.
+The Swagger page loads its spec without a header, so it shows nothing useful behind a token: read the
+contract with `curl -H "Authorization: Bearer $TOKEN" localhost:8080/openapi.json`.
 
 - Tokens are signed RS256 or ES256 and carry `sub`, `exp`, `iat`, `iss` and `aud`. The
   broker pins the issuer (`BROKER_JWT_ISSUER`) and the audience
@@ -1520,7 +1522,7 @@ Docker required to run the suite:
 pytest tests/ -v
 ```
 
-The full suite is 3379 passed and 28 skipped (the 15 live TMF921 tests, the 11 real-engine
+The full suite is 3391 passed and 28 skipped (the 15 live TMF921 tests, the 11 real-engine
 Fuseki parity tests and the 2 real-engine VictoriaMetrics tests are skipped unless their variables are set).
 
 Every test gets its own state file and decision-record file from `tests/conftest.py`, so no test
