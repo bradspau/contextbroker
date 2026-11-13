@@ -12,6 +12,7 @@ def assess_intent(
     as_of: str | None = None,
     mode: str | None = None,
     known_at: str | None = None,
+    allowed=None,
 ) -> dict:
     """Assess a TMF921 intent: read its goals from the TMF921 server, join the
     broker's telemetry and evaluate it. `join` defaults to the real joiner
@@ -33,7 +34,11 @@ def assess_intent(
     A past question (as_of or known_at) is judged against the goal and placement in
     force then, as recorded in the network graph; the TMF921 server is not asked.
     Nothing is pushed, no high-water mark moves and the intent's current
-    fulfilment state is never updated (see assess_tmf921_as_of)."""
+    fulfilment state is never updated (see assess_tmf921_as_of).
+
+    `allowed` (a device -> bool test) is the caller's authority over devices. When given and it rejects
+    a device the intent is placed on, PlacementOutsideAuthority is raised before any TMF921 call or
+    telemetry read. The in-process callers (agent, MCP) pass none."""
     if source != "tmf921":
         raise ClientInputError(f"Unknown source: {source!r}")
     if mode not in (None, "at", "within"):
@@ -44,5 +49,5 @@ def assess_intent(
         window_seconds(known_at, "known_at")
     if as_of is not None or mode is not None or known_at is not None:
         return assess_tmf921_as_of(intent_id, time_window, as_of=as_of, mode=mode,
-                                   known_at=known_at, join=join)
-    return assess_via_tmf921(intent_id, time_window, join=join)
+                                   known_at=known_at, join=join, allowed=allowed)
+    return assess_via_tmf921(intent_id, time_window, join=join, allowed=allowed)

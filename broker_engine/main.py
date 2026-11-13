@@ -30,9 +30,15 @@ from broker_state.process import load_settings, open_process_store, reset_store
 from broker_state.store import STATE_UNAVAILABLE, StateUnavailable
 from okf_retrieval.service import get_service, reset_service
 from broker_engine.tsdb_joiner import join_observed_metric, query_tsdb_metrics
-from data_contracts.context_contract import ContextRequest, ContextResponse
+from data_contracts.context_contract import (
+    REFUSED_CLASS,
+    REFUSED_ENTITY,
+    ContextRequest,
+    ContextResponse,
+)
 from data_contracts.exchange_profile import PROFILE_MEDIA_TYPE, negotiate, to_jsonld
 from data_contracts.situation_record import SituationRecord
+from intent_management.tmf921_source import PlacementOutsideAuthority
 from outcome_assurance.evaluate import evaluate_intent  # noqa: F401
 
 log = logging.getLogger(__name__)
@@ -47,12 +53,13 @@ tsdb_series_limit()
 
 def assess(intent_id: str, time_window: str, source: str = "tmf921",
            as_of: str | None = None, mode: str | None = None,
-           known_at: str | None = None) -> dict:
-    """Thin wrapper over assess_intent using this module's joiner."""
+           known_at: str | None = None, allowed=None) -> dict:
+    """Thin wrapper over assess_intent using this module's joiner. `allowed` is the caller's device
+    test (the REST route passes the token's authority); the in-process callers pass none."""
     return assess_intent(
         intent_id, time_window,
         join=join_observed_metric, source=source, as_of=as_of, mode=mode,
-        known_at=known_at,
+        known_at=known_at, allowed=allowed,
     )
 
 
@@ -162,6 +169,12 @@ async def _refused(request: Request, exc: context_request.Refused):
     return JSONResponse(status_code=403, content={"detail": str(exc)})
 
 
+@app.exception_handler(PlacementOutsideAuthority)
+async def _placement_outside_authority(request: Request, exc: PlacementOutsideAuthority):
+    # An intent placed on a device the token does not cover. Fixed text, never the device or intent.
+    return JSONResponse(status_code=403, content={"detail": REFUSED_ENTITY})
+
+
 @app.exception_handler(StateUnavailable)
 async def _state_unavailable(request: Request, exc: StateUnavailable):
     # The store has already logged the exception class. The body is fixed text, never the cause.
@@ -175,6 +188,33 @@ def get_health() -> JSONResponse:
     return JSONResponse(status_code=200 if body["status"] == "ok" else 503, content=body)
 
 
+def _device_in_authority(context_class: str):
+    """A route dependency for the raw routes that name a device: 403 when the token's entities do not
+    cover it (`outside authority scope: entity`) or its classes lack the class the route reads
+    (`outside authority scope: class`). Declare it after need(scope) and need_authority_claims(), so a
+    missing claim is refused first. It runs before the handler, so before any upstream call. The raw
+    routes name no purpose, so the purposes claim is not tested here."""
+    def check(request: Request, device: str) -> None:
+        authority = request.state.caller.authority
+        if not authority.covers_entity(device):
+            raise HTTPException(403, REFUSED_ENTITY)
+        if context_class not in authority.classes:
+            raise HTTPException(403, REFUSED_CLASS)
+
+    return Depends(check)
+
+
+def _classes_in_authority(*context_classes: str):
+    """As _device_in_authority, for a route that names no device (assess): the token's classes must
+    include every class the route reads. The placed devices are tested later, once the binding is read."""
+    def check(request: Request) -> None:
+        authority = request.state.caller.authority
+        if any(name not in authority.classes for name in context_classes):
+            raise HTTPException(403, REFUSED_CLASS)
+
+    return Depends(check)
+
+
 class AssessRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intent_id: str
@@ -186,17 +226,24 @@ class AssessRequest(BaseModel):
 
 
 @app.get("/context/metric",
-         dependencies=[need(SCOPE_READ), _allow_only("device", "interface", "metric_type", "time_window")])
+         dependencies=[need(SCOPE_READ), need_authority_claims(), _device_in_authority("observations"),
+                       _allow_only("device", "interface", "metric_type", "time_window")])
 def get_metric(device: str, interface: str, metric_type: str, time_window: str) -> dict:
     return query_tsdb_metrics(device, interface, metric_type, time_window)
 
 
-@app.post("/context/assess", dependencies=[need(SCOPE_ASSESS)])
+@app.post("/context/assess",
+          dependencies=[need(SCOPE_ASSESS), need_authority_claims(),
+                        _classes_in_authority("goals", "observations")])
 def post_assess(body: AssessRequest, request: Request) -> dict:
+    """Needs context:assess and authority claims with the goals and observations classes. The intent's
+    placed devices must all be covered by the token's entities, else 403 `outside authority scope:
+    entity`, raised once the binding is read and before any TMF921 call or telemetry read."""
     if request.query_params:
         raise HTTPException(422, "Undeclared query parameter(s)")
     return assess(body.intent_id, body.time_window, source=body.source,
-                  as_of=body.as_of, mode=body.mode, known_at=body.known_at)
+                  as_of=body.as_of, mode=body.mode, known_at=body.known_at,
+                  allowed=request.state.caller.authority.covers_entity)
 
 
 @app.post("/context/request", response_model=ContextResponse,
@@ -247,7 +294,7 @@ def get_situation(situation_id: str, request: Request) -> SituationRecord:
 
 
 @app.get("/context/metric-history",
-         dependencies=[need(SCOPE_READ),
+         dependencies=[need(SCOPE_READ), need_authority_claims(), _device_in_authority("observations"),
                        _allow_only("device", "interface", "metric_type", "time_window", "as_of")])
 def get_metric_history(device: str, interface: str, metric_type: str, time_window: str,
                        as_of: str | None = None) -> dict:
@@ -255,7 +302,7 @@ def get_metric_history(device: str, interface: str, metric_type: str, time_windo
 
 
 @app.get("/context/interfaces-nonzero",
-         dependencies=[need(SCOPE_READ),
+         dependencies=[need(SCOPE_READ), need_authority_claims(), _device_in_authority("observations"),
                        _allow_only("device", "metric_type", "time_window", "as_of", "limit")])
 def get_interfaces_nonzero(device: str, metric_type: str, time_window: str,
                            as_of: str | None = None, limit: int = operations.DEFAULT_INTERFACES) -> dict:
@@ -263,7 +310,8 @@ def get_interfaces_nonzero(device: str, metric_type: str, time_window: str,
 
 
 @app.get("/context/neighbours",
-         dependencies=[need(SCOPE_READ), _allow_only("device", "interface", "as_of", "known_at")])
+         dependencies=[need(SCOPE_READ), need_authority_claims(), _device_in_authority("topology"),
+                       _allow_only("device", "interface", "as_of", "known_at")])
 def get_neighbours(device: str, interface: str, as_of: str | None = None,
                    known_at: str | None = None) -> dict:
     return operations.interface_neighbours(device, interface, as_of=as_of, known_at=known_at)

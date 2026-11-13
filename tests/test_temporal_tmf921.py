@@ -304,9 +304,9 @@ def test_assess_intent_routes_temporal_tmf921():
         assess_intent(IID, "5m", source="tmf921", mode="within", join=join)
     push.assert_not_called()
     assert t.call_args_list[0].kwargs == {"as_of": "10m", "mode": None, "known_at": None,
-                                          "join": join}
+                                          "join": join, "allowed": None}
     assert t.call_args_list[1].kwargs == {"as_of": None, "mode": "within", "known_at": None,
-                                          "join": join}
+                                          "join": join, "allowed": None}
 
 
 def test_assess_intent_routes_known_at_alone_to_the_temporal_path():
@@ -317,9 +317,9 @@ def test_assess_intent_routes_known_at_alone_to_the_temporal_path():
         assess_intent(IID, "5m", as_of="2d", known_at="36h", mode="within", join=join)
     push.assert_not_called()
     assert t.call_args_list[0].kwargs == {"as_of": None, "mode": None, "known_at": "1h",
-                                          "join": join}
+                                          "join": join, "allowed": None}
     assert t.call_args_list[1].kwargs == {"as_of": "2d", "mode": "within", "known_at": "36h",
-                                          "join": join}
+                                          "join": join, "allowed": None}
 
 
 @pytest.mark.parametrize("bad", ["PT1H", "1", "31d", "720h1", 5])
@@ -351,7 +351,7 @@ def test_assess_intent_tmf921_without_temporal_arguments_takes_push_path():
             patch.object(assess_mod, "assess_via_tmf921", return_value={"p": 1}) as push:
         assert assess_intent(IID, "5m", source="tmf921", join=join) == {"p": 1}
     t.assert_not_called()
-    push.assert_called_once_with(IID, "5m", join=join)
+    push.assert_called_once_with(IID, "5m", join=join, allowed=None)
 
 
 # ---------- lifecycle ----------

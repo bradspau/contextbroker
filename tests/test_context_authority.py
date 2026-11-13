@@ -171,7 +171,7 @@ def _with(**over) -> dict:
 
 
 MALFORMED = {
-    "no_claim": {},
+    "no_claim": {"authority": None},
     "claim_is_a_string": {"authority": "x"},
     "claim_is_a_list": {"authority": [_GOOD]},
     "claim_is_a_number": {"authority": 7},
@@ -320,8 +320,10 @@ def test_authenticate_returns_the_subject_as_the_requester():
     assert caller.requester == "alice" and caller.authority.entities == {"Router-A"}
 
 
-def test_old_routes_answer_as_before_for_a_token_without_authority(no_upstream):
-    with patch("broker_engine.main.operations.interface_neighbours", return_value={"ok": 1}):
+def test_old_routes_now_refuse_a_token_without_authority(no_upstream):
+    # Bead contextbroker-8is: the raw routes used to answer any context:read token.
+    with patch("broker_engine.main.operations.interface_neighbours", return_value={"ok": 1}) as run:
         r = _app_client.get("/context/neighbours", params={"device": "r1", "interface": "e0"},
-                            headers=_bearer(_signed()))
-    assert r.status_code == 200 and r.json() == {"ok": 1}
+                            headers=_bearer(_signed(authority=None)))
+    assert r.status_code == 403 and r.json() == AUTHORITY_DENIED
+    run.assert_not_called()

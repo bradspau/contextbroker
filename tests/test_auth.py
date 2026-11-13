@@ -360,6 +360,10 @@ def test_assess_token_can_assess(handlers):
     assert _call("POST", "/context/assess", auth_headers("context:assess")).status_code == 200
 
 
+def _without_authority(*scopes):
+    return {"Authorization": "Bearer " + make_token(scopes, authority=None)}
+
+
 def _with_authority(*scopes):
     return {"Authorization": "Bearer " + make_token(scopes, authority=AUTHORITY)}
 
@@ -371,7 +375,7 @@ def test_read_token_with_authority_reaches_the_context_request_handler(handlers)
 
 
 def test_read_token_without_authority_is_403_with_no_upstream_call(handlers, no_upstream):
-    r = _call("POST", "/context/request", auth_headers("context:read"))
+    r = _call("POST", "/context/request", _without_authority("context:read"))
     assert r.status_code == 403 and r.json() == {"detail": "authority claims required"}
     for mocked in no_upstream:
         mocked.assert_not_called()
@@ -385,7 +389,7 @@ def test_assess_only_token_with_authority_cannot_request_context(handlers, no_up
 
 
 def test_situation_fetch_without_authority_is_403_with_no_upstream_call(handlers, no_upstream):
-    r = _call("GET", SITUATION_ROUTE, auth_headers("context:read"))
+    r = _call("GET", SITUATION_ROUTE, _without_authority("context:read"))
     assert r.status_code == 403 and r.json() == {"detail": "authority claims required"}
     for mocked in no_upstream:
         mocked.assert_not_called()

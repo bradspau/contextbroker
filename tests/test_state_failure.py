@@ -230,7 +230,7 @@ ASSESS_BODY = {"intent_id": "hsi-demo-1", "time_window": "5m"}
 
 
 def _assess_token():
-    return token(scopes=SCOPES)
+    return token(ASSURANCE, scopes=SCOPES)
 
 
 def _fresh_join(device, interface, metric, window, **kw):

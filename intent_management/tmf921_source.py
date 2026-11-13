@@ -187,6 +187,21 @@ def _gap_reasons(binding) -> list[str]:
     return [f"no {kind} in force: {short_name(uri)}" for uri, kind in binding.gaps]
 
 
+class PlacementOutsideAuthority(Exception):
+    """A caller's authority does not cover a device the intent is placed on. Raised before any TMF921
+    call or telemetry read; carries no text, so nothing about the device or the intent can leak."""
+
+
+def _check_placements(binding, allowed) -> None:
+    """Refuse when `allowed` (a device -> bool test) rejects any device the binding places a metric on.
+
+    None means no authority is applied (the in-process callers present no token)."""
+    if allowed is None:
+        return
+    if any(not allowed(device) for device, _interface in binding.sources.values()):
+        raise PlacementOutsideAuthority()
+
+
 def _binding_for(intent_id: str, bindings=None, *, valid_at=None,
                  known_at=None) -> tuple[IntentBinding | None, str | None]:
     """Find the binding for an intent: (binding, None) or (None, fixed reason).
@@ -231,6 +246,7 @@ def assess_via_tmf921(
     now=None,
     metric_map=None,
     bindings=None,
+    allowed=None,
     poll_interval_s: float = 0.2,
     poll_timeout_s: float = 5.0,
     sleep=time.sleep,
@@ -246,6 +262,7 @@ def assess_via_tmf921(
     binding, reason = _binding_for(intent_id, bindings)
     if binding is None:
         return _result(Outcome.INCONCLUSIVE, [reason], status="unknown")
+    _check_placements(binding, allowed)  # before the lock, any TMF921 call, a push or a mark
     if binding.gaps:  # before the lock, any TMF921 call, a push or a mark; nothing is recorded
         return _result(Outcome.INCONCLUSIVE, _gap_reasons(binding), status="unknown")
     try:
@@ -493,6 +510,7 @@ def assess_tmf921_as_of(
     now: datetime | None = None,
     metric_map=None,
     bindings=None,
+    allowed=None,
 ) -> dict:
     """Temporal assess of a TMF921 intent: judged in the broker, nothing pushed.
 
@@ -559,6 +577,7 @@ def assess_tmf921_as_of(
         binding, reason = _binding_for(intent_id, bindings)
     if binding is None:
         return result(Outcome.INCONCLUSIVE, [reason], status="unknown")
+    _check_placements(binding, allowed)  # before any TMF921 call or telemetry read
     if historical:
         goals = _goal_entries(binding)
     if binding.gaps:  # before any TMF921 call or telemetry read

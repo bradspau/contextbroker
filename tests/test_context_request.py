@@ -138,7 +138,7 @@ def olt(monkeypatch):
 
 def token(authority=WIDE, scopes=("context:read",), **claims):
     return {"Authorization": "Bearer " + make_token(
-        scopes, **({"authority": authority} if authority is not None else {}), **claims)}
+        scopes, authority=authority, **claims)}
 
 
 def post(body, headers=None, **kw):

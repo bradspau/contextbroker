@@ -60,6 +60,16 @@ _SIGNING = {
 }
 
 
+# A token that may ask about every device, purpose and class. The raw operations routes and
+# /context/assess refuse a token without an authority claim, so a test token carries this one unless
+# the test passes `authority=` (a narrower claim, or None for no claim).
+FULL_AUTHORITY = {
+    "entities": ["*"],
+    "purposes": ["assurance", "diagnosis", "reporting"],
+    "classes": ["topology", "goals", "observations", "events", "knowledge"],
+}
+
+
 def make_token(scopes=("context:read", "context:assess"), *, key="ec",
                lifetime=3000, **claims) -> str:
     """Sign a token. A claim override of None removes that claim."""
@@ -70,6 +80,7 @@ def make_token(scopes=("context:read", "context:assess"), *, key="ec",
         "aud": os.environ.get("BROKER_JWT_AUDIENCE", AUDIENCE),
         "iat": now,
         "exp": now + lifetime,
+        "authority": FULL_AUTHORITY,
     }
     if scopes is not None:
         body["scope"] = " ".join(scopes)

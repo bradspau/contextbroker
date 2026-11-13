@@ -55,7 +55,7 @@ structure below by a strangler migration.
 | Governed knowledge (tracked OKF bundles in `knowledge/`, Qdrant hybrid index, `knowledge` context class, approved-action references) | Built, unit-tested; the four bundles are drafts, approval is a reviewed commit, and a response carries references only, never a body (see [Knowledge](#knowledge) and [design/knowledge.md](design/knowledge.md)). The suite uses a fake embedder: the real models and a live Qdrant were not part of the test run |
 | Redpanda, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 3328 tests passing and 28 skipped (`pytest`): 15 live TMF921 tests, skipped
+The test suite has 3360 tests passing and 28 skipped (`pytest`): 15 live TMF921 tests, skipped
 unless `TMF921_LIVE=1`, 11 real-engine Fuseki parity tests, skipped unless
 `FUSEKI_PARITY_URL` is set, and 2 real-engine VictoriaMetrics tests, skipped unless `VM_PARITY_URL` is set (see [Running the tests](#running-the-tests)). The work is on the `fullnetwork` branch
 (pushed to GitHub) and has not been reviewed by anyone else.
@@ -662,14 +662,24 @@ Every `/context/*` route needs `Authorization: Bearer <token>`. `/docs`, `/redoc
   scope. Both bodies are fixed strings. A token whose `sub` is empty, longer than 128
   characters or not printable is `401` on every `/context/*` route: the `sub` is the
   requester of a context request and part of its identity, so it must name someone.
-- **Authority claim.** `POST /context/request` and `GET /context/situation/{id}` also need a signed `authority` claim that
+- **Authority claim.** Every `/context/*` route except `/health` needs a signed `authority` claim that
   says what the caller may ask about: `entities` (device names written exactly, or `*`
   for all; no patterns), `purposes` (`assurance`, `diagnosis`, `reporting`) and
-  `classes` (`topology`, `goals`, `observations`, `events`, `knowledge`). The other routes ignore the claim. A
-  token with the scope but no usable claim is `403 {"detail": "authority claims required"}`
-  on those routes only, so a token minted before this claim existed keeps working on
-  every other route. The broker keeps no list of tokens or claims: it verifies the signature and reads the
-  claim.
+  `classes` (`topology`, `goals`, `observations`, `events`, `knowledge`). A token with the scope
+  but no usable claim is `403 {"detail": "authority claims required"}`. Before any upstream call:
+  - `POST /context/request` and `GET /context/situation/{id}` test the device, the purpose and the
+    classes (`outside authority scope: entity|purpose|class`).
+  - `GET /context/metric`, `/context/metric-history` and `/context/interfaces-nonzero` test the
+    `device` against `entities` and need the `observations` class; `GET /context/neighbours` tests the
+    `device` and needs the `topology` class. They name no purpose, so `purposes` is not tested there.
+  - `POST /context/assess` needs the `goals` and `observations` classes. The intent's placed devices
+    must all be in `entities`, else `403 outside authority scope: entity`; this is tested as soon as the
+    binding is read, before any TMF921 call, telemetry read or push. (The agent and MCP server call the
+    broker in process, present no token and apply no authority.)
+
+  A token minted before this claim covered these routes now needs it added (`mint_token.py --entity
+  ... --purpose ... --class ...`). The broker keeps no list of tokens or claims: it verifies the
+  signature and reads the claim.
 - There is no revocation list. Revoke by short expiry or by rotating the key pair.
 - The API holds only the public key. With no key or issuer configured it still starts,
   `/health` answers, and every `/context/*` call is `401`.
@@ -695,7 +705,10 @@ the change with `docker compose up -d contextbroker-api`, then mint a token:
 
 ```bash
 TOKEN=$(python scripts/mint_token.py --key ~/keys/broker_jwt_private.pem --sub alice \
-  --scope context:read --scope context:assess --issuer "$BROKER_JWT_ISSUER" --ttl 900)
+  --scope context:read --scope context:assess \
+  --entity Router-A --purpose assurance \
+  --class topology --class goals --class observations \
+  --issuer "$BROKER_JWT_ISSUER" --ttl 900)
 curl -H "Authorization: Bearer $TOKEN" \
   'localhost:8080/context/metric?device=Router-A&interface=GigabitEthernet0/0/0&metric_type=input_drops&time_window=5m'
 curl -X POST localhost:8080/context/assess -H "Authorization: Bearer $TOKEN" \
@@ -704,8 +717,8 @@ curl -X POST localhost:8080/context/assess -H "Authorization: Bearer $TOKEN" \
 
 `mint_token.py` refuses a key inside the repository or readable by group or others.
 
-To mint a token that may make context requests, add the authority claim with `--entity`,
-`--purpose` and `--class` (each repeatable). Give all three or none: a partial set is
+The authority claim comes from `--entity`, `--purpose` and `--class` (each repeatable); every
+`/context/*` route needs it (see the first example above). Give all three or none: a partial set is
 refused with exit status 2, and so is an `--entity` that is not `*` or a device name of
 letters, digits, `_`, `-` and `/` (quote the `*` in the shell). The claim is signed with the
 token, so changing it means minting a new token.
@@ -1507,7 +1520,7 @@ Docker required to run the suite:
 pytest tests/ -v
 ```
 
-The full suite is 3328 passed and 28 skipped (the 15 live TMF921 tests, the 11 real-engine
+The full suite is 3360 passed and 28 skipped (the 15 live TMF921 tests, the 11 real-engine
 Fuseki parity tests and the 2 real-engine VictoriaMetrics tests are skipped unless their variables are set).
 
 Every test gets its own state file and decision-record file from `tests/conftest.py`, so no test
