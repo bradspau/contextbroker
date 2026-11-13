@@ -398,3 +398,23 @@ def test_dockerignore_keeps_the_knowledge_directory_out_of_the_image():
     # The read-only mount is the only copy of the knowledge files the API reads.
     lines = [l.strip() for l in (COMPOSE_PATH.parent / ".dockerignore").read_text().splitlines()]
     assert lines.count("knowledge/") == 1
+
+
+# ---- the overlay that joins the API to another project's TMF921 network (bead contextbroker-i2q) ----
+
+ARCH_PATH = COMPOSE_PATH.parent / "docker-compose.arch.yml"
+
+
+def test_the_arch_overlay_joins_only_the_api_to_an_external_network():
+    doc = yaml.safe_load(ARCH_PATH.read_text())
+    assert set(doc["services"]) == {"contextbroker-api"}
+    assert doc["services"]["contextbroker-api"]["networks"] == ["default", "tmf921"]
+    assert doc["networks"]["tmf921"] == {
+        "name": "${TMF921_NETWORK:-contextbroker-arch_default}", "external": True}
+
+
+def test_the_base_file_stays_self_contained_without_the_external_network():
+    # An external network that does not exist stops `docker compose up`, so it lives in the overlay only.
+    base = yaml.safe_load(COMPOSE_PATH.read_text())
+    assert "networks" not in base
+    assert all("networks" not in svc for svc in base["services"].values())

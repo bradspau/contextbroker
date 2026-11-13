@@ -55,7 +55,7 @@ structure below by a strangler migration.
 | Governed knowledge (tracked OKF bundles in `knowledge/`, Qdrant hybrid index, `knowledge` context class, approved-action references) | Built, unit-tested; the four bundles are drafts, approval is a reviewed commit, and a response carries references only, never a body (see [Knowledge](#knowledge) and [design/knowledge.md](design/knowledge.md)). The suite uses a fake embedder: the real models and a live Qdrant were not part of the test run |
 | Redpanda, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 3391 tests passing and 28 skipped (`pytest`): 15 live TMF921 tests, skipped
+The test suite has 3396 tests passing and 28 skipped (`pytest`): 15 live TMF921 tests, skipped
 unless `TMF921_LIVE=1`, 11 real-engine Fuseki parity tests, skipped unless
 `FUSEKI_PARITY_URL` is set, and 2 real-engine VictoriaMetrics tests, skipped unless `VM_PARITY_URL` is set (see [Running the tests](#running-the-tests)). The work is on the `fullnetwork` branch
 (pushed to GitHub) and has not been reviewed by anyone else.
@@ -560,8 +560,10 @@ FUSEKI_READER_PASSWORD=<a different generated value>
 The second one is a query-only user (see [The Fuseki credential](#the-fuseki-credential)); it must differ
 from the first, and Fuseki refuses to start if the two are equal. On an install that has only the admin
 value, add `FUSEKI_READER_PASSWORD` to `.env`, then recreate `fuseki`, `lodlive-proxy` and
-`contextbroker-api` (`docker compose up -d --no-deps fuseki lodlive-proxy contextbroker-api`, then
-`docker network connect contextbroker-arch_default contextbroker-api`). The graph is kept: the volume and
+`contextbroker-api` (`docker compose up -d --no-deps fuseki lodlive-proxy contextbroker-api`; with a TMF921 server in
+another compose project, add the overlay: `-f docker-compose.yml -f docker-compose.arch.yml`, see
+[Reaching a TMF921 server in another compose project](#reaching-a-tmf921-server-in-another-compose-project)).
+The graph is kept: the volume and
 the database directory do not change. Check it with `scripts/check_fuseki_reader.sh`.
 
 Set the Qdrant key in `.env` as well. It is also required, with no default; use letters and
@@ -641,6 +643,23 @@ header.
   image runs with `HF_HUB_OFFLINE=1`, so nothing is fetched at run time.
 - To apply a compose change to an existing container run `docker compose up -d <service>`.
   Never `docker compose down -v`: it deletes the Fuseki, TMF921 and VictoriaMetrics data and the `broker-state` volume (outcomes, high-water marks, situation records and decision records).
+
+## Reaching a TMF921 server in another compose project
+
+The TMF921 server that this stack usually talks to (the access profile, or the one in `BBF_921_java`)
+starts in compose project `contextbroker-arch`, on network `contextbroker-arch_default`. The API starts on
+`contextbroker_default` only, so without help `/health` reports `tmf921` not answering. The overlay
+`docker-compose.arch.yml` adds that network to the API alone and nothing else:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.arch.yml up -d --build contextbroker-api
+```
+
+Put `COMPOSE_FILE=docker-compose.yml:docker-compose.arch.yml` in `.env` (see `.env.example`) and every compose
+command uses both files; a recreate then keeps the connection, where `docker network connect` was lost every
+time (bead `contextbroker-i2q`). `TMF921_NETWORK` names another network. It is an overlay, not part of the base
+file, because an external network that does not exist stops `docker compose up`: use the base file alone
+where the TMF921 server runs from this one (`--profile tmf921`).
 
 ## Authentication
 
@@ -1522,7 +1541,7 @@ Docker required to run the suite:
 pytest tests/ -v
 ```
 
-The full suite is 3391 passed and 28 skipped (the 15 live TMF921 tests, the 11 real-engine
+The full suite is 3396 passed and 28 skipped (the 15 live TMF921 tests, the 11 real-engine
 Fuseki parity tests and the 2 real-engine VictoriaMetrics tests are skipped unless their variables are set).
 
 Every test gets its own state file and decision-record file from `tests/conftest.py`, so no test

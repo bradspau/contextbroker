@@ -221,6 +221,13 @@ Per D-46 and D-49.
   itself still opens. Back the state file up with the API stopped before the first start of a new image.
 - **Index recovery.** If the `qdrant-data` volume is lost, nothing is lost: the next request rebuilds
   the collection from the files.
+- **Concurrency.** The service lock covers only the shared state: the one-time file load, the embedder and
+  client factories, and the collection check or build. The embedding and the Qdrant query run outside it, so
+  knowledge requests overlap, and a request that finds the collection absent waits for the one builder rather
+  than building a second copy (bead `contextbroker-7y4`). Measured on 2026-11-13 with the real embedding model
+  and a throwaway Qdrant, 16 threads: the throughput of 480 requests is unchanged (about 200 a second, the
+  work is CPU-bound in one worker) and every answer equals the serial one; with 50 ms added to each Qdrant
+  query, 96 requests went from 17 a second (serialised) to 172 a second. Close still takes the lock.
 
 ## Deferred
 

@@ -355,3 +355,80 @@ def test_the_api_starts_without_qdrant_or_models_and_resets_the_service_on_exit(
     assert svc._SERVICE is None
     assert STARTUP_FAILED + ": EmbedderUnavailable" in own_records(caplog)
     health._reset_cache()
+
+
+# ---- knowledge requests overlap (bead contextbroker-7y4) ----
+
+class _MeetingEmbedder(FakeEmbedder):
+    """Every embed_query waits for `parties` callers to be inside it at once, so two requests that are
+    serialised by a lock can never meet and the barrier times out."""
+
+    def __init__(self, parties):
+        super().__init__()
+        import threading
+        self.barrier = threading.Barrier(parties, timeout=5)
+
+    def embed_query(self, text):
+        self.barrier.wait()
+        return super().embed_query(text)
+
+
+def _in_threads(count, work):
+    import threading
+    results = [None] * count
+
+    def run(n):
+        results[n] = work(n)
+
+    threads = [threading.Thread(target=run, args=(n,)) for n in range(count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+    assert not any(t.is_alive() for t in threads)
+    return results
+
+
+def test_two_knowledge_requests_are_inside_the_search_at_the_same_time(tmp_path):
+    root = make_tree(tmp_path / "k")
+    service = service_for(root, embedder=_MeetingEmbedder(2))
+    service.startup()  # the index is built once, as the API does at start
+    answers = _in_threads(2, lambda _n: ask(service))
+    assert [a.outcome for a in answers] == ["answered", "answered"]
+    assert all({r.bundle.identifier for r in a.references} == {"interface-error", "latency"}
+               for a in answers)
+
+
+def test_requests_that_arrive_before_the_index_exists_build_it_once(tmp_path):
+    root = make_tree(tmp_path / "k")
+    client = local_client()
+    builds = []
+    real = client.create_collection
+
+    def counting(*args, **kwargs):
+        builds.append(kwargs.get("collection_name") or args[0])
+        return real(*args, **kwargs)
+
+    client.create_collection = counting
+    service = service_for(root, client=client)  # no startup: the first requests meet an empty store
+    answers = _in_threads(6, lambda _n: ask(service))
+    assert [a.outcome for a in answers] == ["answered"] * 6
+    assert len(builds) == 1
+
+
+def test_one_failing_search_leaves_the_other_overlapping_request_answered(tmp_path):
+    root = make_tree(tmp_path / "k")
+
+    class Flaky(FakeEmbedder):
+        calls = 0
+
+        def embed_query(self, text):
+            Flaky.calls += 1
+            if Flaky.calls == 1:
+                raise RuntimeError("embedding failed")
+            return super().embed_query(text)
+
+    service = service_for(root, embedder=Flaky())
+    service.startup()
+    outcomes = sorted(a.outcome for a in _in_threads(2, lambda _n: ask(service)))
+    assert outcomes == ["answered", "unavailable"]

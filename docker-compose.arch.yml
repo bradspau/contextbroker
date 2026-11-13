@@ -1,0 +1,21 @@
+# Join the API to the network of a TMF921 server that runs from another compose project (bead
+# contextbroker-i2q). The access-profile and BBF_921_java servers start in project contextbroker-arch, so
+# their network is contextbroker-arch_default; without this file the API sits only on contextbroker_default
+# and /health reports tmf921 not answering until `docker network connect` is run by hand, which a recreate
+# loses. This is an overlay, not part of the base file, because that network exists only where the other
+# project has been started (an external network that is missing stops `docker compose up`).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.arch.yml up -d --build contextbroker-api
+#
+# or set COMPOSE_FILE=docker-compose.yml:docker-compose.arch.yml in the shell or .env, and every compose
+# command in this directory uses both. TMF921_NETWORK names another network.
+services:
+  contextbroker-api:
+    networks:
+      - default
+      - tmf921
+
+networks:
+  tmf921:
+    name: ${TMF921_NETWORK:-contextbroker-arch_default}
+    external: true

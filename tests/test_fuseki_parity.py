@@ -27,8 +27,9 @@ parity-dataset and no authentication, no volume, published on loopback port 3939
 
 Migration 002 is a store-wide update. Its test therefore stops (fails) if the store holds an
 old-shape binding or link that is not this run's, so a store holding real data is never
-migrated by this test. A run interrupted after loading its old-shape fixture leaves it behind;
-remove and recreate the throwaway container before the next run.
+migrated by this test. The old-shape fixture is removed again when the run ends or stops (only its
+own subjects, found by the run suffix); a run killed outright, with no chance to clean up, still leaves
+it behind, and then the throwaway container is removed and recreated.
 """
 import os
 import re
@@ -167,6 +168,13 @@ def load_turtle(target, tmp_path, text, name="part.ttl"):
     path = tmp_path / name
     path.write_text(text, encoding="utf-8")
     load_ttl_to_fuseki(path, target["data"], auth=("admin", DUMMY_PASSWORD))
+
+
+def remove_run_subjects(target, needle):
+    """Delete every triple whose subject IRI carries this run's suffix, and nothing else."""
+    assert re.fullmatch(r"m?[0-9a-f]{8}", needle)
+    return update(target, 'DELETE { ?s ?p ?o } WHERE { ?s ?p ?o . '
+                          f'FILTER(CONTAINS(STR(?s), "{needle}")) }}')
 
 
 def scoped_count(target, needle):
@@ -336,13 +344,19 @@ def migrated(target, sfx, tmp_path_factory):
         pytest.fail("the store holds an old-shape binding or link that is not this run's; "
                     "migration 002 is store-wide, so it is not run here (after an "
                     "interrupted run, remove and recreate the throwaway container)")
-    load_turtle(target, tmp_path, old_shape, "old-shape.ttl")
-    result = Migrated()
-    result.m = m
-    result.before = scoped_count(target, m)
-    result.response = update(target, MIGRATION.read_text())
-    result.after = scoped_count(target, m)
-    return result
+    try:
+        load_turtle(target, tmp_path, old_shape, "old-shape.ttl")
+        result = Migrated()
+        result.m = m
+        result.before = scoped_count(target, m)
+        result.response = update(target, MIGRATION.read_text())
+        result.after = scoped_count(target, m)
+        yield result
+    finally:
+        # A run that stops after the fixture is loaded (an error, a failed migration, Ctrl-C) removes the
+        # fixture's own subjects, so the next run on the same container passes the foreign-data guard.
+        # Scoped to this run's suffix: no other subject is touched (bead contextbroker-z94).
+        remove_run_subjects(target, m)
 
 
 def test_migration_002_gives_each_fixture_binding_one_goal_and_one_placement(target, migrated):

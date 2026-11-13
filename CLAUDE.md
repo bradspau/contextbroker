@@ -1,13 +1,13 @@
 # Context Broker
 
 ## Commands
-- `venv/bin/python -m pytest -q` - full suite (3391 pass, 28 skipped); live TMF921 tests need `TMF921_LIVE=1`, the real-engine parity tests need `FUSEKI_PARITY_URL`
+- `venv/bin/python -m pytest -q` - full suite (3396 pass, 28 skipped); live TMF921 tests need `TMF921_LIVE=1`, the real-engine parity tests need `FUSEKI_PARITY_URL`
 - `python -m ingestion.bind_intent <intent_id> --place <Metric>=<device>/<interface> ...` - write a `:ServiceBinding` as goal and placement fluents in one SPARQL update; on an existing binding pass `--replace` (the goal changed: close the old goal, open the new) or `--correct` (the earlier record was wrong: keep it, mark it superseded), never both; `--replace --valid-from YYYY-MM-DDTHH:MM:SSZ` says when the goal really changed. Nothing is deleted, and `--replace` on an intent whose goal changed re-pins the changed goal (the original stays as a closed goal)
 - `docker exec -i contextbroker-api python -m ingestion.syslog_ingest < file` - store syslog lines (RFC 5424 and RFC 3164) as events in the state file; reads the device names from Fuseki first and stores nothing if Fuseki cannot answer; prints one summary line (stored, duplicates, unmapped, ambiguous, quarantined per reason). No listener and no ingest route
 - `docker exec contextbroker-api python -m ingestion.promote --situation sit-... [--dry-run]` - keep what a stored events situation shows as promoted records: a conflict (repeated `link_down` events against a configured link) and a hypothesis (a link that stored neighbour-discovery lines report and the graph lacks). The only writer of the `promoted` table; reads Fuseki with SELECT only; prints one line of counts; every refusal is one fixed line with nothing written (see `design/semantic-promotion.md`)
 - `./stop_context.sh [PIDFILE]` - stop the telemetry simulator named in `telemetry.pid`; it signals only a process whose command line names `telemetry_simulator` and never touches a container (exit 1 with one fixed line otherwise)
 - `scripts/create_demo_intent.sh <ttl>` - create and activate a TMF921 demo intent (intents are never evaluated until ACTIVE)
-- `docker start fuseki victoriametrics qdrant tmf921-server` - start the demo stack; `docker compose up -d contextbroker-api` then `docker network connect contextbroker-arch_default contextbroker-api` (lost on recreate, bead contextbroker-i2q). Never `docker compose down -v` (deletes Fuseki data)
+- `docker start fuseki victoriametrics qdrant tmf921-server` - start the demo stack; `docker compose -f docker-compose.yml -f docker-compose.arch.yml up -d contextbroker-api` (the overlay joins the API to the other project's `contextbroker-arch_default` network, so a recreate keeps it; or set `COMPOSE_FILE=docker-compose.yml:docker-compose.arch.yml`; without a TMF921 server in another project, plain `docker compose up -d contextbroker-api`). Never `docker compose down -v` (deletes Fuseki data)
 - `tmf921-server` belongs to compose project `contextbroker-arch`; restart it with `docker restart tmf921-server`
 
 ## Auth and secrets

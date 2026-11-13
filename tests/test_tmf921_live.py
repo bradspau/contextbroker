@@ -87,6 +87,33 @@ def _newest(reports):
     return max(reports, key=lambda r: r["creationDate"])
 
 
+def _key(report):
+    return report.get("id") or report["creationDate"]
+
+
+def _missing(report, uri):
+    """True when the report says the probed metric still has no observation."""
+    reason = report.get("intentHandlingReason") or ""
+    return "no observation" in reason and short_name(uri) in reason
+
+
+def _await_report(client, intent_id, ready):
+    """Poll until a report satisfies `ready`, and return (all reports, the newest such report).
+
+    A higher report count is not enough (bead contextbroker-2y4): the server can list a report for an
+    earlier post, or one it has not finished, before the report for the post under test. The caller
+    names the report it waits for by its content. The report is None when none arrived in time."""
+    deadline = time.monotonic() + TIMEOUT_S
+    while True:
+        reports = client.list_reports(intent_id)
+        ready_reports = [r for r in reports if ready(r)]
+        if ready_reports:
+            return reports, _newest(ready_reports)
+        if time.monotonic() > deadline:
+            return reports, None
+        time.sleep(POLL_S)
+
+
 @pytest.mark.parametrize("probe", PROBES)
 @pytest.mark.parametrize("uri", sorted(METRIC_MAP), ids=lambda u: short_name(u))
 def test_server_and_local_operator_agree(uri, probe):
@@ -99,25 +126,28 @@ def test_server_and_local_operator_agree(uri, probe):
         bound = bounds[uri]
         stamps = {}
 
-        base_count = len(_settled_reports(client, intent_id, 1))
+        _settled_reports(client, intent_id, 1)
         others = [u for u in sorted(METRIC_MAP) if u != uri]
         for u in others:
             stamps[u] = datetime.now(timezone.utc)
             client.post_observation(intent_id, u, _compliant(METRIC_MAP[u].broker_metric),
                                     METRIC_MAP[u].unit, stamps[u])
-        before = _settled_reports(client, intent_id, base_count + len(others))
-        pre = _newest(before)
-        # Only the probed metric is missing and its bound is still the original.
-        assert pre["intentHandlingReason"].count("no observation") == 1, pre
-        assert short_name(uri) in pre["intentHandlingReason"], pre
+        # The report that follows the last compliant post: only the probed metric is missing.
+        before, pre = _await_report(
+            client, intent_id,
+            lambda r: (r.get("intentHandlingReason") or "").count("no observation") == 1
+            and _missing(r, uri))
+        assert pre is not None, f"no report with only {short_name(uri)} missing: {_newest(before)}"
         assert intent_bounds(client.get_intent(intent_id))[uri] == bound
+        seen = {_key(r) for r in before}
 
         value = _probe_value(bound, probe)
         stamps[uri] = datetime.now(timezone.utc)
         client.post_observation(intent_id, uri, value, mapping.unit, stamps[uri])
-        after = _settled_reports(client, intent_id, len(before) + 1)
-        assert len(after) > len(before), "no report after the probe post"
-        report = _newest(after)
+        # The report that carries the probe post: new since the post, and no longer missing the metric.
+        after, report = _await_report(
+            client, intent_id, lambda r: _key(r) not in seen and not _missing(r, uri))
+        assert report is not None, f"no report carries the probe post: {_newest(after)}"
         now = datetime.now(timezone.utc)
         server = interpret_report(report, now=now, observed_at=stamps).outcome
 

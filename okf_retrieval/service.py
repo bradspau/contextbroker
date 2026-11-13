@@ -147,19 +147,23 @@ class KnowledgeService:
                  token_entities: frozenset[str]) -> Retrieval:
         """The applicable bundles for a request, ranked in the index's fused order; never raises."""
         try:
-            with self._lock:
-                return self._retrieve(device, interface, purpose, topic, token_entities)
+            return self._retrieve(device, interface, purpose, topic, token_entities)
         except Exception as exc:
             log_fault(log, exc, RETRIEVAL_FAILED)
             return UNAVAILABLE
 
     def _retrieve(self, device, interface, purpose, topic, token_entities) -> Retrieval:
-        files = self._loaded()
-        latest = files.bundles.latest
-        if not latest:
-            return Retrieval("answered", (), 0, False)
+        # The lock covers the shared state only: the one-time file load, the embedder and client
+        # factories and the collection check or build (one builder, the others wait for the collection
+        # they need). The embedding and the Qdrant query run outside it, so knowledge requests overlap
+        # (bead contextbroker-7y4). The files are immutable once loaded.
+        with self._lock:
+            files = self._loaded()
+            latest = files.bundles.latest
+            if not latest:
+                return Retrieval("answered", (), 0, False)
+            index, name = self._ready_index(files)
         node_id, node_type = node_of(device, interface)
-        index, name = self._ready_index(files)
         text = topic if topic is not None else default_query(purpose, node_type)
         candidates = index.search(name, text, KNOWLEDGE_CANDIDATES)
 
