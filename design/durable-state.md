@@ -40,6 +40,12 @@ file gains it too.
 Rollback is therefore an image rollback. `user_version` moves only when an existing table changes
 shape or meaning.
 
+A situation row written by a newer image can carry a field the older image's model does not know (the
+stored models refuse unknown fields on purpose, so a record is never read with part of its meaning dropped).
+`GET /context/situation/{id}` then answers the 404 `situation not found` of an unknown id and logs one fixed
+line, `stored situation unreadable: ValidationError`, with no body and no id. Asking the same question again
+writes the row in the older image's shape. Nothing else reads the body.
+
 Decision records are not in this file. They stay in their own append-only file,
 `/data/decision-records.sqlite3` by default (`BROKER_DECISION_RECORDS_PATH`), on the same volume.
 `RecordStore(":memory:")` exists only when a caller passes it explicitly; setting the variable to

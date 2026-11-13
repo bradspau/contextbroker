@@ -36,6 +36,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 import requests
+from pydantic import ValidationError
 
 from broker_engine import context_graph
 from broker_engine.auth import SCOPE_ASSESS, Caller
@@ -53,6 +54,7 @@ from broker_engine.context_eligibility import (
     overlapping,
     topology_eligibility,
 )
+from broker_engine.faults import log_fault
 from broker_engine.sparql_resolver import FUSEKI_QUERY_ENDPOINT
 from broker_engine.telemetry_reads import read_in_order
 from broker_engine.temporal import temporal_observation
@@ -608,7 +610,8 @@ def fetch_situation(situation_id: str, caller: Caller, *, now: datetime | None =
     """A recorded situation for its original requester, or None (the route answers 404).
 
     A malformed id, an unknown id, an id past its retention and an id someone else recorded are all
-    None, so none of them can be told from another. The requester's own authority then has to cover the
+    None, so none of them can be told from another; so is a stored row that no longer validates (written
+    by another image version), logged as one fixed line. The requester's own authority then has to cover the
     stored scope (the request's three fixed strings, in the request's order), and a situation that names
     an intent needs context:assess, as the request did. It reads only the state store and writes nothing."""
     if SITUATION_ID_PATTERN.match(situation_id) is None:
@@ -617,7 +620,15 @@ def fetch_situation(situation_id: str, caller: Caller, *, now: datetime | None =
     row = get_store().get_situation(situation_id, now=now)
     if row is None:
         return None
-    stored = StoredSituation.model_validate_json(row.body)
+    try:
+        stored = StoredSituation.model_validate_json(row.body)
+    except ValidationError as exc:
+        # A row an image of another version wrote (a field added or removed) or one damaged on disk. The
+        # state policy is additive and rollback is an image rollback, so an older image meets rows it
+        # cannot read. The answer is the 404 of an unknown id, which confirms nothing; the log line is
+        # fixed text with the exception class, never the body or the id.
+        log_fault(log, exc, "stored situation unreadable")
+        return None
     if stored.situation.requester != caller.requester:
         return None  # before the authority checks, so a refusal never confirms that an id exists
     if caller.authority is None:

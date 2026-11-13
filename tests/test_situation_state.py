@@ -5,6 +5,7 @@ Fuseki stand-in and the fake VictoriaMetrics from test_context_request. Times ar
 clock read of the request handler, and the fetch reads the same patched clock.
 """
 import json
+import logging
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -358,3 +359,47 @@ def test_a_body_stored_before_the_topic_existed_still_validates():
         "expires_at": NOW.isoformat(), "expiry_basis": "configured_state",
         "evidence": {"provenance": [], "graph_nodes": []}, "verdict": None}
     assert StoredSituation.model_validate(stored).situation.topic is None
+
+
+# ---- a stored row that no longer validates (bead contextbroker-2jx) ----
+
+def _rewrite_stored_body(change):
+    """Edit the stored body of the only situation row, as another image version would have left it."""
+    import json
+    import os
+    import sqlite3
+    conn = sqlite3.connect(os.environ["BROKER_STATE_PATH"])
+    try:
+        [(sid, body)] = conn.execute("SELECT situation_id, body FROM situations").fetchall()
+        conn.execute("UPDATE situations SET body = ? WHERE situation_id = ?",
+                     (change(json.loads(body)), sid))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("change", [
+    lambda doc: json.dumps({**doc, "added_by_a_newer_image": 1}),
+    lambda doc: json.dumps({**doc, "situation": {**doc["situation"], "added": "x"}}),
+    lambda doc: json.dumps({k: v for k, v in doc.items() if k != "expiry_basis"}),
+    lambda doc: "not json at all",
+], ids=["extra top-level field", "extra nested field", "missing field", "damaged body"])
+def test_a_stored_row_that_no_longer_validates_is_the_404_of_an_unknown_id(rig, caplog, change):
+    sid = recorded(rig)["situation"]["id"]
+    _rewrite_stored_body(change)
+    with caplog.at_level(logging.WARNING):
+        r = fetch(sid)
+    assert r.status_code == 404 and r.json() == NOT_FOUND
+    assert r.json() == fetch(UNKNOWN).json()
+    lines = [rec.getMessage() for rec in caplog.records if "unreadable" in rec.getMessage()]
+    assert lines == ["stored situation unreadable: ValidationError"]
+    assert sid not in caplog.text and "added_by_a_newer_image" not in caplog.text
+
+
+def test_an_unreadable_row_does_not_stop_the_next_request_or_fetch(rig):
+    sid = recorded(rig)["situation"]["id"]
+    _rewrite_stored_body(lambda doc: json.dumps({**doc, "added_by_a_newer_image": 1}))
+    assert fetch(sid).status_code == 404
+    again = recorded(rig)  # the same question writes the row again with the current shape
+    assert again["situation"]["id"] == sid
+    assert fetch(sid).status_code == 200
