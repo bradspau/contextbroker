@@ -3,6 +3,7 @@
 Only requests.post and the TMF921 client are replaced. The stand-in proves what the update
 does when it succeeds; it cannot prove Fuseki's transaction, which the live parity test does.
 """
+import os
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -399,6 +400,22 @@ def test_a_file_that_cannot_be_written_after_the_update_says_so(tmp_path, capsys
     assert code == 1
     assert "applied to the network graph" in err and "file could not be written" in err
     assert len(fx.updates()) == 1
+
+
+def test_an_unwritable_abox_directory_is_refused_before_the_update(tmp_path, capsys):
+    abox = tmp_path / "abox"
+    abox.mkdir()
+    abox.chmod(0o555)
+    try:
+        if os.access(abox, os.W_OK):
+            pytest.skip("directory permissions are not enforced for this user")
+        code, fx = _run(tmp_path, PLACE, now=T0)
+    finally:
+        abox.chmod(0o755)
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "not writable" in err and "Nothing was written or loaded" in err
+    assert fx.updates() == []
 
 
 # ---- the credential comes only from the environment ---------------------------------------

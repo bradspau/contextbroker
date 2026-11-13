@@ -92,6 +92,8 @@ python -m ingestion.telemetry_simulator --hsi          # or --hsi-breach for lat
 # past questions add as_of ("10m") and mode ("at" or "within")
 ```
 
+`bind_intent` writes `ontologies/abox/<intent_id>.ttl` as well as the graph, so run it on the host, where that directory is writable. It refuses before sending anything when the directory is not writable (as in the API container, whose app files are read-only). In the container the data endpoint comes from `FUSEKI_DATA_ENDPOINT`.
+
 | Step | Result |
 |---|---|
 | Compliant samples, current assess | `success` |

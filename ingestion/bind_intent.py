@@ -25,6 +25,7 @@ Without --valid-from, a question asked with a knowledge time before the run abou
 time after the run is answered inconclusive (no goal in force), never with a wrong goal.
 """
 import argparse
+import os
 import re
 import sys
 import tempfile
@@ -338,6 +339,10 @@ def bind(intent_id, place_specs, *, abox_dir=DEFAULT_ABOX_DIR, write_only=False,
         out_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
         raise BindError("cannot write the binding file") from None
+    if not os.access(out_dir, os.W_OK | os.X_OK):
+        # before the update is sent: a bound intent with no file cannot be repaired by a re-run
+        raise BindError("the binding file directory is not writable (run bind_intent where "
+                        "ontologies/abox is writable, or pass --abox-dir)")
     if not write_only:
         _apply(graph, olds, closed_by, query_endpoint,
                update_endpoint or derive_update_endpoint(data_endpoint))

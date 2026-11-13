@@ -81,6 +81,7 @@ services:
       - "8080:8080"
     environment:
       - FUSEKI_QUERY_ENDPOINT=http://fuseki:3030/network-dataset/query
+      - FUSEKI_DATA_ENDPOINT=http://fuseki:3030/network-dataset/data
       - VM_QUERY_ENDPOINT=http://victoriametrics:8428/api/v1/query
       - TMF921_BASE_URL=http://tmf921-server:8000/tmf-api/intentManagement/v5
       - FUSEKI_ADMIN_PASSWORD=${FUSEKI_ADMIN_PASSWORD:?set FUSEKI_ADMIN_PASSWORD in .env}
