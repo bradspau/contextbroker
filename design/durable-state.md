@@ -46,8 +46,10 @@ stored models refuse unknown fields on purpose, so a record is never read with p
 line, `stored situation unreadable: ValidationError`, with no body and no id. Asking the same question again
 writes the row in the older image's shape. Nothing else reads the body.
 
-Decision records are not in this file. They stay in their own append-only file,
-`/data/decision-records.sqlite3` by default (`BROKER_DECISION_RECORDS_PATH`), on the same volume.
+Decision records are not in this file. The `decision_records` library keeps them in their own append-only
+file (`BROKER_DECISION_RECORDS_PATH`, `/data/decision-records.sqlite3` as the documented path). The package
+is left out of the image (`.dockerignore`) and no running service opens one, so compose does not set the
+variable and the API writes no decision record.
 `RecordStore(":memory:")` exists only when a caller passes it explicitly; setting the variable to
 `:memory:` is refused.
 
@@ -165,7 +167,7 @@ never echoes the value.
 | Variable | Default | Limits |
 |---|---|---|
 | `BROKER_STATE_PATH` | `/data/broker-state.sqlite3` | a file path; `:memory:` refused |
-| `BROKER_DECISION_RECORDS_PATH` | `/data/decision-records.sqlite3` | a file path; `:memory:` refused |
+| `BROKER_DECISION_RECORDS_PATH` | none in compose (library only; `/data/decision-records.sqlite3` as the documented path) | a file path; `:memory:` refused |
 | `BROKER_OUTCOME_CAP` | `1024` | whole number from 1 to 1000000 |
 | `BROKER_MARK_CAP` | `1024` | whole number from 1 to 1000000 |
 | `BROKER_SITUATION_CAP` | `100000` | whole number from 1 to 1000000 |

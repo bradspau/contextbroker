@@ -234,7 +234,6 @@ def test_retention_is_one_value_for_victoriametrics_and_the_api():
 
 STATE_ENV_ITEMS = [
     "BROKER_STATE_PATH=/data/broker-state.sqlite3",
-    "BROKER_DECISION_RECORDS_PATH=/data/decision-records.sqlite3",
     "BROKER_OUTCOME_CAP=${BROKER_OUTCOME_CAP:-1024}",
     "BROKER_MARK_CAP=${BROKER_MARK_CAP:-1024}",
     "BROKER_SITUATION_CAP=${BROKER_SITUATION_CAP:-100000}",
@@ -267,9 +266,10 @@ def test_state_environment_items_and_defaults():
     for item in STATE_ENV_ITEMS:
         assert api_env.count(item) == 1, item
     env = _env_as_dict(api_env)
-    for key in ("BROKER_STATE_PATH", "BROKER_DECISION_RECORDS_PATH"):
-        assert env[key].startswith("/data/"), key
-        assert "$" not in env[key], key
+    # Decision records are a library-only package left out of the image (bead contextbroker-c8g).
+    assert "BROKER_DECISION_RECORDS_PATH" not in env
+    assert env["BROKER_STATE_PATH"].startswith("/data/")
+    assert "$" not in env["BROKER_STATE_PATH"]
     for name, svc in services.items():
         if name == "contextbroker-api":
             continue

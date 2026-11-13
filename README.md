@@ -47,15 +47,15 @@ structure below by a strangler migration.
 | JSON-LD exchange profile (`Accept: application/ld+json` on `POST /context/request`) | Built, unit-tested against rdflib and a known-answer fixture pair; the native JSON stays the default (see [JSON-LD](#json-ld) and [design/exchange-profile.md](design/exchange-profile.md)) |
 | Semantic promotion (promoted conflicts and hypotheses, an operator command) | Built, unit-tested; nothing promoted is ever evidence, and one neighbour-discovery wording is unverified against a real device (see [Promoted state](#promoted-state) and [design/semantic-promotion.md](design/semantic-promotion.md)) |
 | Performance and hygiene (one reused HTTP session per upstream, parallel telemetry reads, a narrower per-intent lock, a series limit on `interfaces-nonzero`, two caches, hashed dependency locks, digest-pinned base images, a read-only LodLive proxy, `stop_context.sh`, the agent's backend line) | Built, unit-tested; the real-engine VictoriaMetrics check is skipped unless `VM_PARITY_URL` is set. The proxy holds the query-only Fuseki user and answers only the LodLive page (see [design/performance-and-hygiene.md](design/performance-and-hygiene.md)) |
-| Action-readiness check (`governance_gate`) and executor (`action_lifecycle`) | A library only. The check fails closed on evidence freshness, catalogue membership, scope and loop reservation; it does not test identity or approval. The only controller is `NullController`, so nothing is ever changed on a device. No runtime path submits a proposal. |
+| Action-readiness check (`governance_gate`) and executor (`action_lifecycle`) | A library only, kept in the repo with its tests but left out of the image (`.dockerignore`). The check fails closed on evidence freshness, catalogue membership, scope and loop reservation; it does not test identity or approval. The only controller is `NullController`, so nothing is ever changed on a device. No runtime path submits a proposal. |
 | TMF921 verification (`"source":"tmf921"`, the only source) | Built. Pushes fresh observations to the intent server, reads its reports, and maps them to a verdict. The old graph intent path was removed (see [Removed: the old graph intent path](#removed-the-old-graph-intent-path)). |
-| Outcomes, high-water marks, situation records, events and decision records | Durable. Outcomes, high-water marks, situation records, syslog events and promoted records are in one SQLite file on the `broker-state` volume; decision records are a file by default; the reservation book and the action catalogue stay in memory (see [Situation records](#situation-records) and [design/durable-state.md](design/durable-state.md)) |
+| Outcomes, high-water marks, situation records, events and decision records | Durable. Outcomes, high-water marks, situation records, syslog events and promoted records are in one SQLite file on the `broker-state` volume; decision records are a library-only file store (not in the image, no running service opens one); the reservation book and the action catalogue stay in memory (see [Situation records](#situation-records) and [design/durable-state.md](design/durable-state.md)) |
 | Syslog events (strict RFC 5424 and RFC 3164 parser, durable event store, `events` context class, recognised link events reconciled against configured links) | Built, unit-tested; lines enter through a command, there is no listener (see [Events](#events) and [design/event-store.md](design/event-store.md)) |
 | LQM, System 1 / investigation models | Stubs |
 | Governed knowledge (tracked OKF bundles in `knowledge/`, Qdrant hybrid index, `knowledge` context class, approved-action references) | Built, unit-tested; the four bundles are drafts, approval is a reviewed commit, and a response carries references only, never a body (see [Knowledge](#knowledge) and [design/knowledge.md](design/knowledge.md)). The suite uses a fake embedder: the real models and a live Qdrant were not part of the test run |
 | Redpanda, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 3365 tests passing and 28 skipped (`pytest`): 15 live TMF921 tests, skipped
+The test suite has 3368 tests passing and 28 skipped (`pytest`): 15 live TMF921 tests, skipped
 unless `TMF921_LIVE=1`, 11 real-engine Fuseki parity tests, skipped unless
 `FUSEKI_PARITY_URL` is set, and 2 real-engine VictoriaMetrics tests, skipped unless `VM_PARITY_URL` is set (see [Running the tests](#running-the-tests)). The work is on the `fullnetwork` branch
 (pushed to GitHub) and has not been reviewed by anyone else.
@@ -209,7 +209,7 @@ flowchart TB
         Onto[/"licensed TIO ontology files<br/>read-only mount, never in an image or this repo"/]
     end
 
-    subgraph NotWired["Library only, no runtime path calls it"]
+    subgraph NotWired["Library only: in the repo, not in the image, no runtime path calls it"]
         Gate["governance_gate and action_lifecycle<br/>NullController, changes nothing"]
     end
 
@@ -358,7 +358,7 @@ under [`ingestion/load_ontologies.py`](#ingestionload_ontologiespy).
    validates every TBox file and every ABox binding file against every SHACL shape file first and posts
    nothing if any violation is found (empty directories are rejected). Only
    allow-listed TBox files load (see [`ingestion/load_ontologies.py`](#ingestionload_ontologiespy)).
-5. `governance_gate` and `action_lifecycle` are a library only: no runtime path builds
+5. `governance_gate` and `action_lifecycle` are a library only, left out of the image: no runtime path builds
    or submits an `ActionProposal`. The action-readiness check fails closed on the things it tests, and the only controller is
    `NullController`, so nothing is ever changed on a device. The executor's "recheck"
    re-ages the evidence and re-checks the reservation and catalogue; it does NOT re-read
@@ -1200,8 +1200,8 @@ the API refuses to start without a usable file. When a table is full the least r
 written entry is evicted, with a log line and a count in `/health`:
 `BROKER_OUTCOME_CAP` (1024), `BROKER_MARK_CAP` (1024), `BROKER_SITUATION_CAP` (100000) and
 `BROKER_EVENT_CAP` (100000).
-Decision records go to `BROKER_DECISION_RECORDS_PATH` (default
-`/data/decision-records.sqlite3`) and are never swept. Never run `docker compose down -v`:
+The decision-record library (`decision_records`, not in the image and not used by the API) writes to
+`BROKER_DECISION_RECORDS_PATH` when a caller opens one; the API does not. Never run `docker compose down -v`:
 it deletes the `broker-state` volume. The full rules, including what happens when a mark
 write fails after a push, are in [design/durable-state.md](design/durable-state.md).
 
@@ -1520,7 +1520,7 @@ Docker required to run the suite:
 pytest tests/ -v
 ```
 
-The full suite is 3365 passed and 28 skipped (the 15 live TMF921 tests, the 11 real-engine
+The full suite is 3368 passed and 28 skipped (the 15 live TMF921 tests, the 11 real-engine
 Fuseki parity tests and the 2 real-engine VictoriaMetrics tests are skipped unless their variables are set).
 
 Every test gets its own state file and decision-record file from `tests/conftest.py`, so no test

@@ -29,3 +29,12 @@ requirements-mcp.txt
 requirements-mcp.in
 *.pem
 *.key
+# Library-only packages: no runtime path imports them (tests/test_unwired_packages.py pins that), so the
+# image does not carry them. They stay in the repository with their tests (bead contextbroker-c8g).
+governance_gate/
+action_lifecycle/
+decision_records/
+investigation_workers/
+loop_coordination/
+platform_services/
+source_federation/
