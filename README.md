@@ -55,7 +55,7 @@ structure below by a strangler migration.
 | Governed knowledge (tracked OKF bundles in `knowledge/`, Qdrant hybrid index, `knowledge` context class, approved-action references) | Built, unit-tested; the four bundles are drafts, approval is a reviewed commit, and a response carries references only, never a body (see [Knowledge](#knowledge) and [design/knowledge.md](design/knowledge.md)). The suite uses a fake embedder: the real models and a live Qdrant were not part of the test run |
 | Redpanda, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 3396 tests passing and 28 skipped (`pytest`): 15 live TMF921 tests, skipped
+The test suite has 3418 tests passing and 28 skipped (`pytest`): 15 live TMF921 tests, skipped
 unless `TMF921_LIVE=1`, 11 real-engine Fuseki parity tests, skipped unless
 `FUSEKI_PARITY_URL` is set, and 2 real-engine VictoriaMetrics tests, skipped unless `VM_PARITY_URL` is set (see [Running the tests](#running-the-tests)). The work is on the `fullnetwork` branch
 (pushed to GitHub) and has not been reviewed by anyone else.
@@ -1454,6 +1454,10 @@ into an image).
    - `--correct` means the earlier record was wrong. The old version is kept and marked
      superseded, and the corrected one carries the same valid interval, so "what did the broker
      know at K" still returns the old value for a K before the correction.
+   - `--correct --at YYYY-MM-DDTHH:MM:SSZ --goal <Metric>=<value>` (repeatable `--goal`) corrects the goal
+     that was in force at that time, even one that has closed since. The intent holds only its current goal,
+     so you name the time and the value; the TMF921 server is not asked, and `--place`, `--replace` and
+     `--valid-from` are refused with it. The closed goal is kept and marked superseded.
    - If nothing differs, the tool exits 0 with `Nothing changed: the binding already matches
      the intent.` and writes nothing.
    - A metric the binding holds that the intent no longer has is refused
@@ -1541,7 +1545,7 @@ Docker required to run the suite:
 pytest tests/ -v
 ```
 
-The full suite is 3396 passed and 28 skipped (the 15 live TMF921 tests, the 11 real-engine
+The full suite is 3418 passed and 28 skipped (the 15 live TMF921 tests, the 11 real-engine
 Fuseki parity tests and the 2 real-engine VictoriaMetrics tests are skipped unless their variables are set).
 
 Every test gets its own state file and decision-record file from `tests/conftest.py`, so no test

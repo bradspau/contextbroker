@@ -11,6 +11,7 @@ graph is not the TMF921 server's graph. The broker only reads the intent.
     python -m ingestion.bind_intent <intent_id> --place LatencyMetric=olt1/pon0
     python -m ingestion.bind_intent <intent_id> --place ... --replace [--valid-from TIME]
     python -m ingestion.bind_intent <intent_id> --place ... --correct
+    python -m ingestion.bind_intent <intent_id> --correct --at TIME --goal LatencyMetric=25
 
 --replace: the goal (or the placement) really changed. The current fluent is closed at the
 time of the run and a new one starts then; with --valid-from the new one starts at that
@@ -18,6 +19,10 @@ time and the old record is reissued so that what was known before the run is unc
 --correct: the earlier record was wrong. The old fluent is kept and marked superseded, and
 the corrected one covers the same valid time, so a question about what was known before
 the correction still gets the old value.
+--correct --at TIME --goal METRIC=VALUE: correct the goal that was in force at TIME, even one that has
+already closed. The intent carries only its current goal, so the operator names the valid time and the
+corrected value; the closed goal is kept and marked superseded, the corrected one covers the same valid
+time, and the TMF921 server is not asked. Placements are not changed by this form.
 A run that changes nothing exits 0 and writes nothing. A binding is never reduced: if the
 intent no longer has a metric the binding has, bind under a new intent id.
 
@@ -25,6 +30,7 @@ Without --valid-from, a question asked with a knowledge time before the run abou
 time after the run is answered inconclusive (no goal in force), never with a wrong goal.
 """
 import argparse
+import math
 import os
 import re
 import sys
@@ -255,7 +261,7 @@ def derive_update_endpoint(data_endpoint: str) -> str:
 def bind(intent_id, place_specs, *, abox_dir=DEFAULT_ABOX_DIR, write_only=False,
          query_endpoint=FUSEKI_QUERY_ENDPOINT, data_endpoint=DEFAULT_DATA_ENDPOINT,
          client=None, replace=False, correct=False, valid_from=None,
-         update_endpoint=None, now=None) -> tuple[Path | None, bool]:
+         update_endpoint=None, now=None, at=None, goals=()) -> tuple[Path | None, bool]:
     """Returns (path written, applied). (None, False) means nothing changed.
 
     Raises BindError before anything changes, except BindFailed, which is raised after
@@ -269,6 +275,13 @@ def bind(intent_id, place_specs, *, abox_dir=DEFAULT_ABOX_DIR, write_only=False,
         raise BindError("--replace and --correct cannot be used together")
     if valid_from is not None and (not replace or correct):
         raise BindError("--valid-from can only be used with --replace")
+    if at is not None or goals:
+        if not correct or replace or valid_from is not None or place_specs:
+            raise BindError("--at and --goal belong to --correct alone, without --place, "
+                            "--replace or --valid-from")
+        return _correct_goals_at(intent_id, goals, at, abox_dir=abox_dir, write_only=write_only,
+                                 query_endpoint=query_endpoint, data_endpoint=data_endpoint,
+                                 update_endpoint=update_endpoint, now=now)
     run_at = _ms(now or _utcnow())
     start = None
     if valid_from is not None:
@@ -320,7 +333,103 @@ def bind(intent_id, place_specs, *, abox_dir=DEFAULT_ABOX_DIR, write_only=False,
                                           correct=correct, valid_from=start)
     if len(graph) == 0:
         return None, False
+    return _validate_apply_write(intent_id, graph, olds, closed_by, abox_dir=abox_dir,
+                                 write_only=write_only, query_endpoint=query_endpoint,
+                                 data_endpoint=data_endpoint, update_endpoint=update_endpoint)
 
+
+def parse_goal(spec: str) -> tuple[str, float]:
+    """'<ShortName>=<number>' -> (short, value); the value is a finite number."""
+    short, eq, text = spec.partition("=")
+    if not eq or not short or not text:
+        raise BindError("--goal must be METRIC=VALUE")
+    try:
+        check_token(short, "metric")
+    except ValueError:
+        raise BindError("--goal names a metric that is not usable") from None
+    try:
+        value = float(text)
+    except (TypeError, ValueError, OverflowError):
+        raise BindError("--goal value is not a number") from None
+    if not math.isfinite(value) or isinstance(value, bool):
+        raise BindError("--goal value is not a number")
+    return short, value
+
+
+def plan_goal_corrections(intent_id, goals, stored, now, at):
+    """The graph of a correction at a past valid time: (graph, old fluent IRIs it supersedes, guard).
+
+    goals: metric URI -> the corrected value. For each, the one goal fluent that was in force at `at`
+    and is not superseded is kept and marked superseded, and a new fluent with the same valid interval
+    (an open one stays open, a closed one keeps its end) carries the corrected value. A value that
+    already matches changes nothing."""
+    g = Graph()
+    g.bind("", NS)
+    olds: list[str] = []
+    any_end = False
+    for uri, wanted in sorted(goals.items()):
+        in_force = [f for f in stored.get((uri, "goal"), [])
+                    if f.superseded is None and f.start <= at and (f.end is None or at < f.end)]
+        if len(in_force) != 1:
+            raise BindError(f"no single goal is in force for {short_name(uri)} at that time; "
+                            "nothing was changed")
+        old = in_force[0]
+        if old.value == wanted:
+            continue
+        if now <= old.recorded:
+            raise BindError("this run's time is not later than the stored binding; "
+                            "nothing was changed")
+        base = NS + _binding_name(intent_id, uri)
+        add_binding(g, base, intent_id, uri)
+        olds.append(old.iri)
+        supersede(g, old.iri, now)
+        add_goal(g, base, wanted, old.start, now, old.end)
+        any_end = any_end or old.end is not None
+    # A closed fluent is corrected with its end kept, so only an earlier supersession may block it.
+    closed_by = ("supersededAt",) if any_end else GUARD_BOTH
+    return g, olds, closed_by
+
+
+def _correct_goals_at(intent_id, goal_specs, at_text, *, abox_dir, write_only, query_endpoint,
+                      data_endpoint, update_endpoint, now):
+    if at_text is None or not goal_specs:
+        raise BindError("--at and --goal must be given together")
+    run_at = _ms(now or _utcnow())
+    at = _parse_valid_from(at_text)
+    if at > run_at:
+        raise BindError("--at is later than now")
+    named = {}
+    for spec in goal_specs:
+        short, value = parse_goal(spec)
+        if short in named:
+            raise BindError(f"metric {short!r} is given twice")
+        named[short] = value
+    try:
+        stored, _interfaces = fetch_fluents(intent_id, query_endpoint)
+    except ValueError:
+        raise BindError("the network graph returned an unusable answer") from None
+    if not stored:
+        raise BindError("there is no binding for this intent to correct")
+    by_short: dict[str, list[str]] = {}
+    for uri in {m for m, _kind in stored}:
+        by_short.setdefault(short_name(uri), []).append(uri)
+    goals = {}
+    for short, value in named.items():
+        uris = by_short.get(short, [])
+        if len(uris) != 1:
+            raise BindError(f"metric {short!r} is unknown or ambiguous for this binding")
+        goals[uris[0]] = value
+    graph, olds, closed_by = plan_goal_corrections(intent_id, goals, stored, run_at, at)
+    if len(graph) == 0:
+        return None, False
+    return _validate_apply_write(intent_id, graph, olds, closed_by, abox_dir=abox_dir,
+                                 write_only=write_only, query_endpoint=query_endpoint,
+                                 data_endpoint=data_endpoint, update_endpoint=update_endpoint)
+
+
+def _validate_apply_write(intent_id, graph, olds, closed_by, *, abox_dir, write_only, query_endpoint,
+                          data_endpoint, update_endpoint):
+    """Validate the graph against the shapes, send the one guarded update, then write the file."""
     shapes = sorted(Path(DEFAULT_SHACL_DIR).glob("*.ttl"))
     with tempfile.TemporaryDirectory() as tmp:
         probe = Path(tmp) / "binding.ttl"
@@ -403,6 +512,12 @@ def main(argv=None) -> int:
     ap.add_argument("--valid-from", default=None, metavar="TIME",
                     help="with --replace only: when the goal really changed, a UTC time such as "
                          "2026-11-05T10:00:00Z, not later than now")
+    ap.add_argument("--at", default=None, metavar="TIME",
+                    help="with --correct and --goal: the valid time whose goal is corrected, a UTC "
+                         "time such as 2026-11-05T10:00:00Z, not later than now; the goal in force "
+                         "then is corrected even when it has closed")
+    ap.add_argument("--goal", action="append", default=[], metavar="METRIC=VALUE",
+                    help="with --correct --at: the corrected goal of one metric (repeatable)")
     args = ap.parse_args(argv)
     try:
         fuseki_credentials()  # before any network call, including the TMF921 read
@@ -414,7 +529,7 @@ def main(argv=None) -> int:
                             write_only=args.write_only, data_endpoint=args.endpoint,
                             query_endpoint=args.query_endpoint, replace=args.replace,
                             correct=args.correct, valid_from=args.valid_from,
-                            update_endpoint=args.update_endpoint)
+                            update_endpoint=args.update_endpoint, at=args.at, goals=args.goal)
     except BindFailed as exc:
         print(f"Failed: {exc}.", file=sys.stderr)
         return 1

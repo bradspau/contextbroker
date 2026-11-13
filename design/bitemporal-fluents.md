@@ -46,6 +46,12 @@ the update text are code-formatted timestamps, validated IRIs or rdflib N-Triple
 - **`--correct`:** the earlier record was wrong. The old fluent gets a `:supersededAt` and is kept;
   a new fluent carries the same valid interval and a new `:recordedAt`. "What did the broker know
   at K" therefore still returns the old value for any K before the correction.
+- **`--correct --at T --goal METRIC=VALUE`:** the goal that was in force at T is wrong, even if it has
+  closed since. The operator names the valid time and the corrected value (the intent holds only its current
+  goal, so the TMF921 server is not asked). The goal in force at T is kept and gets a `:supersededAt`; a new
+  fluent has the same `:validStart` and `:validEnd` (an open goal stays open) and a new `:recordedAt`. Several
+  `--goal` options correct several metrics in one update. No `--place`, `--replace` or `--valid-from` with it;
+  placements are unchanged. A value equal to the stored one changes nothing.
 - **`--replace --valid-from T`:** the operator says when the goal really changed. The old fluent
   is superseded, a reissued copy of it ends at T, and the new fluent starts at T.
 - **No flag on an existing binding:** refused. **Nothing changed:** exit 0 with the message
@@ -181,8 +187,10 @@ throwaway container command.
 - Removing a metric from a binding needs a new intent id.
 - Adding a metric later makes questions about times before that addition `inconclusive` for the
   whole intent, because the broker did not record that goal then.
-- A `--correct` cannot target an already closed fluent from the command line (the intent carries
-  only the current goal); the update guard supports it.
+- A `--correct` without `--at` can target only the goal or placement that is open now (the intent carries
+  only the current goal). A goal that has already closed is corrected with `--correct --at TIME --goal
+  METRIC=VALUE`; a closed placement still cannot be corrected from the command line (bead
+  `contextbroker-46q` covered goals).
 - The demo topology file is for fresh stores only.
 - Telemetry (metric history, non-zero interfaces) takes no knowledge time; only `assess` and
   `neighbours` do.

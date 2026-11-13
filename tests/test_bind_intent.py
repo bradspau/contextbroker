@@ -570,3 +570,135 @@ def test_bind_returns_none_when_nothing_changed(tmp_path):
                             client=_client(), replace=True, now=T1)
     assert (out, applied) == (None, False)
     assert not (tmp_path / "a2").exists()
+
+
+# ---- --correct --at --goal: correct a goal that has already closed (bead contextbroker-46q) ----
+
+AT_MID = "2026-11-02T10:00:00Z"  # inside the closed goal [T0, T1)
+
+
+def _replaced(tmp_path):
+    """Goal 25 from T0, replaced by 30 at T1: the first goal is closed."""
+    fx = _first_bind(tmp_path)
+    code, fx = _run(tmp_path, [*PLACE, "--replace"], fx=fx, now=T1, intent=intent_doc({LAT: 30}))
+    assert code == 0
+    return fx
+
+
+def _goal(fx, recorded):
+    return rdflib.URIRef(fluent_iri(BIND, "goal", recorded))
+
+
+def _p(name):
+    return rdflib.URIRef(NS + name)
+
+
+def test_a_closed_goal_is_corrected_with_its_interval_kept(tmp_path):
+    fx = _replaced(tmp_path)
+    n = len(fx.updates())
+    code, fx = _run(tmp_path, ["--correct", "--at", AT_MID, "--goal", "LatencyMetric=20"], fx=fx, now=T2)
+    assert code == 0
+    assert len(fx.updates()) == n + 1
+    old, current = _goal(fx, T0), _goal(fx, T1)
+    # the closed goal is kept, marked superseded, and still says 25 for what was known before
+    assert float(fx.graph.value(old, _p("pinnedBound"))) == 25.0
+    assert fx.graph.value(old, _p("supersededAt")) is not None
+    assert fx.graph.value(old, _p("validEnd")) is not None
+    # the corrected goal has the same valid interval and a new record time
+    [new] = [s for s in fx.graph.subjects(_p("pinnedBound"), None)
+             if s not in (old, current) and (s, _p("validStart"), None) in fx.graph]
+    assert float(fx.graph.value(new, _p("pinnedBound"))) == 20.0
+    assert fx.graph.value(new, _p("validStart")) == fx.graph.value(old, _p("validStart"))
+    assert fx.graph.value(new, _p("validEnd")) == fx.graph.value(old, _p("validEnd"))
+    # the goal in force now is untouched
+    assert float(fx.graph.value(current, _p("pinnedBound"))) == 30.0
+    assert fx.graph.value(current, _p("supersededAt")) is None
+    _conforms(fx.graph, tmp_path)
+
+
+def test_the_corrected_value_is_what_the_resolver_returns_for_that_valid_time(tmp_path):
+    from broker_engine.binding_resolver import fetch_fluents
+    fx = _replaced(tmp_path)
+    _run(tmp_path, ["--correct", "--at", AT_MID, "--goal", "LatencyMetric=20"], fx=fx, now=T2)
+    with patch("requests.post", side_effect=fx.post):
+        stored, _ = fetch_fluents("intent-1", "http://fuseki.test/ds/query")
+    goals = stored[(LAT, "goal")]
+    live = [f for f in goals if f.superseded is None]
+    assert sorted((f.value, f.end is None) for f in live) == [(20.0, False), (30.0, True)]
+    assert [f.value for f in goals if f.superseded is not None] == [25.0]
+
+
+def test_the_tmf921_server_is_not_asked_for_a_correction_at_a_past_time(tmp_path):
+    fx = _replaced(tmp_path)
+    client = _client()
+    with patch.object(bind_intent, "Tmf921Client", return_value=client), \
+            patch("requests.post", side_effect=fx.post), \
+            patch.object(bind_intent, "_utcnow", return_value=T2):
+        assert main(["intent-1", "--abox-dir", str(tmp_path / "abox"), "--correct",
+                     "--at", AT_MID, "--goal", "LatencyMetric=20"]) == 0
+    client.get_intent.assert_not_called()
+
+
+def test_the_open_goal_can_be_corrected_at_a_time_it_was_in_force(tmp_path):
+    fx = _replaced(tmp_path)
+    code, fx = _run(tmp_path, ["--correct", "--at", "2026-11-03T12:00:00Z", "--goal", "LatencyMetric=28"],
+                    fx=fx, now=T2)
+    assert code == 0
+    current = _goal(fx, T1)
+    assert fx.graph.value(current, _p("supersededAt")) is not None
+    [new] = [s for s in fx.graph.subjects(_p("pinnedBound"), None)
+             if float(fx.graph.value(s, _p("pinnedBound"))) == 28.0]
+    assert fx.graph.value(new, _p("validEnd")) is None  # still open
+
+
+def test_a_correction_to_the_same_value_changes_nothing(tmp_path, capsys):
+    fx = _replaced(tmp_path)
+    n, before = len(fx.updates()), set(fx.graph)
+    code, fx = _run(tmp_path, ["--correct", "--at", AT_MID, "--goal", "LatencyMetric=25"], fx=fx, now=T2)
+    assert code == 0 and len(fx.updates()) == n and set(fx.graph) == before
+
+
+@pytest.mark.parametrize("args", [
+    ["--correct", "--at", AT_MID],                                         # no goal
+    ["--correct", "--goal", "LatencyMetric=20"],                           # no time
+    ["--at", AT_MID, "--goal", "LatencyMetric=20"],                        # not a correction
+    ["--correct", "--at", AT_MID, "--goal", "LatencyMetric=20", *PLACE],   # placements are not changed
+    ["--replace", "--at", AT_MID, "--goal", "LatencyMetric=20"],
+    ["--correct", "--at", AT_MID, "--goal", "LatencyMetric=20", "--valid-from", AT_MID],
+    ["--correct", "--at", "2026-12-01T10:00:00Z", "--goal", "LatencyMetric=20"],   # later than now
+    ["--correct", "--at", "2026-10-01T10:00:00Z", "--goal", "LatencyMetric=20"],   # before any goal
+    ["--correct", "--at", "yesterday", "--goal", "LatencyMetric=20"],
+    ["--correct", "--at", AT_MID, "--goal", "NoSuchMetric=20"],
+    ["--correct", "--at", AT_MID, "--goal", "LatencyMetric=abc"],
+    ["--correct", "--at", AT_MID, "--goal", "LatencyMetric=nan"],
+    ["--correct", "--at", AT_MID, "--goal", "LatencyMetric"],
+    ["--correct", "--at", AT_MID, "--goal", "LatencyMetric=20", "--goal", "LatencyMetric=21"],
+])
+def test_a_malformed_or_impossible_correction_is_refused_and_changes_nothing(tmp_path, args):
+    fx = _replaced(tmp_path)
+    _refused(tmp_path, args, fx=fx, now=T2)
+
+
+def test_a_correction_with_no_binding_is_refused(tmp_path):
+    fx = fuseki()
+    code, fx = _run(tmp_path, ["--correct", "--at", AT_MID, "--goal", "LatencyMetric=20"], fx=fx, now=T1)
+    assert code == 1 and fx.updates() == []
+
+
+def test_a_goal_already_superseded_at_that_time_is_corrected_from_the_one_still_standing(tmp_path):
+    fx = _replaced(tmp_path)
+    code, fx = _run(tmp_path, ["--correct", "--at", AT_MID, "--goal", "LatencyMetric=20"], fx=fx, now=T2)
+    assert code == 0
+    later = T2 + HOUR
+    code, fx = _run(tmp_path, ["--correct", "--at", AT_MID, "--goal", "LatencyMetric=18"], fx=fx, now=later)
+    assert code == 0
+    values = sorted(float(fx.graph.value(s, _p("pinnedBound"))) for s in
+                    fx.graph.subjects(_p("supersededAt"), None) if (s, _p("pinnedBound"), None) in fx.graph)
+    assert values == [20.0, 25.0]  # both earlier records kept, marked superseded
+
+
+def test_the_help_lists_the_new_flags_for_a_correction(capsys):
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    text = capsys.readouterr().out
+    assert "--at TIME" in text and "--goal METRIC=VALUE" in text
