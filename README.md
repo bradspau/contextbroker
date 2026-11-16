@@ -55,7 +55,7 @@ structure below by a strangler migration.
 | Governed knowledge (tracked OKF bundles in `knowledge/`, Qdrant hybrid index, `knowledge` context class, approved-action references) | Built, unit-tested; the four bundles are drafts, approval is a reviewed commit, and a response carries references only, never a body (see [Knowledge](#knowledge) and [design/knowledge.md](design/knowledge.md)). The suite uses a fake embedder: the real models and a live Qdrant were not part of the test run |
 | Redpanda, OPA/Rego, Temporal, Nornir, OpenDaylight | Not built (spec candidates only) |
 
-The test suite has 3418 tests passing and 28 skipped (`pytest`): 15 live TMF921 tests, skipped
+The test suite has 3432 tests passing and 28 skipped (`pytest`): 15 live TMF921 tests, skipped
 unless `TMF921_LIVE=1`, 11 real-engine Fuseki parity tests, skipped unless
 `FUSEKI_PARITY_URL` is set, and 2 real-engine VictoriaMetrics tests, skipped unless `VM_PARITY_URL` is set (see [Running the tests](#running-the-tests)). The work is on the `fullnetwork` branch
 (pushed to GitHub) and has not been reviewed by anyone else.
@@ -135,9 +135,9 @@ python -m ingestion.telemetry_simulator --hsi          # or --hsi-breach for lat
   for the same metric.
 - Every current-moment `tmf921` assess (no `as_of`, no `mode`) writes observations
   to the intent server. This is the default, so a request with no `source` does it
-  too. `POST /context/assess` therefore needs the `context:assess` scope, and port
-  8080 is still published on all interfaces: keep it behind your own network controls
-  as well as the bearer token.
+  too. `POST /context/assess` therefore needs the `context:assess` scope. Port 8080
+  is published on the loopback address only (`API_BIND` in `.env` changes it; the API
+  speaks plain HTTP, so put TLS in front before publishing it wider).
 - Outcomes and high-water marks are durable (a restart no longer lets a stale observation be pushed again); per-intent locks are in-process, so run one API worker.
 - Observations pushed by other clients are invisible to the broker.
 
@@ -635,8 +635,9 @@ header.
 - VictoriaMetrics (`127.0.0.1:8428`), Qdrant (`127.0.0.1:6333`), Fuseki (`127.0.0.1:3030`) and
   lodlive-proxy (`127.0.0.1:8081`) are published on loopback only. The host-side telemetry simulator still
   reaches VictoriaMetrics there.
-- The API on `8080` is published on all interfaces and sits behind the bearer-token
-  check below.
+- The API on `8080` and LodLive on `8888` are published on `127.0.0.1` only (plain HTTP would carry the
+  bearer token in the clear). `API_BIND` and `LODLIVE_BIND` in `.env` change that; put TLS in front first.
+  A container on another compose network reaches the API by name, not through the host port.
 - The API image runs as uid 10001, not root, and excludes `.beads/`, `.planning/`,
   `scripts/`, `design/`, `knowledge/` (compose mounts it read-only instead) and key files
   (`*.pem`, `*.key`). The two embedding models are downloaded at image build, pinned by commit, and the
@@ -703,7 +704,9 @@ contract with `curl -H "Authorization: Bearer $TOKEN" localhost:8080/openapi.jso
   signature and reads the claim.
 - There is no revocation list. Revoke by short expiry or by rotating the key pair.
 - The API holds only the public key. With no key or issuer configured it still starts,
-  `/health` answers, and every `/context/*` call is `401`.
+  `/health` answers, and every `/context/*` call is `401`. The same is true when the configured key is
+  not a public key the broker accepts: a private key, a certificate, an RSA key under 2048 bits or an EC
+  key that is not P-256 gives one fixed error line in the log and a `401` on every route.
 
 Generate an EC P-256 key pair into a directory outside the repository, private key mode 600:
 
@@ -1545,7 +1548,7 @@ Docker required to run the suite:
 pytest tests/ -v
 ```
 
-The full suite is 3418 passed and 28 skipped (the 15 live TMF921 tests, the 11 real-engine
+The full suite is 3432 passed and 28 skipped (the 15 live TMF921 tests, the 11 real-engine
 Fuseki parity tests and the 2 real-engine VictoriaMetrics tests are skipped unless their variables are set).
 
 Every test gets its own state file and decision-record file from `tests/conftest.py`, so no test

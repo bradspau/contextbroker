@@ -501,7 +501,10 @@ def handle(body: ContextRequest, caller: Caller, *, now: datetime | None = None,
             known_at=times.known_at, retrieved_at=now, allowed=covers, priority=frozenset(priority),
             query_endpoint=query_endpoint)
         graph = read.graph
-        if "connected_to" in body.relationship_types:
+        if "connected_to" in body.relationship_types and "events" in authority.classes:
+            # A hypothesis is derived from stored events (its support names event ids, whether each still
+            # exists, and the earliest event time), so a token without the events class gets none of it:
+            # no edge, no support and no withheld count (contextbroker-9c0).
             # Promoted hypotheses sit beside the configured edges, never among them. The eligibility below
             # is computed from `read` exactly as before and the graph's nodes, edges and limits are untouched.
             edges, hypotheses_truncated, hypotheses_withheld = _hypotheses(

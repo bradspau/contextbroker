@@ -110,7 +110,7 @@ def hyp(monkeypatch):
 
 
 def ask_topology(headers=None, body=None):
-    r = post(body or TOPOLOGY, headers=headers or token())
+    r = post(body or TOPOLOGY, headers=headers or events_headers())
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -156,7 +156,7 @@ def test_a_hypothesis_is_a_separate_inferred_edge_with_its_support_and_changes_n
 
 def test_a_hypothesis_with_an_end_outside_the_callers_entities_is_only_counted(hyp):
     promote_hypotheses(hypothesis())
-    narrow = {**WIDE, "entities": ["Router-A", "Router-B"]}
+    narrow = {**WIDE, "entities": ["Router-A", "Router-B"], "classes": ["topology", "events"]}
     r = post(TOPOLOGY, headers=token(narrow))
     out = r.json()
     assert r.status_code == 200
@@ -401,3 +401,17 @@ def test_a_hypothesis_row_with_a_body_that_does_not_match_its_devices_is_skipped
     assert [r.getMessage() for r in caplog.records if "promoted record" in r.getMessage()] == [
         "promoted record unreadable"]
     assert "Router-D" not in caplog.text
+
+
+def test_a_token_without_the_events_class_gets_no_hypothesis_and_no_count(hyp):
+    # contextbroker-9c0: a hypothesis is derived from stored events, so its edge, its support (event ids,
+    # present or evicted, the earliest event time) and the withheld count all need the events class.
+    promote_hypotheses(hypothesis())
+    for entities in (["*"], ["Router-A", "Router-B"]):
+        r = post(TOPOLOGY, headers=token({**WIDE, "entities": entities, "classes": ["topology"]}))
+        out = r.json()
+        assert r.status_code == 200
+        assert out["graph"]["hypotheses"] == []
+        assert out["graph"]["hypotheses_withheld"] == 0 and out["graph"]["hypotheses_truncated"] is False
+        assert "prm-" not in r.text and "evt-" not in r.text
+    assert ask_topology()["graph"]["hypotheses"] != []  # the same store, with the events class

@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import jwt
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -39,6 +41,7 @@ CLAIM_AUTHORITY = "authority"
 AUTHORITY_KEYS = ("entities", "purposes", "classes")  # scripts/mint_token.py keeps a copy (tests pin it)
 MAX_REQUESTER_LENGTH = 128
 MAX_ENTITY_LENGTH = 128  # scripts/mint_token.py keeps a copy (tests pin it)
+MIN_RSA_BITS = 2048  # scripts/mint_token.py signs with no weaker key
 
 ENV_KEY_FILE = "BROKER_JWT_PUBLIC_KEY_FILE"
 ENV_KEY = "BROKER_JWT_PUBLIC_KEY"
@@ -92,6 +95,30 @@ def _read_key_file(path: str) -> bytes | None:
     return data
 
 
+_key_ok: dict[bytes, bool] = {}
+
+
+def _usable_public_key(pem: bytes) -> bool:
+    """True only for a PEM public key the broker may verify with: an RSA key of at least 2048 bits or an
+    EC P-256 key. A private key, a certificate, a weaker key or anything unreadable is refused, so every
+    /context/ call is then 401 and the log says so once per key. Never raises; the log has no key text."""
+    known = _key_ok.get(pem)
+    if known is not None:
+        return known
+    try:
+        key = serialization.load_pem_public_key(pem)
+        ok = ((isinstance(key, rsa.RSAPublicKey) and key.key_size >= MIN_RSA_BITS)
+              or (isinstance(key, ec.EllipticCurvePublicKey) and isinstance(key.curve, ec.SECP256R1)))
+    except Exception:  # a private key, a certificate or text raises here; nothing of it is kept
+        ok = False
+    if not ok:
+        log.error("verification key refused: not an RSA (2048 bits or more) or EC P-256 public key")
+    if len(_key_ok) > 8:
+        _key_ok.clear()
+    _key_ok[pem] = ok
+    return ok
+
+
 def load_auth_config() -> AuthConfig | None:
     """The verification settings from the environment, or None when not configured.
 
@@ -110,6 +137,8 @@ def load_auth_config() -> AuthConfig | None:
     except (OSError, ValueError, UnicodeError):
         return None
     if not key or not key.strip() or not issuer:
+        return None
+    if not _usable_public_key(key):
         return None
     return AuthConfig(public_key=key, issuer=issuer, audience=audience)
 

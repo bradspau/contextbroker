@@ -86,7 +86,7 @@ def test_docker_compose_defines_contextbroker_api():
     services = yaml.safe_load(COMPOSE_PATH.read_text())["services"]
     api = services["contextbroker-api"]
 
-    assert "8080:8080" in api["ports"]
+    assert "${API_BIND:-127.0.0.1}:8080:8080" in api["ports"]
     env = _env_as_dict(api["environment"])
     assert env["FUSEKI_QUERY_ENDPOINT"] == "http://fuseki:3030/network-dataset/query"
     assert env["VM_QUERY_ENDPOINT"] == "http://victoriametrics:8428/api/v1/query"
@@ -122,7 +122,7 @@ def test_no_service_publishes_8428_on_a_host_interface():
 
 def test_api_port_unchanged():
     services = yaml.safe_load(COMPOSE_PATH.read_text())["services"]
-    assert services["contextbroker-api"]["ports"] == ["8080:8080"]
+    assert services["contextbroker-api"]["ports"] == ["${API_BIND:-127.0.0.1}:8080:8080"]
 
 
 def test_fuseki_launches_with_authentication_enforced():
@@ -194,7 +194,7 @@ def test_api_jwt_configuration():
 
     # the API container gets the public key only: no private key anywhere in compose
     assert "private" not in repr(api).lower()
-    assert api["ports"] == ["8080:8080"]
+    assert api["ports"] == ["${API_BIND:-127.0.0.1}:8080:8080"]
 
 
 def test_api_healthcheck_uses_health_route():
@@ -418,3 +418,13 @@ def test_the_base_file_stays_self_contained_without_the_external_network():
     base = yaml.safe_load(COMPOSE_PATH.read_text())
     assert "networks" not in base
     assert all("networks" not in svc for svc in base["services"].values())
+
+
+def test_the_api_and_lodlive_publish_on_loopback_unless_the_operator_says_otherwise():
+    # contextbroker-e23: plain HTTP carries bearer tokens, so the default is the loopback address.
+    services = yaml.safe_load(COMPOSE_PATH.read_text())["services"]
+    assert services["contextbroker-api"]["ports"] == ["${API_BIND:-127.0.0.1}:8080:8080"]
+    assert services["lodlive"]["ports"] == ["${LODLIVE_BIND:-127.0.0.1}:8888:80"]
+    for name, svc in services.items():
+        for port in svc.get("ports", []):
+            assert ":" in str(port) and not str(port).startswith(("0.0.0.0", "8")), (name, port)

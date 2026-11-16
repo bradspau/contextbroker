@@ -390,6 +390,10 @@ def _assess_locked(intent_id, plan, binding, client, now, poll_interval_s, poll_
     if not ok:
         reasons, changes = _goal_changes(doc, binding)
         return done(Outcome.INCONCLUSIVE, reasons, status="unknown", changes=changes)
+    life = doc.get("lifecycleStatus") if isinstance(doc, dict) else None
+    if life != "ACTIVE":  # nothing is pushed to an intent that is not active; server text is not echoed
+        known_life = life if life in ("ACKNOWLEDGED", "SUSPENDED", "TERMINATED") else "unknown"
+        return done(Outcome.INCONCLUSIVE, ["intent not active"], envs=all_envs, status=known_life)
 
     # Freshness re-check: pure. An observation that was fresh when read may have gone stale
     # while this assess waited for the lock; stale evidence is never pushed.

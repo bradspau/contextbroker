@@ -204,7 +204,11 @@ are fixed, and they add fields beside the existing ones.
   valid instant and, when `known_at` is given, promoted at or before it. They are returned even when the
   window holds no event. The sentence is rebuilt from two closed vocabularies; a stored text is never
   echoed.
-- **Hypotheses**, for a topology request that follows `connected_to`: the promoted hypotheses with at least
+- **Hypotheses**, for a topology request that follows `connected_to` **and whose token carries the
+  `events` class** (a hypothesis rests on stored events: its support names event ids, whether each still
+  exists and the earliest event time, so a token without the class gets no edge, no support and no
+  `hypotheses_withheld` count; the count for a token that does hold the class follows the
+  `candidates_withheld` precedent): the promoted hypotheses with at least
   one end on a node the graph returned. A hypothesis is returned only when **both** ends are on devices
   the caller's entities cover; one that is not is counted in `hypotheses_withheld` and never named. A
   hypothesis whose pair is already a configured `connected_to` edge of the graph is hidden (computed at

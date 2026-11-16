@@ -117,7 +117,7 @@ def test_broker_has_no_bindings_file_and_no_ontology_mount():
     assert not any("intent_bindings" in v or "ontolog" in v.lower() or "TIO" in v
                    for v in vols)
     assert not (ROOT / "data_contracts" / "intent_bindings.json").exists()
-    assert svc["ports"] == ["8080:8080"]
+    assert svc["ports"] == ["${API_BIND:-127.0.0.1}:8080:8080"]
 
 
 def _run(dir_path):

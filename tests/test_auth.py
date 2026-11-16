@@ -525,3 +525,45 @@ def test_the_audience_defaults_to_the_mcp_server_name(monkeypatch):
 def test_the_issuer_has_no_default(monkeypatch):
     monkeypatch.delenv("BROKER_JWT_ISSUER", raising=False)
     assert auth.load_auth_config() is None
+
+
+# --- the verification key must be a strong public key (contextbroker-tdc) ---
+
+def _weak_rsa_public_pem() -> bytes:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    return rsa.generate_private_key(public_exponent=65537, key_size=1024).public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+
+
+def _p384_public_pem() -> bytes:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    return ec.generate_private_key(ec.SECP384R1()).public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+
+
+@pytest.mark.parametrize("name,pem", [
+    ("ec_private", lambda: __import__("tests.auth_helpers", fromlist=["x"]).EC_PRIVATE_PEM),
+    ("rsa_private", lambda: __import__("tests.auth_helpers", fromlist=["x"]).RSA_PRIVATE_PEM),
+    ("rsa_1024", _weak_rsa_public_pem),
+    ("ec_p384", _p384_public_pem),
+    ("text", lambda: b"not a key at all"),
+])
+def test_a_key_that_is_not_a_strong_public_key_refuses_every_route(name, pem, monkeypatch, caplog, no_upstream):
+    from broker_engine import auth
+    auth._key_ok.clear()
+    monkeypatch.setenv("BROKER_JWT_PUBLIC_KEY", pem().decode())
+    with caplog.at_level("ERROR"):
+        r = client.get("/context/metric", params=METRIC, headers=auth_headers("context:read"))
+    _assert_denied(r)
+    assert "verification key refused" in caplog.text
+    assert "PRIVATE" not in caplog.text and "not a key" not in caplog.text
+
+
+def test_the_strong_public_keys_still_verify(monkeypatch, handlers):
+    from broker_engine import auth
+    auth._key_ok.clear()
+    for pem in (EC_PUBLIC_PEM, RSA_PUBLIC_PEM):
+        monkeypatch.setenv("BROKER_JWT_PUBLIC_KEY", pem.decode())
+        assert auth.load_auth_config() is not None

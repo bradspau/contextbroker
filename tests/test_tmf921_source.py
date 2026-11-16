@@ -30,7 +30,8 @@ def ttl(uri, val):
 
 
 def intent(*pairs):
-    return {"expression": {"expressionValue": "\n".join(ttl(u, v) for u, v in pairs)}}
+    return {"lifecycleStatus": "ACTIVE",
+            "expression": {"expressionValue": "\n".join(ttl(u, v) for u, v in pairs)}}
 
 
 def rep(rid, date, state="Fulfilled", reason=None):
@@ -1003,3 +1004,23 @@ def test_a_held_intent_lock_is_shared_with_the_next_caller():
     first = src._intent_lock("x")
     assert src._intent_lock("x") is first
     assert len(src._INTENT_LOCKS) == 1
+
+
+# ---------- the push path checks the intent lifecycle (contextbroker-c3o) ----------
+@pytest.mark.parametrize("life,shown", [
+    ("ACKNOWLEDGED", "ACKNOWLEDGED"), ("SUSPENDED", "SUSPENDED"), ("TERMINATED", "TERMINATED"),
+    (None, "unknown"), ("evil <script> http://leak", "unknown")])
+def test_an_intent_that_is_not_active_is_never_pushed_to(life, shown):
+    c = FakeClient(intent_doc={**intent((URI, 100)), "lifecycleStatus": life},
+                   post=[[rep("n", "2026-10-27T12:00:01Z")]])
+    out = run(c)
+    assert out["verdict"] == "inconclusive" and out["reasons"] == ["intent not active"]
+    assert out["intent_status"] == shown
+    assert c.posts == []
+    assert "leak" not in repr(out)
+
+
+def test_an_active_intent_is_pushed_to_and_reported_active():
+    c = FakeClient(post=[[rep("n", "2026-10-27T12:00:01Z")]])
+    out = run(c)
+    assert out["verdict"] == "success" and out["intent_status"] == "active" and len(c.posts) == 1

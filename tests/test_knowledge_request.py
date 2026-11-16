@@ -15,7 +15,8 @@ from okf_retrieval.service import KnowledgeService, set_service
 from tests.fluent_helpers import IF0, LAT, T0, bind
 from tests.okf_helpers import FakeEmbedder, closed_client, local_client, write_bundle, write_catalogue
 from tests.test_context_request import (  # noqa: F401
-    ASK, BOTH, NOW, OLT_PON0, SCOPES, TOPOLOGY, client, live_goal, olt, post, rig, sample, token)
+    ASK, BOTH, NOW, OLT_PON0, SCOPES, TOPOLOGY, client, live_goal, olt, post, rig, sample, token,
+    _store_clock)  # the autouse store clock: NOW-dated events never age against the real date
 from tests.test_knowledge_bundles import KNOWLEDGE_ROOT
 
 WIDE = {"entities": ["*"], "purposes": ["diagnosis"], "classes": ["knowledge"]}

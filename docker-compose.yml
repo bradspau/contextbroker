@@ -59,7 +59,7 @@ services:
       context: https://github.com/LodLive/LodLive.git#327fcbbc4e03400ea5bdc5661fbb022c40bae28a
     container_name: lodlive
     ports:
-      - "8888:80"
+      - "${LODLIVE_BIND:-127.0.0.1}:8888:80"
     volumes:
       - ./lodlive/lodlive.profile.js:/usr/share/nginx/html/js/lodlive.profile.js:ro
     depends_on:
@@ -85,7 +85,9 @@ services:
     build: .
     container_name: contextbroker-api
     ports:
-      - "8080:8080"
+      # Loopback by default: the API speaks plain HTTP, so a bearer token must not cross a network.
+      # API_BIND=0.0.0.0 (or a host address) publishes it wider; put TLS in front first.
+      - "${API_BIND:-127.0.0.1}:8080:8080"
     environment:
       - FUSEKI_QUERY_ENDPOINT=http://fuseki:3030/network-dataset/query
       - FUSEKI_DATA_ENDPOINT=http://fuseki:3030/network-dataset/data
